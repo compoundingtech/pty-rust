@@ -25,8 +25,8 @@ fn keep_alive(script: &str) -> String {
 fn echo_output_appears_in_screenshot() {
     let mut s = Session::spawn("sh", &["-c", &keep_alive("echo hello-world")], opts(24, 80))
         .expect("spawn");
-    let ss = s.wait_for_text("hello-world", 5000).expect("wait");
-    assert!(ss.text.contains("hello-world"));
+    // wait_for_text already asserts the content appears (it errors on timeout).
+    s.wait_for_text("hello-world", 5000).expect("wait");
     s.close();
 }
 
@@ -39,8 +39,8 @@ fn ls_shows_filenames() {
 
     let script = format!("ls {}", dir.display());
     let mut s = Session::spawn("sh", &["-c", &keep_alive(&script)], opts(24, 80)).expect("spawn");
+    // wait_for_text covers "alpha.txt"; assert the other two entries too.
     let ss = s.wait_for_text("alpha.txt", 5000).expect("wait");
-    assert!(ss.text.contains("alpha.txt"), "screen:\n{}", ss.text);
     assert!(ss.text.contains("beta.log"), "screen:\n{}", ss.text);
     assert!(ss.text.contains("gamma"), "screen:\n{}", ss.text);
     s.close();
@@ -131,8 +131,7 @@ fn bash_accepts_input_and_echoes() {
     let mut s = Session::spawn("bash", &["--norc", "--noprofile"], opts(24, 80)).expect("spawn");
     s.wait_for_text("$", 8000).expect("prompt");
     s.type_str("echo hello-bash\r");
-    let ss = s.wait_for_text("hello-bash", 8000).expect("output");
-    assert!(ss.text.contains("hello-bash"));
+    s.wait_for_text("hello-bash", 8000).expect("output");
     let _ = s.press("ctrl+d");
     s.close();
 }
@@ -147,8 +146,7 @@ fn ctrl_c_interrupts_a_running_program() {
     // Give the sleep a moment to start, then interrupt.
     std::thread::sleep(std::time::Duration::from_millis(300));
     s.press("ctrl+c").expect("ctrl+c");
-    let ss = s.wait_for_text("DONE", 8000).expect("interrupted");
-    assert!(ss.text.contains("DONE"));
+    s.wait_for_text("DONE", 8000).expect("interrupted");
     let _ = s.press("ctrl+d");
     s.close();
 }
@@ -162,8 +160,7 @@ fn resize_propagates_to_the_pty() {
     assert_eq!(s.cols(), 100);
     // The child sees the new size via SIGWINCH; `stty size` prints "rows cols".
     s.type_str("stty size\r");
-    let ss = s.wait_for_text("40 100", 8000).expect("stty size");
-    assert!(ss.text.contains("40 100"), "screen:\n{}", ss.text);
+    s.wait_for_text("40 100", 8000).expect("stty size");
     let _ = s.press("ctrl+d");
     s.close();
 }

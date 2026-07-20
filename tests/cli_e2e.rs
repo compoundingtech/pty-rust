@@ -24,7 +24,8 @@ fn unique_root() -> PathBuf {
     dir
 }
 
-/// Run a `pty` subcommand with the given registry root; return stdout (trimmed).
+/// Run a `pty` subcommand with the given registry root; return
+/// `(stdout, stderr, exit_code)`, all trimmed.
 fn run_pty(root: &PathBuf, args: &[&str]) -> (String, String, i32) {
     let out = Command::new(pty_bin())
         .args(args)
@@ -36,6 +37,13 @@ fn run_pty(root: &PathBuf, args: &[&str]) -> (String, String, i32) {
         String::from_utf8_lossy(&out.stderr).trim().to_string(),
         out.status.code().unwrap_or(-1),
     )
+}
+
+/// Run a `pty` subcommand and assert it exited 0; return stdout (trimmed).
+fn ok_pty(root: &PathBuf, args: &[&str]) -> String {
+    let (out, err, code) = run_pty(root, args);
+    assert_eq!(code, 0, "`pty {}` exited {code}: {err}", args.join(" "));
+    out
 }
 
 #[test]
@@ -50,7 +58,7 @@ fn run_ls_peek_send_kill_lifecycle() {
     assert!(!name.is_empty(), "run printed no session name");
 
     // ls shows it running.
-    let (ls, _e, _c) = run_pty(&root, &["ls"]);
+    let ls = ok_pty(&root, &["ls"]);
     assert!(ls.contains(&name), "ls missing session:\n{ls}");
     assert!(ls.contains("running"), "session not running:\n{ls}");
 
@@ -58,7 +66,7 @@ fn run_ls_peek_send_kill_lifecycle() {
     let mut prompt_seen = false;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        let (screen, _e, _c) = run_pty(&root, &["peek", "--plain", &name]);
+        let screen = ok_pty(&root, &["peek", "--plain", &name]);
         if screen.contains('$') {
             prompt_seen = true;
             break;
@@ -77,7 +85,7 @@ fn run_ls_peek_send_kill_lifecycle() {
     let mut output_seen = false;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        let (screen, _e, _c) = run_pty(&root, &["peek", "--plain", &name]);
+        let screen = ok_pty(&root, &["peek", "--plain", &name]);
         // The standalone output line, not just the echoed command.
         if screen.lines().any(|l| l.trim() == "hello-e2e") {
             output_seen = true;
@@ -88,14 +96,14 @@ fn run_ls_peek_send_kill_lifecycle() {
     assert!(output_seen, "never saw command output via peek");
 
     // status returns JSON with the name.
-    let (status, _e, _c) = run_pty(&root, &["status", &name]);
+    let status = ok_pty(&root, &["status", &name]);
     assert!(status.contains(&name), "status missing name:\n{status}");
 
     // kill tears it down.
     let (_o, _e, code) = run_pty(&root, &["kill", &name]);
     assert_eq!(code, 0);
     std::thread::sleep(Duration::from_millis(300));
-    let (ls2, _e, _c) = run_pty(&root, &["ls"]);
+    let ls2 = ok_pty(&root, &["ls"]);
     assert!(
         !ls2.contains(&name) || ls2.contains("exited") || ls2.contains("No sessions"),
         "session still running after kill:\n{ls2}"
@@ -124,7 +132,7 @@ fn up_and_down_from_a_manifest() {
     let mut running = false;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        let (ls, _e, _c) = run_pty(&root, &["ls"]);
+        let ls = ok_pty(&root, &["ls"]);
         if ls.contains("echoer") && ls.contains("running") {
             running = true;
             break;
@@ -137,7 +145,7 @@ fn up_and_down_from_a_manifest() {
     let (_o, _e, code) = run_pty(&root, &["down", &work_str]);
     assert_eq!(code, 0);
     std::thread::sleep(Duration::from_millis(400));
-    let (ls, _e, _c) = run_pty(&root, &["ls"]);
+    let ls = ok_pty(&root, &["ls"]);
     assert!(
         !ls.contains("echoer") || ls.contains("No sessions"),
         "session still running after down:\n{ls}"
@@ -180,7 +188,7 @@ fn restart_rename_rm() {
     // rename sets a display label that resolves as a lookup key.
     let (_o, _e, code) = run_pty(&root, &["rename", "svc", "My Service"]);
     assert_eq!(code, 0);
-    let (peek, _e, _c) = run_pty(&root, &["peek", "--plain", "My Service"]);
+    let peek = ok_pty(&root, &["peek", "--plain", "My Service"]);
     assert!(peek.contains("pid-"), "rename lookup failed:\n{peek}");
 
     // restart respawns with a new pid.
@@ -193,7 +201,7 @@ fn restart_rename_rm() {
     let (_o, _e, code) = run_pty(&root, &["rm", "svc"]);
     assert_eq!(code, 0);
     std::thread::sleep(Duration::from_millis(300));
-    let (ls, _e, _c) = run_pty(&root, &["ls"]);
+    let ls = ok_pty(&root, &["ls"]);
     assert!(
         !ls.contains("svc") || ls.contains("No sessions"),
         "session remained after rm:\n{ls}"
@@ -230,8 +238,8 @@ fn attach_is_interactive_and_detaches() {
     // The attach replays the screen (bash prompt) and streams live output.
     s.wait_for_text("$", 8000).expect("attached prompt");
     s.type_str("echo attached-works\r");
-    let ss = s.wait_for_text("attached-works", 8000).expect("live output");
-    assert!(ss.text.contains("attached-works"), "screen:\n{}", ss.text);
+    // wait_for_text asserts the live output appeared (errors on timeout).
+    s.wait_for_text("attached-works", 8000).expect("live output");
 
     // Ctrl-] (0x1d) detaches without killing the session.
     s.type_str("\x1d");
@@ -239,7 +247,7 @@ fn attach_is_interactive_and_detaches() {
     s.close();
 
     // The session must still be alive after detach.
-    let (ls, _e, _c) = run_pty(&root, &["ls"]);
+    let ls = ok_pty(&root, &["ls"]);
     assert!(
         ls.contains(&name) && ls.contains("running"),
         "session should survive detach:\n{ls}"

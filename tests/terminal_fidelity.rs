@@ -91,8 +91,8 @@ fn carriage_return_overwrites_in_place() {
     let script = "printf '50%%\\r100%%\\n'";
     let mut s = Session::spawn("sh", &["-c", &format!("{script}; sleep 30")], opts(24, 80))
         .expect("spawn");
+    // wait_for_text covers "100%"; the point is that "50%" was overwritten.
     let ss = s.wait_for_text("100%", 5000).expect("wait");
-    assert!(ss.text.contains("100%"), "screen:\n{}", ss.text);
     assert!(
         !ss.text.contains("50%"),
         "50%% should have been overwritten:\n{}",
