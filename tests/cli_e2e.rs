@@ -274,6 +274,70 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn post_exit_peek_returns_final_screen() {
+    // Parity #1: after a session exits, `peek --plain` still returns its final
+    // screen (node retains it); rust previously failed with ENOENT.
+    let _serial = serial();
+    let root = unique_root();
+    let (name, _e, code) = run_pty(
+        &root,
+        &["run", "--id", "px", "--", "sh", "-c", "echo FINAL-OUTPUT-LINE; exit 7"],
+    );
+    assert_eq!(code, 0, "run failed: {_e}");
+    assert_eq!(name, "px");
+
+    // Wait for the session to exit (ls shows exited:7).
+    let mut exited = false;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        let (ls, _e, _c) = run_pty(&root, &["ls"]);
+        if ls.contains("exited:7") {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(exited, "session never recorded exit:7");
+
+    // peek --plain must succeed AND contain the final output (not ENOENT).
+    let (screen, err, code) = run_pty(&root, &["peek", "--plain", "px"]);
+    assert_eq!(code, 0, "post-exit peek failed: {err}");
+    assert!(
+        screen.contains("FINAL-OUTPUT-LINE"),
+        "post-exit peek missing final screen:\n{screen}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn run_force_creates_nested_session() {
+    // Parity #4: `run --force` is accepted (not treated as the command) and
+    // creates a real session even from inside a pty session (PTY_SESSION set).
+    let _serial = serial();
+    let root = unique_root();
+
+    // --force alone (no -d) from inside a session must create a session.
+    let out = Command::new(pty_bin())
+        .args(["run", "--force", "--id", "fc", "--", "cat"])
+        .env("PTY_ROOT", &root)
+        .env("PTY_SESSION", "fake-parent")
+        .output()
+        .expect("spawn pty");
+    assert_eq!(out.status.code(), Some(0), "run --force failed");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fc");
+
+    let ls = ok_pty(&root, &["ls"]);
+    assert!(
+        ls.contains("fc") && ls.contains("running"),
+        "run --force did not create a running session:\n{ls}"
+    );
+
+    let _ = run_pty(&root, &["kill", "fc"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn attach_double_tap_ctrl_backslash_sends_literal_not_detach() {
     let _serial = serial();
     let root = unique_root();

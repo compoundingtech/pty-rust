@@ -60,6 +60,7 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut rows = 24u16;
     let mut cols = 80u16;
     let mut background = false;
+    let mut force = false;
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -84,11 +85,17 @@ fn cmd_run(args: &[String]) -> i32 {
                 cols = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(80);
                 i += 2;
             }
-            "-d" => {
+            "-d" | "--detach" => {
                 background = true;
                 i += 1;
             }
-            "-a" | "-e" | "--no-display-name" => {
+            "--force" => {
+                // Node accepts --force to create even from inside a pty session
+                // (bypass the nesting guard). Accept it and bypass exec-directly.
+                force = true;
+                i += 1;
+            }
+            "-a" | "--attach" | "-e" | "--ephemeral" | "--isolate-env" | "--no-display-name" => {
                 // Accepted for CLI compatibility (attach/ephemeral/no-label).
                 i += 1;
             }
@@ -111,8 +118,12 @@ fn cmd_run(args: &[String]) -> i32 {
 
     // Nesting prevention: running `pty run` from inside a pty session would
     // create a session-inside-a-session. Detect it via PTY_SESSION and just run
-    // the command directly, unless `-d` explicitly asks for a background session.
-    if !background && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false) {
+    // the command directly, unless `-d` (background) or `--force` explicitly
+    // asks for a real nested session — matching node's contract.
+    if !background
+        && !force
+        && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false)
+    {
         let (program, pargs) = command.split_first().unwrap();
         let mut c = std::process::Command::new(program);
         c.args(pargs);
@@ -189,7 +200,16 @@ fn spawn_session_daemon(
 
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(15) {
+        // Ready if the socket is connectable...
         if client::is_alive(name) {
+            return Ok(());
+        }
+        // ...or the session already ran and exited (a fast-exiting command's
+        // socket can appear and vanish before we observe it). The daemon
+        // records exit_code in metadata on exit, so this confirms it ran.
+        if let Some(meta) = registry::read_metadata(name)
+            && meta.exit_code.is_some()
+        {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(30));
@@ -432,27 +452,46 @@ fn cmd_send(args: &[String]) -> i32 {
             }
         };
     }
-    // --seq mode: ordered sequence, each value literal or `key:<name>`.
+    // --seq mode: ordered sequence, each value literal or `key:<name>`. Each
+    // item is delivered as a separate write with a paced gap between items
+    // (node's default 300ms; override with --with-delay <sec>; 0 = stream).
     if rest.iter().any(|a| a == "--seq") {
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < rest.len() {
-            if rest[i] == "--seq" {
-                if let Some(v) = rest.get(i + 1) {
-                    match parse_seq_value(v) {
-                        Ok(bytes) => out.extend_from_slice(bytes.as_bytes()),
-                        Err(e) => {
-                            eprintln!("pty send: {e}");
-                            return 2;
-                        }
+        // Pull out --with-delay first so its position doesn't matter.
+        let mut delay_secs: Option<f64> = None;
+        for w in rest.windows(2) {
+            if w[0] == "--with-delay" {
+                match w[1].parse::<f64>() {
+                    Ok(v) if v >= 0.0 => delay_secs = Some(v),
+                    _ => {
+                        eprintln!("pty send: --with-delay requires a non-negative number (seconds).");
+                        return 2;
                     }
                 }
-                i += 2;
-            } else {
-                i += 1;
             }
         }
-        return match client::send(&name, &out) {
+        // Collect the ordered --seq items (skipping the --with-delay pair).
+        let mut items: Vec<Vec<u8>> = Vec::new();
+        let mut i = 0;
+        while i < rest.len() {
+            match rest[i].as_str() {
+                "--seq" => {
+                    if let Some(v) = rest.get(i + 1) {
+                        match parse_seq_value(v) {
+                            Ok(bytes) => items.push(bytes.into_bytes()),
+                            Err(e) => {
+                                eprintln!("pty send: {e}");
+                                return 2;
+                            }
+                        }
+                    }
+                    i += 2;
+                }
+                "--with-delay" => i += 2,
+                _ => i += 1,
+            }
+        }
+        let delay = client::resolve_seq_delay_ms(delay_secs);
+        return match client::send_seq(&name, &items, delay) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("pty send: {e}");
@@ -775,7 +814,8 @@ fn print_help() {
          \x20 pty run [--id X] [--name X] [--cwd D] [--rows R] [--cols C] -- <cmd...>\n\
          \x20 pty ls [--json]\n\
          \x20 pty peek [--plain] [--full] [-f] [--wait TEXT [-t SECS]] <ref>\n\
-         \x20 pty send <ref> <text> | --seq <value> ...\n\
+         \x20 pty send <ref> <text> | [--with-delay <sec>] --seq <value> ...\n\
+         \x20                             (--seq gap defaults to 0.3s; --with-delay 0 = stream)\n\
          \x20 pty attach <ref>            (Ctrl+\\ to detach; twice sends it to the child)\n\
          \x20 pty up [dir] [names...]     (start sessions from pty.toml)\n\
          \x20 pty down [dir] [names...]   (stop them)\n\

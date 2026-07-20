@@ -17,9 +17,20 @@ pub fn connect(name: &str) -> std::io::Result<UnixStream> {
 }
 
 /// Peek: request the current screen and return it as a string (plain text or
-/// full ANSI). One-shot.
+/// full ANSI). One-shot. If the session has exited (no live socket), falls back
+/// to the persisted final screen — parity with node, which keeps an exited
+/// session's last screen peekable.
 pub fn peek(name: &str, plain: bool, full: bool) -> std::io::Result<String> {
-    let mut stream = connect(name)?;
+    let mut stream = match connect(name) {
+        Ok(s) => s,
+        Err(e) => {
+            // Socket gone — if the session exited, return its persisted screen.
+            if let Some(fs) = registry::read_final_screen(name) {
+                return Ok(if plain { fs.plain } else { fs.ansi });
+            }
+            return Err(e);
+        }
+    };
     stream.write_all(&encode_peek(plain, full))?;
     stream.flush()?;
     // Read until we get a SCREEN packet (or EOF).
@@ -108,6 +119,39 @@ pub fn send(name: &str, data: &[u8]) -> std::io::Result<()> {
     let mut stream = connect(name)?;
     stream.write_all(&encode_data(data))?;
     stream.flush()?;
+    // Give the daemon a moment to consume before we close.
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(())
+}
+
+/// Default gap between `--seq` items (node's `DEFAULT_SEQ_DELAY_MS`). The gap
+/// exists so a trailing `key:return` fired with zero delay doesn't land before
+/// the program has parsed the typed text.
+pub const DEFAULT_SEQ_DELAY_MS: u64 = 300;
+
+/// Resolve the `--seq` inter-item delay in ms, matching node's
+/// `resolveSeqDelayMs`: `None` → 300 (default); `Some(0)` → 0 (straight stream);
+/// `Some(n)` → `n * 1000`.
+pub fn resolve_seq_delay_ms(delay_secs: Option<f64>) -> u64 {
+    match delay_secs {
+        None => DEFAULT_SEQ_DELAY_MS,
+        Some(n) => (n * 1000.0) as u64,
+    }
+}
+
+/// Send an ordered sequence of items over one connection, sleeping `delay_ms`
+/// BETWEEN items (not before the first, not after the last) — matching node's
+/// `send --seq` pacing.
+pub fn send_seq(name: &str, items: &[Vec<u8>], delay_ms: u64) -> std::io::Result<()> {
+    let mut stream = connect(name)?;
+    let last = items.len().saturating_sub(1);
+    for (idx, item) in items.iter().enumerate() {
+        stream.write_all(&encode_data(item))?;
+        stream.flush()?;
+        if idx != last && delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+    }
     // Give the daemon a moment to consume before we close.
     std::thread::sleep(Duration::from_millis(50));
     Ok(())

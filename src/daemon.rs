@@ -270,6 +270,15 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                     .rev()
                     .cloned()
                     .collect();
+                // Persist the final screen so `peek` still works after the
+                // daemon/socket is gone (parity with node).
+                let _ = registry::write_final_screen(
+                    &cfg.name,
+                    &registry::FinalScreen {
+                        plain: ss.text.clone(),
+                        ansi: ss.ansi.clone(),
+                    },
+                );
                 if let Some(mut m) = registry::read_metadata(&cfg.name) {
                     m.exit_code = Some(code);
                     m.exited_at = Some(now_iso8601());

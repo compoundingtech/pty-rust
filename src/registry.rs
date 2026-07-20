@@ -76,6 +76,33 @@ pub fn metadata_path(name: &str) -> PathBuf {
     session_dir().join(format!("{name}.json"))
 }
 
+/// Path to a session's persisted final-screen sidecar (`<name>.screen`), written
+/// on exit so `peek` still works after the daemon/socket is gone (parity with
+/// node, which retains the exited session's final screen).
+pub fn screen_path(name: &str) -> PathBuf {
+    session_dir().join(format!("{name}.screen"))
+}
+
+/// The persisted final screen of an exited session: plain text and ANSI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalScreen {
+    pub plain: String,
+    pub ansi: String,
+}
+
+/// Persist the final screen for post-exit `peek`.
+pub fn write_final_screen(name: &str, screen: &FinalScreen) -> io::Result<()> {
+    let json = serde_json::to_string(screen)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    std::fs::write(screen_path(name), json)
+}
+
+/// Read the persisted final screen, if any.
+pub fn read_final_screen(name: &str) -> Option<FinalScreen> {
+    let data = std::fs::read_to_string(screen_path(name)).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
 /// Write session metadata atomically (write to a temp file, then rename).
 pub fn write_metadata(name: &str, meta: &SessionMetadata) -> io::Result<()> {
     ensure_session_dir()?;
@@ -155,7 +182,12 @@ pub fn list_sessions() -> Vec<SessionInfo> {
 
 /// Remove all on-disk files for a session.
 pub fn cleanup(name: &str) {
-    for p in [socket_path(name), pid_path(name), metadata_path(name)] {
+    for p in [
+        socket_path(name),
+        pid_path(name),
+        metadata_path(name),
+        screen_path(name),
+    ] {
         let _ = std::fs::remove_file(p);
     }
     let dir = session_dir();

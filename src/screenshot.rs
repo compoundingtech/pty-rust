@@ -37,15 +37,18 @@ fn format(term: &Terminal, opts: FormatterOptions) -> String {
 pub fn capture(term: &Terminal) -> Screenshot {
     // Plain grid text, one row per '\n'. We do the trimming ourselves so the
     // result matches xterm's `translateToString(true)` + trailing-empty pop.
+    // libghostty's Plain format already keeps written cells (including trailing
+    // written spaces, e.g. a bash prompt's "$ ") and drops never-written
+    // trailing cells — exactly like xterm's `translateToString(true)` that node
+    // uses. So we do NOT right-trim per line (that would strip the written
+    // cursor-cell space and diverge from node); we only pop trailing blank rows,
+    // matching node's `while (lines[last] === "") lines.pop()`.
     let plain = format(
         term,
         FormatterOptions::new().with_format(Format::Plain),
     );
 
-    let mut lines: Vec<String> = plain
-        .split('\n')
-        .map(|l| l.trim_end().to_string())
-        .collect();
+    let mut lines: Vec<String> = plain.split('\n').map(|l| l.to_string()).collect();
 
     while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
         lines.pop();
