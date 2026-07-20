@@ -5,32 +5,36 @@
 
 use std::io::{self, Read};
 
-/// Message types (byte tag on the wire).
+/// Message types (byte tag on the wire). Unknown bytes are preserved as
+/// [`MessageType::Unknown`] so a peer's newer message types pass through the
+/// framing unharmed (matching the TS reader, which keeps the numeric type).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum MessageType {
     /// Terminal data (bidirectional).
-    Data = 0,
+    Data,
     /// Client → Server: attaching with terminal size.
-    Attach = 1,
+    Attach,
     /// Client → Server: detaching.
-    Detach = 2,
+    Detach,
     /// Client → Server: terminal resized.
-    Resize = 3,
+    Resize,
     /// Server → Client: process exited.
-    Exit = 4,
+    Exit,
     /// Server → Client: screen buffer replay on attach.
-    Screen = 5,
+    Screen,
     /// Client → Server: read-only attach (no input, no resize).
-    Peek = 6,
+    Peek,
     /// Bidirectional: request/response for JSON stats.
-    Status = 7,
+    Status,
+    /// An unrecognized wire byte, preserved verbatim.
+    Unknown(u8),
 }
 
 impl MessageType {
-    /// Convert a raw wire byte to a message type.
-    pub fn from_u8(b: u8) -> Option<MessageType> {
-        Some(match b {
+    /// Convert a raw wire byte to a message type (total — unknown bytes become
+    /// [`MessageType::Unknown`]).
+    pub fn from_u8(b: u8) -> MessageType {
+        match b {
             0 => MessageType::Data,
             1 => MessageType::Attach,
             2 => MessageType::Detach,
@@ -39,8 +43,23 @@ impl MessageType {
             5 => MessageType::Screen,
             6 => MessageType::Peek,
             7 => MessageType::Status,
-            _ => return None,
-        })
+            other => MessageType::Unknown(other),
+        }
+    }
+
+    /// The wire byte for this message type.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            MessageType::Data => 0,
+            MessageType::Attach => 1,
+            MessageType::Detach => 2,
+            MessageType::Resize => 3,
+            MessageType::Exit => 4,
+            MessageType::Screen => 5,
+            MessageType::Peek => 6,
+            MessageType::Status => 7,
+            MessageType::Unknown(b) => b,
+        }
     }
 }
 
@@ -64,7 +83,7 @@ pub const ATTACH_FLAG_GEOMETRY_NEUTRAL: u8 = 0x01;
 pub fn encode_packet(type_: MessageType, payload: &[u8]) -> Vec<u8> {
     let len = payload.len() as u32;
     let mut out = Vec::with_capacity(HEADER_SIZE + payload.len());
-    out.push(type_ as u8);
+    out.push(type_.as_u8());
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(payload);
     out
@@ -200,10 +219,11 @@ impl PacketReader {
                 break;
             }
             let payload = self.buffer[HEADER_SIZE..HEADER_SIZE + length].to_vec();
-            // Unknown types are surfaced as-is only if valid; else skip framing.
-            if let Some(type_) = MessageType::from_u8(type_byte) {
-                packets.push(Packet { type_, payload });
-            }
+            // Unknown types are preserved (Unknown(byte)), matching the TS reader.
+            packets.push(Packet {
+                type_: MessageType::from_u8(type_byte),
+                payload,
+            });
             self.buffer.drain(..HEADER_SIZE + length);
         }
         Ok(packets)
@@ -228,11 +248,8 @@ pub fn read_packet<R: Read>(reader: &mut R) -> io::Result<Option<Packet>> {
     }
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload)?;
-    match MessageType::from_u8(type_byte) {
-        Some(type_) => Ok(Some(Packet { type_, payload })),
-        None => Ok(Some(Packet {
-            type_: MessageType::Data,
-            payload,
-        })),
-    }
+    Ok(Some(Packet {
+        type_: MessageType::from_u8(type_byte),
+        payload,
+    }))
 }
