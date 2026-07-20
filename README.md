@@ -120,7 +120,7 @@ thereafter.
 cargo test
 ```
 
-155 tests pass:
+156 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -137,7 +137,7 @@ cargo test
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach / follow / nesting | 6 | **libghostty** |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach (Ctrl+\\ detach + double-tap) / follow / nesting | 7 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
