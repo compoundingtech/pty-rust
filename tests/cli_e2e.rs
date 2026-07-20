@@ -105,6 +105,49 @@ fn run_ls_peek_send_kill_lifecycle() {
 }
 
 #[test]
+fn up_and_down_from_a_manifest() {
+    let root = unique_root();
+    let work = unique_root();
+    std::fs::write(
+        work.join("pty.toml"),
+        "[sessions.echoer]\ncommand = \"cat\"\n\n[sessions.echoer.env]\nGREETING = \"hi-from-env\"\n",
+    )
+    .unwrap();
+    let work_str = work.to_string_lossy().to_string();
+
+    // up starts the session.
+    let (up, _e, code) = run_pty(&root, &["up", &work_str]);
+    assert_eq!(code, 0, "up failed: {_e}");
+    assert!(up.contains("echoer"), "up output:\n{up}");
+
+    // It shows up in ls as running (on-disk name == the short name).
+    let mut running = false;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        let (ls, _e, _c) = run_pty(&root, &["ls"]);
+        if ls.contains("echoer") && ls.contains("running") {
+            running = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(running, "manifest session not running after up");
+
+    // down stops it.
+    let (_o, _e, code) = run_pty(&root, &["down", &work_str]);
+    assert_eq!(code, 0);
+    std::thread::sleep(Duration::from_millis(400));
+    let (ls, _e, _c) = run_pty(&root, &["ls"]);
+    assert!(
+        !ls.contains("echoer") || ls.contains("No sessions"),
+        "session still running after down:\n{ls}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
 fn attach_is_interactive_and_detaches() {
     let root = unique_root();
     let root_str = root.to_string_lossy().to_string();

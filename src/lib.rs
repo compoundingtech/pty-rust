@@ -18,6 +18,7 @@ pub mod duration;
 pub mod input;
 pub mod keys;
 pub mod protocol;
+pub mod ptyfile;
 pub mod queries;
 pub mod registry;
 pub mod screenshot;

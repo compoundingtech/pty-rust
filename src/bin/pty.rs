@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use pty_testkit::daemon::{self, DaemonConfig};
 use pty_testkit::keys::parse_seq_value;
+use pty_testkit::ptyfile::{self, command_with_env_exports, PtySessionDef};
 use pty_testkit::registry;
 use pty_testkit::client;
 
@@ -28,6 +29,8 @@ fn main() {
         "peek" => cmd_peek(rest),
         "send" => cmd_send(rest),
         "attach" | "a" => cmd_attach(rest),
+        "up" => cmd_up(rest),
+        "down" => cmd_down(rest),
         "kill" => cmd_kill(rest),
         "status" | "stats" => cmd_status(rest),
         "version" | "--version" | "-v" | "-V" => {
@@ -110,28 +113,42 @@ fn cmd_run(args: &[String]) -> i32 {
 
     let cwd = cwd.unwrap_or_else(|| daemon::default_cwd().to_string_lossy().into_owned());
 
-    // Spawn the daemon detached (its own session, stdio to /dev/null).
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("pty run: cannot find own executable: {e}");
-            return 1;
+    match spawn_session_daemon(&name, &command, &cwd, rows, cols, display_name.as_deref()) {
+        Ok(()) => {
+            println!("{name}");
+            0
         }
-    };
+        Err(msg) => {
+            eprintln!("pty run: {msg}");
+            1
+        }
+    }
+}
+
+/// Spawn a detached session daemon and wait for its socket to come up.
+fn spawn_session_daemon(
+    name: &str,
+    command: &[String],
+    cwd: &str,
+    rows: u16,
+    cols: u16,
+    display_name: Option<&str>,
+) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
     let mut dcmd = std::process::Command::new(exe);
     dcmd.arg("__daemon")
         .arg("--name")
-        .arg(&name)
+        .arg(name)
         .arg("--rows")
         .arg(rows.to_string())
         .arg("--cols")
         .arg(cols.to_string())
         .arg("--cwd")
-        .arg(&cwd);
-    if let Some(dn) = &display_name {
+        .arg(cwd);
+    if let Some(dn) = display_name {
         dcmd.arg("--display-name").arg(dn);
     }
-    dcmd.arg("--").args(&command);
+    dcmd.arg("--").args(command);
     dcmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -143,22 +160,16 @@ fn cmd_run(args: &[String]) -> i32 {
             Ok(())
         });
     }
-    if let Err(e) = dcmd.spawn() {
-        eprintln!("pty run: failed to start daemon: {e}");
-        return 1;
-    }
+    dcmd.spawn().map_err(|e| format!("failed to start daemon: {e}"))?;
 
-    // Wait for the daemon to come up (socket connectable).
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        if client::is_alive(&name) {
-            println!("{name}");
-            return 0;
+        if client::is_alive(name) {
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(30));
     }
-    eprintln!("pty run: daemon did not come up in time");
-    1
+    Err("daemon did not come up in time".into())
 }
 
 /// Internal: `pty __daemon --name N --rows R --cols C --cwd D [--display-name X] -- <cmd...>`
@@ -417,6 +428,130 @@ fn cmd_attach(args: &[String]) -> i32 {
     }
 }
 
+/// The on-disk session name for a manifest entry: its pinned `id`, else the
+/// short name from the toml key.
+fn manifest_session_name(sess: &PtySessionDef) -> String {
+    sess.id.clone().unwrap_or_else(|| sess.short_name.clone())
+}
+
+/// Split `up`/`down` args into an optional manifest dir and session filters.
+fn split_dir_and_filters(args: &[String]) -> (Option<String>, Vec<String>) {
+    if let Some(first) = args.first() {
+        if std::path::Path::new(first).is_dir() {
+            return (Some(first.clone()), args[1..].to_vec());
+        }
+    }
+    (None, args.to_vec())
+}
+
+fn matches_filter(sess: &PtySessionDef, filters: &[String]) -> bool {
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|f| *f == sess.short_name || *f == sess.display_name)
+}
+
+/// `pty up [dir] [names...]` — start sessions declared in a `pty.toml`.
+fn cmd_up(args: &[String]) -> i32 {
+    let (dir, filters) = split_dir_and_filters(args);
+    let file = match ptyfile::read_pty_file(dir.as_deref().map(std::path::Path::new)) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("pty up: {e}");
+            return 1;
+        }
+    };
+    let mut started = 0;
+    let mut failed = 0;
+    for sess in &file.sessions {
+        if !matches_filter(sess, &filters) {
+            continue;
+        }
+        let name = manifest_session_name(sess);
+        if let Err(e) = registry::validate_name(&name) {
+            eprintln!("pty up: {name}: {e}");
+            failed += 1;
+            continue;
+        }
+        if client::is_alive(&name) {
+            println!("{name} already running");
+            continue;
+        }
+        let script = command_with_env_exports(sess);
+        let command = vec!["sh".to_string(), "-c".to_string(), script];
+        let cwd = sess
+            .cwd
+            .clone()
+            .unwrap_or_else(|| file.dir.to_string_lossy().into_owned());
+        match spawn_session_daemon(&name, &command, &cwd, 24, 80, Some(&sess.display_name)) {
+            Ok(()) => {
+                println!("started {name} ({})", sess.display_name);
+                started += 1;
+            }
+            Err(e) => {
+                eprintln!("pty up: {name}: {e}");
+                failed += 1;
+            }
+        }
+    }
+    if started == 0 && failed == 0 {
+        println!("no matching sessions to start");
+    }
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// `pty down [dir] [names...]` — stop sessions declared in a `pty.toml`.
+fn cmd_down(args: &[String]) -> i32 {
+    let (dir, filters) = split_dir_and_filters(args);
+    let file = match ptyfile::read_pty_file(dir.as_deref().map(std::path::Path::new)) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("pty down: {e}");
+            return 1;
+        }
+    };
+    let mut stopped = 0;
+    for sess in &file.sessions {
+        if !matches_filter(sess, &filters) {
+            continue;
+        }
+        let name = manifest_session_name(sess);
+        if !client::is_alive(&name) && !registry::session_exists(&name) {
+            continue;
+        }
+        kill_session(&name);
+        println!("stopped {name}");
+        stopped += 1;
+    }
+    if stopped == 0 {
+        println!("no matching sessions to stop");
+    }
+    0
+}
+
+/// SIGTERM (then SIGKILL) a session's process and clean up if the daemon didn't.
+fn kill_session(name: &str) {
+    if let Some(pid) = registry::read_pid(name) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        if registry::pid_alive(pid) {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    if !client::is_alive(name) {
+        registry::cleanup(name);
+    }
+}
+
 /// `pty kill <ref>`
 fn cmd_kill(args: &[String]) -> i32 {
     let reference = match args.first() {
@@ -433,24 +568,7 @@ fn cmd_kill(args: &[String]) -> i32 {
             return 1;
         }
     };
-    if let Some(pid) = registry::read_pid(&name) {
-        // SIGTERM the session process; the daemon observes exit and cleans up.
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
-        }
-        // Give it a moment; then SIGKILL if still alive.
-        std::thread::sleep(Duration::from_millis(300));
-        if registry::pid_alive(pid) {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-        }
-    }
-    // Best-effort registry cleanup if the daemon didn't get to it.
-    std::thread::sleep(Duration::from_millis(200));
-    if !client::is_alive(&name) {
-        registry::cleanup(&name);
-    }
+    kill_session(&name);
     println!("killed {name}");
     0
 }
@@ -493,6 +611,8 @@ fn print_help() {
          \x20 pty peek [--plain] [--full] [--wait TEXT [-t SECS]] <ref>\n\
          \x20 pty send <ref> <text> | --seq <value> ...\n\
          \x20 pty attach <ref>            (Ctrl-] to detach)\n\
+         \x20 pty up [dir] [names...]     (start sessions from pty.toml)\n\
+         \x20 pty down [dir] [names...]   (stop them)\n\
          \x20 pty kill <ref>\n\
          \x20 pty status <ref>\n\
          \x20 pty version"
