@@ -12,10 +12,14 @@
 //! It also ports several of the pty project's pure-logic modules
 //! ([`keys`], [`duration`]) so their test suites can run unchanged against Rust.
 
+pub mod client;
+pub mod daemon;
 pub mod duration;
 pub mod input;
 pub mod keys;
+pub mod protocol;
 pub mod queries;
+pub mod registry;
 pub mod screenshot;
 pub mod session;
 
