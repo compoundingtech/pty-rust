@@ -231,6 +231,49 @@ fn restart_rename_rm() {
 }
 
 #[test]
+fn peek_follow_streams_live_output() {
+    let _serial = serial();
+    let root = unique_root();
+    let root_str = root.to_string_lossy().to_string();
+
+    // A session that emits a few lines, then stays alive.
+    let (name, _e, code) = run_pty(
+        &root,
+        &[
+            "run",
+            "--id",
+            "fol",
+            "--",
+            "sh",
+            "-c",
+            "for i in 1 2 3; do echo streamed-$i; sleep 0.3; done; sleep 30",
+        ],
+    );
+    assert_eq!(code, 0, "run failed: {_e}");
+    assert_eq!(name, "fol");
+
+    // Drive `pty peek -f` (read-only follow) through the harness; it should
+    // stream the session's live output to its own stdout.
+    let mut s = Session::spawn(
+        pty_bin(),
+        &["peek", "-f", "fol"],
+        SpawnOptions {
+            rows: Some(24),
+            cols: Some(80),
+            env: vec![("PTY_ROOT".to_string(), root_str)],
+            ..Default::default()
+        },
+    )
+    .expect("spawn pty peek -f");
+
+    s.wait_for_text("streamed-3", 8000).expect("followed live output");
+    s.close();
+
+    let _ = run_pty(&root, &["kill", "fol"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn nesting_prevention_runs_directly_inside_a_session() {
     let _serial = serial();
     let root = unique_root();

@@ -66,6 +66,43 @@ pub fn peek_wait(name: &str, needle: &str, timeout: Duration) -> std::io::Result
     }
 }
 
+/// Follow a session read-only: replay the current screen, then stream live
+/// output to stdout until the process exits or the caller interrupts (Ctrl-C).
+/// Attaches geometry-neutral so following never resizes the shared PTY, and
+/// never forwards stdin. Returns the exit code if the session ended.
+pub fn follow(name: &str) -> std::io::Result<Option<i32>> {
+    let stream = connect(name)?;
+    let (rows, cols) = terminal_size();
+    {
+        let mut w = stream.try_clone()?;
+        w.write_all(&encode_attach(rows, cols, true))?;
+        w.flush()?;
+    }
+    let mut stream = stream;
+    let mut parser = PacketReader::new();
+    let mut buf = [0u8; 8192];
+    let mut out = std::io::stdout();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                for p in parser.feed(&buf[..n]).unwrap_or_default() {
+                    match p.type_ {
+                        MessageType::Data | MessageType::Screen => {
+                            out.write_all(&p.payload)?;
+                            out.flush()?;
+                        }
+                        MessageType::Exit => return Ok(Some(decode_exit(&p.payload))),
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
 /// Send raw bytes as terminal input to the session.
 pub fn send(name: &str, data: &[u8]) -> std::io::Result<()> {
     let mut stream = connect(name)?;

@@ -306,6 +306,7 @@ fn cmd_ls(args: &[String]) -> i32 {
 fn cmd_peek(args: &[String]) -> i32 {
     let mut plain = false;
     let mut full = false;
+    let mut follow = false;
     let mut wait: Option<String> = None;
     let mut timeout = 5u64;
     let mut reference: Option<String> = None;
@@ -316,8 +317,12 @@ fn cmd_peek(args: &[String]) -> i32 {
                 plain = true;
                 i += 1;
             }
-            "--full" | "-f" => {
+            "--full" => {
                 full = true;
+                i += 1;
+            }
+            "--follow" | "-f" => {
+                follow = true;
                 i += 1;
             }
             "--wait" => {
@@ -341,6 +346,22 @@ fn cmd_peek(args: &[String]) -> i32 {
             return 1;
         }
     };
+    if follow {
+        return match client::follow(&name) {
+            Ok(Some(code)) => {
+                if code < 0 {
+                    0
+                } else {
+                    code
+                }
+            }
+            Ok(None) => 0,
+            Err(e) => {
+                eprintln!("pty peek: {e}");
+                1
+            }
+        };
+    }
     if let Some(needle) = wait {
         match client::peek_wait(&name, &needle, Duration::from_secs(timeout)) {
             Ok(Some(screen)) => {
@@ -754,7 +775,7 @@ fn print_help() {
          USAGE:\n\
          \x20 pty run [--id X] [--name X] [--cwd D] [--rows R] [--cols C] -- <cmd...>\n\
          \x20 pty ls [--json]\n\
-         \x20 pty peek [--plain] [--full] [--wait TEXT [-t SECS]] <ref>\n\
+         \x20 pty peek [--plain] [--full] [-f] [--wait TEXT [-t SECS]] <ref>\n\
          \x20 pty send <ref> <text> | --seq <value> ...\n\
          \x20 pty attach <ref>            (Ctrl-] to detach)\n\
          \x20 pty up [dir] [names...]     (start sessions from pty.toml)\n\

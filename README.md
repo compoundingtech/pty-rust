@@ -28,6 +28,7 @@ $PTY run -- bash --norc --noprofile           # spawn a persistent session -> pr
 $PTY ls                                        # list sessions (--json for JSON)
 $PTY peek <id>                                 # print the current screen (ANSI)
 $PTY peek --plain <id>                         # ... as plain text
+$PTY peek -f <id>                              # follow output live (read-only; Ctrl-C to stop)
 $PTY peek --wait "Ready" -t 10 <id>            # wait until text appears
 $PTY send <id> --seq "echo hi" --seq key:return   # send an ordered key sequence
 $PTY send <id> "literal text"                  # or literal text (no newline)
@@ -119,7 +120,7 @@ thereafter.
 cargo test
 ```
 
-154 tests pass:
+155 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -136,7 +137,7 @@ cargo test
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach / nesting | 5 | **libghostty** |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach / follow / nesting | 6 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
