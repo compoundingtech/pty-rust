@@ -148,6 +148,61 @@ fn up_and_down_from_a_manifest() {
 }
 
 #[test]
+fn restart_rename_rm() {
+    let root = unique_root();
+    // A session that prints its own pid so we can tell restarts apart.
+    let (name, _e, code) = run_pty(
+        &root,
+        &["run", "--id", "svc", "--", "sh", "-c", "echo pid-$$; cat"],
+    );
+    assert_eq!(code, 0, "run failed: {_e}");
+    assert_eq!(name, "svc");
+
+    // Capture the first pid via the pid file.
+    let pid_path = root.join("svc.pid");
+    let wait_pid = |after: &str| -> String {
+        let start = Instant::now();
+        loop {
+            if let Ok(p) = std::fs::read_to_string(&pid_path) {
+                let p = p.trim().to_string();
+                if !p.is_empty() && p != after {
+                    return p;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("pid file never settled ({after})");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let pid1 = wait_pid("");
+
+    // rename sets a display label that resolves as a lookup key.
+    let (_o, _e, code) = run_pty(&root, &["rename", "svc", "My Service"]);
+    assert_eq!(code, 0);
+    let (peek, _e, _c) = run_pty(&root, &["peek", "--plain", "My Service"]);
+    assert!(peek.contains("pid-"), "rename lookup failed:\n{peek}");
+
+    // restart respawns with a new pid.
+    let (_o, _e, code) = run_pty(&root, &["restart", "svc"]);
+    assert_eq!(code, 0);
+    let pid2 = wait_pid(&pid1);
+    assert_ne!(pid1, pid2, "restart should change the pid");
+
+    // rm removes it entirely.
+    let (_o, _e, code) = run_pty(&root, &["rm", "svc"]);
+    assert_eq!(code, 0);
+    std::thread::sleep(Duration::from_millis(300));
+    let (ls, _e, _c) = run_pty(&root, &["ls"]);
+    assert!(
+        !ls.contains("svc") || ls.contains("No sessions"),
+        "session remained after rm:\n{ls}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn attach_is_interactive_and_detaches() {
     let root = unique_root();
     let root_str = root.to_string_lossy().to_string();

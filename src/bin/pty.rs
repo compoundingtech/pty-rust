@@ -31,6 +31,9 @@ fn main() {
         "attach" | "a" => cmd_attach(rest),
         "up" => cmd_up(rest),
         "down" => cmd_down(rest),
+        "restart" => cmd_restart(rest),
+        "rm" | "remove" => cmd_rm(rest),
+        "rename" => cmd_rename(rest),
         "kill" => cmd_kill(rest),
         "status" | "stats" => cmd_status(rest),
         "version" | "--version" | "-v" | "-V" => {
@@ -552,6 +555,103 @@ fn kill_session(name: &str) {
     }
 }
 
+/// `pty restart <ref>` — stop (if running) and respawn with the same command.
+fn cmd_restart(args: &[String]) -> i32 {
+    let reference = match args.first() {
+        Some(r) => r.clone(),
+        None => {
+            eprintln!("pty restart: usage: pty restart <ref>");
+            return 2;
+        }
+    };
+    let name = match registry::resolve_ref(&reference) {
+        Some(n) => n,
+        None => {
+            eprintln!("pty restart: no such session '{reference}'");
+            return 1;
+        }
+    };
+    let meta = match registry::read_metadata(&name) {
+        Some(m) => m,
+        None => {
+            eprintln!("pty restart: no metadata for '{name}'");
+            return 1;
+        }
+    };
+    // Stop the current instance if it's alive, then clear its socket/pid.
+    if client::is_alive(&name) {
+        kill_session(&name);
+    }
+    registry::cleanup(&name);
+
+    let mut command = vec![meta.command.clone()];
+    command.extend(meta.args.iter().cloned());
+    match spawn_session_daemon(&name, &command, &meta.cwd, 24, 80, meta.display_name.as_deref()) {
+        Ok(()) => {
+            println!("restarted {name}");
+            0
+        }
+        Err(e) => {
+            eprintln!("pty restart: {e}");
+            1
+        }
+    }
+}
+
+/// `pty rm <ref>` — kill if running, then remove from the registry.
+fn cmd_rm(args: &[String]) -> i32 {
+    let reference = match args.first() {
+        Some(r) => r.clone(),
+        None => {
+            eprintln!("pty rm: usage: pty rm <ref>");
+            return 2;
+        }
+    };
+    let name = match registry::resolve_ref(&reference) {
+        Some(n) => n,
+        None => {
+            eprintln!("pty rm: no such session '{reference}'");
+            return 1;
+        }
+    };
+    if client::is_alive(&name) {
+        kill_session(&name);
+    }
+    registry::cleanup(&name);
+    println!("removed {name}");
+    0
+}
+
+/// `pty rename <ref> <new-display-name>` — set the session's display label.
+fn cmd_rename(args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("pty rename: usage: pty rename <ref> <new-display-name>");
+        return 2;
+    }
+    let name = match registry::resolve_ref(&args[0]) {
+        Some(n) => n,
+        None => {
+            eprintln!("pty rename: no such session '{}'", args[0]);
+            return 1;
+        }
+    };
+    let new_name = args[1..].join(" ");
+    let mut meta = match registry::read_metadata(&name) {
+        Some(m) => m,
+        None => {
+            eprintln!("pty rename: no metadata for '{name}'");
+            return 1;
+        }
+    };
+    meta.display_name = Some(new_name.clone());
+    if let Err(e) = registry::write_metadata(&name, &meta) {
+        eprintln!("pty rename: {e}");
+        return 1;
+    }
+    println!("renamed {name} -> {new_name}");
+    0
+}
+
 /// `pty kill <ref>`
 fn cmd_kill(args: &[String]) -> i32 {
     let reference = match args.first() {
@@ -613,6 +713,9 @@ fn print_help() {
          \x20 pty attach <ref>            (Ctrl-] to detach)\n\
          \x20 pty up [dir] [names...]     (start sessions from pty.toml)\n\
          \x20 pty down [dir] [names...]   (stop them)\n\
+         \x20 pty restart <ref>\n\
+         \x20 pty rename <ref> <label>\n\
+         \x20 pty rm <ref>\n\
          \x20 pty kill <ref>\n\
          \x20 pty status <ref>\n\
          \x20 pty version"
