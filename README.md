@@ -33,7 +33,27 @@ $PTY send <id> --seq "echo hi" --seq key:return   # send an ordered key sequence
 $PTY send <id> "literal text"                  # or literal text (no newline)
 $PTY attach <id>                               # attach interactively (Ctrl-] to detach)
 $PTY status <id>                               # session stats as JSON
+$PTY restart <id>                              # respawn with the same command
+$PTY rename <id> "My Service"                  # set a display label (also a lookup key)
+$PTY rm <id>                                   # kill (if running) and remove from the registry
 $PTY kill <id>                                 # terminate the session
+
+# Manifests (pty.toml):
+$PTY up [dir] [names...]                        # start sessions declared in ./pty.toml
+$PTY down [dir] [names...]                      # stop them
+```
+
+A `pty.toml` looks like:
+
+```toml
+prefix = "myapp"
+
+[sessions.web]
+command = "node server.js"
+cwd = ".."
+
+[sessions.web.env]
+PORT = "3000"
 ```
 
 Each session runs in a detached daemon that hosts the PTY and a libghostty
@@ -95,7 +115,7 @@ thereafter.
 cargo test
 ```
 
-111 tests pass:
+149 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -104,12 +124,14 @@ cargo test
 | `tests/env_isolation.rs` | `tests/env-isolation.test.ts` | 5 | pure |
 | `tests/input_parse.rs` | `tests/input-parse.test.ts` | 21 | pure |
 | `tests/mouse_parse.rs` | `tests/mouse-parse.test.ts` | 9 | pure |
+| `tests/protocol.rs` | `tests/protocol.test.ts` | 20 | pure |
+| `tests/ptyfile.rs` | `tests/ptyfile.test.ts` | 16 | pure |
 | `tests/terminal_queries.rs` (strip) | `tests/terminal-queries.test.ts` | 16 | pure |
 | `tests/terminal_queries.rs` (responses) | `tests/terminal-queries.test.ts` | 3 | **libghostty** |
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle + attach | 2 | **libghostty** |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach | 4 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
@@ -149,6 +171,7 @@ src/
   client.rs       client ops: peek / send / status / interactive attach
   protocol.rs     wire packet framing (port of protocol.ts)
   registry.rs     session dir + <name>.sock/.pid/.json (port of sessions.ts)
+  ptyfile.rs      pty.toml manifest parsing (port of ptyfile.ts)
   session.rs      Session test harness: PTY (portable-pty) + libghostty Terminal
   screenshot.rs   Screenshot { lines, text, ansi } capture
   keys.rs         named-key → bytes (port of keys.ts)
