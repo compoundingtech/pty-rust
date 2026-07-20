@@ -63,6 +63,10 @@ daemon replays the screen on attach and answers device queries (DA1/DSR) through
 libghostty, so the session behaves like a real terminal. Set `PTY_ROOT` to
 isolate a registry (e.g. for tests).
 
+**Nesting prevention:** running `pty run` *inside* an existing pty session
+(detected via `PTY_SESSION`) runs the command directly instead of creating a
+session-inside-a-session; use `pty run -d` to force a background session anyway.
+
 ## The testing harness (`pty-testkit`)
 
 The original `pty` project ships a `Session` testing harness: it spawns a
@@ -115,7 +119,7 @@ thereafter.
 cargo test
 ```
 
-153 tests pass:
+154 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -132,7 +136,7 @@ cargo test
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach | 4 | **libghostty** |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach / nesting | 5 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
