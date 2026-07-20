@@ -1,18 +1,49 @@
-# pty-testkit
+# pty-rust
 
-A Rust port of the [`pty`](https://github.com/compoundingtech/pty) project's
-Playwright-style **TUI testing library**, using **[libghostty]** — the terminal
-library extracted from the [Ghostty] terminal emulator — as the terminal
-emulation backend in place of `@xterm/headless`.
+A Rust port of the [`pty`](https://github.com/compoundingtech/pty) project —
+persistent terminal sessions with detach/attach **plus** a Playwright-style TUI
+testing library — using **[libghostty]** (the terminal library extracted from
+the [Ghostty] terminal emulator) as the terminal-emulation backend in place of
+`@xterm/headless`.
 
-> **Experiment.** The goal: take `pty`'s TypeScript test suite, port the parts
-> that exercise real terminal emulation to Rust, and make them pass with
-> libghostty driving the screen state. This crate is the result.
+Two things live here:
+
+1. **The `pty` CLI (v0)** — a runnable `pty` binary with a per-session daemon
+   that owns the PTY and a libghostty terminal: `run` / `ls` / `peek` / `send` /
+   `attach` / `kill` / `status`. See [The `pty` CLI](#the-pty-cli-v0) below.
+2. **`pty-testkit`** — the Rust port of pty's terminal testing harness (the
+   `Session` type), which is also the foundation the CLI is built on and the
+   correctness net for the port.
 
 [libghostty]: https://libghostty.tip.ghostty.org/
 [Ghostty]: https://ghostty.org
 
-## What it does
+## The `pty` CLI (v0)
+
+```sh
+cargo build                                   # builds the `pty` binary
+PTY=target/debug/pty
+
+$PTY run -- bash --norc --noprofile           # spawn a persistent session -> prints its id
+$PTY ls                                        # list sessions (--json for JSON)
+$PTY peek <id>                                 # print the current screen (ANSI)
+$PTY peek --plain <id>                         # ... as plain text
+$PTY peek --wait "Ready" -t 10 <id>            # wait until text appears
+$PTY send <id> --seq "echo hi" --seq key:return   # send an ordered key sequence
+$PTY send <id> "literal text"                  # or literal text (no newline)
+$PTY attach <id>                               # attach interactively (Ctrl-] to detach)
+$PTY status <id>                               # session stats as JSON
+$PTY kill <id>                                 # terminate the session
+```
+
+Each session runs in a detached daemon that hosts the PTY and a libghostty
+terminal; clients connect to a per-session unix socket under `$PTY_ROOT`
+(default `~/.local/state/pty`) speaking the wire protocol (`protocol.rs`). The
+daemon replays the screen on attach and answers device queries (DA1/DSR) through
+libghostty, so the session behaves like a real terminal. Set `PTY_ROOT` to
+isolate a registry (e.g. for tests).
+
+## The testing harness (`pty-testkit`)
 
 The original `pty` project ships a `Session` testing harness: it spawns a
 process in a PTY, feeds the output into a headless `xterm.js`, and lets tests
@@ -64,7 +95,7 @@ thereafter.
 cargo test
 ```
 
-109 tests pass:
+111 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -78,6 +109,7 @@ cargo test
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle + attach | 2 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
@@ -112,11 +144,17 @@ isolation logic.
 
 ```
 src/
-  session.rs      Session harness: PTY (portable-pty) + libghostty Terminal
+  bin/pty.rs      the `pty` CLI: run/ls/peek/send/attach/kill/status + __daemon
+  daemon.rs       per-session daemon: PTY + libghostty terminal, serves protocol
+  client.rs       client ops: peek / send / status / interactive attach
+  protocol.rs     wire packet framing (port of protocol.ts)
+  registry.rs     session dir + <name>.sock/.pid/.json (port of sessions.ts)
+  session.rs      Session test harness: PTY (portable-pty) + libghostty Terminal
   screenshot.rs   Screenshot { lines, text, ansi } capture
   keys.rs         named-key → bytes (port of keys.ts)
   duration.rs     parse/format durations (port of duration.ts)
   input.rs        stdin key + SGR-mouse + Kitty CSI-u parsing (port of tui/input.ts)
   queries.rs      terminal-query stripping (port of stripTerminalQueries)
-tests/            ported test suites (see table above)
+examples/demo.rs  live libghostty screenshot loop (cargo run --example demo)
+tests/            ported test suites + CLI e2e (see table above)
 ```
