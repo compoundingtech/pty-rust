@@ -172,13 +172,96 @@ impl Drop for RawMode {
     }
 }
 
-/// Detach key: Ctrl-] (0x1d), telnet-style — leaves the session running.
-const DETACH_KEY: u8 = 0x1d;
+/// Detach key: Ctrl+\ (0x1c), matching the original pty. Press it once to
+/// detach; press it twice in quick succession to send a literal Ctrl+\ to the
+/// child.
+pub const DETACH_KEY: u8 = 0x1c;
+
+/// Kitty keyboard-protocol encoding of Ctrl+\, normalized to [`DETACH_KEY`] so
+/// the detach logic works with a single representation (mirrors the TS).
+const DETACH_KEY_KITTY: &[u8] = b"\x1b[92;5u";
+
+/// Double-tap window: a second Ctrl+\ within this sends the literal byte to the
+/// child instead of detaching. Matches the TS `DOUBLE_TAP_MS`.
+const DOUBLE_TAP_MS: u128 = 300;
+
+/// Reset terminal modes a program may have enabled, so the terminal isn't left
+/// "poisoned" after detach (alt screen, mouse tracking, hidden cursor, …).
+/// Ported from the TS `TERMINAL_SANITIZE`. Does not clear screen content.
+pub const TERMINAL_SANITIZE: &str = concat!(
+    "\x1b[?1049l", // leave alternate screen buffer
+    "\x1b[?1l",    // reset cursor keys to normal (DECCKM)
+    "\x1b[?7h",    // re-enable autowrap (DECAWM)
+    "\x1b[?6l",    // reset origin mode (DECOM)
+    "\x1b[?1000l", // disable mouse click tracking
+    "\x1b[?1002l", // disable mouse button-event tracking
+    "\x1b[?1003l", // disable mouse any-event tracking
+    "\x1b[?1004l", // disable focus event reporting
+    "\x1b[?1006l", // disable SGR mouse mode
+    "\x1b[?25h",   // show cursor
+    "\x1b[?2004l", // disable bracketed paste
+    "\x1b[4l",     // reset insert mode (IRM) to replace
+    "\x1b[r",      // reset scroll region (DECSTBM)
+    "\x1b[0m",     // reset SGR attributes
+    "\x1b[0 q",    // reset cursor style
+    "\x1b>",       // reset application keypad mode (DECKPNM)
+    "\x1b(B",      // reset G0 charset to ASCII
+    "\x1b[<99u",   // pop all Kitty keyboard protocol levels
+);
+
+/// Move the cursor to the bottom so "[detached]" lands below session content.
+const CURSOR_TO_BOTTOM: &str = "\x1b[999;1H";
+
+/// Replace the Kitty encoding of Ctrl+\ with the legacy byte.
+fn normalize_detach_key(data: &[u8]) -> Vec<u8> {
+    if !data.windows(DETACH_KEY_KITTY.len()).any(|w| w == DETACH_KEY_KITTY) {
+        return data.to_vec();
+    }
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i..].starts_with(DETACH_KEY_KITTY) {
+            out.push(DETACH_KEY);
+            i += DETACH_KEY_KITTY.len();
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+enum PollRead {
+    Timeout,
+    Eof,
+    Data(usize),
+}
+
+/// Poll `fd` for readability up to `timeout_ms` (-1 = block), then read once.
+fn poll_read(fd: i32, buf: &mut [u8], timeout_ms: i32) -> std::io::Result<PollRead> {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let r = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if r == 0 {
+        return Ok(PollRead::Timeout);
+    }
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if n <= 0 {
+        return Ok(PollRead::Eof);
+    }
+    Ok(PollRead::Data(n as usize))
+}
 
 /// Attach interactively to a session. Forwards stdin→session and
 /// session→stdout, replays the screen, and returns when the child exits or the
-/// user presses Ctrl-] to detach. Returns the child's exit code (or `None` on
-/// detach).
+/// user presses Ctrl+\ to detach (twice in quick succession sends a literal
+/// Ctrl+\ to the child). Returns the child's exit code (or `None` on detach).
 pub fn attach(name: &str) -> std::io::Result<Option<i32>> {
     let stream = connect(name)?;
     let (rows, cols) = terminal_size();
@@ -197,7 +280,7 @@ pub fn attach(name: &str) -> std::io::Result<Option<i32>> {
 
     // Reader thread: session packets → stdout. On EXIT, restore tty and exit.
     let read_stream = stream.try_clone()?;
-    let reader = std::thread::spawn(move || {
+    let _reader = std::thread::spawn(move || {
         let mut stream = read_stream;
         let mut parser = PacketReader::new();
         let mut buf = [0u8; 8192];
@@ -233,45 +316,78 @@ pub fn attach(name: &str) -> std::io::Result<Option<i32>> {
         }
     });
 
-    // Main: stdin → session (DATA), with Ctrl-] to detach.
+    // Main: stdin → session (DATA), with Ctrl+\ to detach (double-tap → literal).
     let mut wstream = stream.try_clone()?;
-    let mut stdin = std::io::stdin();
-    let mut byte = [0u8; 1];
-    let detached;
+    let mut buf = [0u8; 4096];
+    // When Some, a detach is armed and fires when the double-tap window closes
+    // with no second Ctrl+\.
+    let mut armed_at: Option<Instant> = None;
+    let mut detached = false;
+
     loop {
-        match stdin.read(&mut byte) {
-            Ok(0) => {
-                detached = false;
-                break;
-            }
-            Ok(_) => {
-                if byte[0] == DETACH_KEY {
-                    let _ = wstream.write_all(&encode_detach());
-                    let _ = wstream.flush();
+        // If a detach is armed, only wait out the remainder of the window.
+        let timeout_ms: i32 = match armed_at {
+            Some(t) => {
+                let elapsed = t.elapsed().as_millis();
+                if elapsed >= DOUBLE_TAP_MS {
                     detached = true;
-                    break;
+                    break; // window closed, no second tap → detach
                 }
-                if wstream.write_all(&encode_data(&byte)).is_err() {
-                    detached = false;
-                    break;
-                }
-                let _ = wstream.flush();
+                (DOUBLE_TAP_MS - elapsed) as i32
             }
-            Err(_) => {
-                detached = false;
+            None => -1,
+        };
+
+        match poll_read(stdin_fd, &mut buf, timeout_ms)? {
+            PollRead::Eof => break,
+            PollRead::Timeout => {
+                // Window elapsed with no further input → detach.
+                detached = true;
                 break;
+            }
+            PollRead::Data(n) => {
+                let data = normalize_detach_key(&buf[..n]);
+                let mut forward: Vec<u8> = Vec::with_capacity(data.len());
+                for &b in &data {
+                    if b == DETACH_KEY {
+                        match armed_at {
+                            Some(t) if t.elapsed().as_millis() < DOUBLE_TAP_MS => {
+                                // Double-tap: send a literal Ctrl+\ to the child.
+                                armed_at = None;
+                                forward.push(DETACH_KEY);
+                            }
+                            _ => {
+                                // First tap: arm the detach.
+                                armed_at = Some(Instant::now());
+                            }
+                        }
+                    } else {
+                        forward.push(b);
+                    }
+                }
+                if !forward.is_empty()
+                    && (wstream.write_all(&encode_data(&forward)).is_err()
+                        || wstream.flush().is_err())
+                {
+                    break;
+                }
             }
         }
     }
 
+    if detached {
+        let _ = wstream.write_all(&encode_detach());
+        let _ = wstream.flush();
+    }
     drop(raw); // restore tty
     if detached {
-        // Detached cleanly; leave the reader thread to be reaped on exit.
-        let _ = reader;
-        Ok(None)
-    } else {
-        Ok(None)
+        let mut out = std::io::stdout();
+        let _ = out.write_all(TERMINAL_SANITIZE.as_bytes());
+        let _ = out.write_all(CURSOR_TO_BOTTOM.as_bytes());
+        let _ = out.write_all(b"\r\n[detached]\r\n");
+        let _ = out.flush();
     }
+    Ok(None)
 }
 
 /// Send a resize to the session (used by scripted clients / tests).

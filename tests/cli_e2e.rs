@@ -274,6 +274,56 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn attach_double_tap_ctrl_backslash_sends_literal_not_detach() {
+    let _serial = serial();
+    let root = unique_root();
+    let root_str = root.to_string_lossy().to_string();
+
+    // `cat` echoes its input, so we can observe that we're still attached.
+    let (name, _e, code) = run_pty(&root, &["run", "--id", "dt", "--", "cat"]);
+    assert_eq!(code, 0, "run failed: {_e}");
+    assert_eq!(name, "dt");
+
+    let mut s = Session::spawn(
+        pty_bin(),
+        &["attach", "dt"],
+        SpawnOptions {
+            rows: Some(24),
+            cols: Some(80),
+            env: vec![("PTY_ROOT".to_string(), root_str)],
+            ..Default::default()
+        },
+    )
+    .expect("spawn pty attach");
+    // Ensure we're attached (cat echoes a probe line).
+    s.type_str("probe-line\r");
+    s.wait_for_text("probe-line", 8000).expect("attached");
+
+    // Two Ctrl+\ in one chunk = double-tap → forwards a literal Ctrl+\ to the
+    // child (cat echoes it as `^\`) and does NOT detach. A following marker
+    // still reaching the child proves the attach stayed connected.
+    s.type_str("\x1c\x1c");
+    s.type_str("still-attached-marker\r");
+    let ss = s
+        .wait_for_text("still-attached-marker", 8000)
+        .expect("should still be attached after double-tap");
+    assert!(
+        ss.text.contains("^\\"),
+        "double-tap should forward a literal Ctrl+\\ (echoed as ^\\):\n{}",
+        ss.text
+    );
+    assert!(
+        !ss.text.contains("[detached]"),
+        "double-tap must NOT detach:\n{}",
+        ss.text
+    );
+    s.close();
+
+    let _ = run_pty(&root, &["kill", "dt"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn nesting_prevention_runs_directly_inside_a_session() {
     let _serial = serial();
     let root = unique_root();
@@ -343,9 +393,12 @@ fn attach_is_interactive_and_detaches() {
     // wait_for_text asserts the live output appeared (errors on timeout).
     s.wait_for_text("attached-works", 8000).expect("live output");
 
-    // Ctrl-] (0x1d) detaches without killing the session.
-    s.type_str("\x1d");
-    std::thread::sleep(Duration::from_millis(400));
+    // A single Ctrl+\ (0x1c) detaches (after the ~300ms double-tap window)
+    // without killing the session — matching the real pty.
+    s.type_str("\x1c");
+    // Wait past the double-tap window so the detach fires, then verify the
+    // detach confirmation was rendered.
+    s.wait_for_text("[detached]", 5000).expect("detach confirmation");
     s.close();
 
     // The session must still be alive after detach.

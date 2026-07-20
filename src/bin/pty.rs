@@ -487,7 +487,7 @@ fn cmd_attach(args: &[String]) -> i32 {
             return 1;
         }
     };
-    eprintln!("[attached to {name} — press Ctrl-] to detach]");
+    eprintln!("[attached to {name} — press Ctrl+\\ to detach]");
     match client::attach(&name) {
         Ok(Some(code)) => code,
         Ok(None) => 0,
@@ -776,7 +776,7 @@ fn print_help() {
          \x20 pty ls [--json]\n\
          \x20 pty peek [--plain] [--full] [-f] [--wait TEXT [-t SECS]] <ref>\n\
          \x20 pty send <ref> <text> | --seq <value> ...\n\
-         \x20 pty attach <ref>            (Ctrl-] to detach)\n\
+         \x20 pty attach <ref>            (Ctrl+\\ to detach; twice sends it to the child)\n\
          \x20 pty up [dir] [names...]     (start sessions from pty.toml)\n\
          \x20 pty down [dir] [names...]   (stop them)\n\
          \x20 pty restart <ref>\n\

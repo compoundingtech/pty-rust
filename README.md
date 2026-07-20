@@ -32,7 +32,7 @@ $PTY peek -f <id>                              # follow output live (read-only; 
 $PTY peek --wait "Ready" -t 10 <id>            # wait until text appears
 $PTY send <id> --seq "echo hi" --seq key:return   # send an ordered key sequence
 $PTY send <id> "literal text"                  # or literal text (no newline)
-$PTY attach <id>                               # attach interactively (Ctrl-] to detach)
+$PTY attach <id>                               # attach interactively (Ctrl+\ to detach)
 $PTY status <id>                               # session stats as JSON
 $PTY restart <id>                              # respawn with the same command
 $PTY rename <id> "My Service"                  # set a display label (also a lookup key)
