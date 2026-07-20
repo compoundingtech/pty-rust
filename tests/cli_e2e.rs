@@ -274,6 +274,60 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn ls_json_matches_node_shape() {
+    // Parity A: ls --json fields match node — {name, status, pid(daemon),
+    // command, cwd, createdAt, exitCode, exitedAt}; displayName omitted when
+    // unset; status enum running|exited|vanished.
+    let _serial = serial();
+    let root = unique_root();
+    let (_n, _e, code) = run_pty(&root, &["run", "--id", "jr", "--", "cat"]);
+    assert_eq!(code, 0);
+    // Wait until it's up.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if run_pty(&root, &["ls", "--json"]).0.contains("\"status\":\"running\"") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let running = ok_pty(&root, &["ls", "--json"]);
+    assert!(running.contains("\"name\":\"jr\""), "json: {running}");
+    assert!(running.contains("\"status\":\"running\""), "json: {running}");
+    assert!(running.contains("\"exitCode\":null"), "json: {running}");
+    assert!(running.contains("\"exitedAt\":null"), "json: {running}");
+    assert!(running.contains("\"createdAt\":\""), "json: {running}");
+    // pid is a number (the daemon pid), not null, for a running session.
+    assert!(
+        !running.contains("\"pid\":null"),
+        "running session should have a daemon pid: {running}"
+    );
+    // displayName omitted when unset.
+    assert!(
+        !running.contains("displayName"),
+        "displayName should be omitted when unset: {running}"
+    );
+
+    // Exited session: status "exited", exitCode + exitedAt populated.
+    let (_n, _e, code) = run_pty(&root, &["run", "--id", "je", "--", "sh", "-c", "exit 5"]);
+    assert_eq!(code, 0);
+    let start = Instant::now();
+    let mut exited_json = String::new();
+    while start.elapsed() < Duration::from_secs(5) {
+        exited_json = ok_pty(&root, &["ls", "--json"]);
+        if exited_json.contains("\"status\":\"exited\"") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(exited_json.contains("\"status\":\"exited\""), "json: {exited_json}");
+    assert!(exited_json.contains("\"exitCode\":5"), "json: {exited_json}");
+    assert!(exited_json.contains("\"exitedAt\":\""), "json: {exited_json}");
+
+    let _ = run_pty(&root, &["kill", "jr"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn post_exit_peek_returns_final_screen() {
     // Parity #1: after a session exits, `peek --plain` still returns its final
     // screen (node retains it); rust previously failed with ENOENT.

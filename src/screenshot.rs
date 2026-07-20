@@ -30,6 +30,23 @@ fn format(term: &Terminal, opts: FormatterOptions) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Serialize the terminal for an ATTACH/SCREEN replay: VT sequences that carry
+/// not just the visible cells but the terminal *mode* state (mouse tracking,
+/// alt-screen, cursor visibility, kitty keyboard) so a reattaching client
+/// restores a TUI's full state, not just its glyphs. This is the functional
+/// parity target with node's SCREEN payload (byte-exact ANSI is infeasible
+/// across two different serializers, but the restored mode-set matches).
+pub fn serialize_for_replay(term: &Terminal) -> String {
+    format(
+        term,
+        FormatterOptions::new()
+            .with_format(Format::Vt)
+            .with_modes(true)
+            .with_cursor(true)
+            .with_kitty_keyboard(true),
+    )
+}
+
 /// Capture the current terminal state into a [`Screenshot`].
 ///
 /// Replicates the TS harness exactly: each visible row is right-trimmed, then

@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
@@ -56,6 +56,21 @@ struct Client {
     streaming: bool,
 }
 
+/// The child (session) pid, for the SIGTERM handler to forward to. Node records
+/// the DAEMON pid in `<name>.pid`, so `kill` targets the daemon; the daemon then
+/// forwards the signal to the child, which triggers a clean exit + metadata.
+static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn forward_sigterm(_sig: i32) {
+    let pid = CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        // SAFETY: kill() is async-signal-safe.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+}
+
 /// Run the session daemon to completion. Blocks until the child process exits
 /// or the daemon is torn down. Returns the child's exit code.
 pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
@@ -84,8 +99,14 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
 
     let mut child = pair.slave.spawn_command(cmd).map_err(std::io::Error::other)?;
     drop(pair.slave);
-    // Record the child (session) pid so `pty kill` can target the process.
-    let child_pid = child.process_id().unwrap_or(0);
+    // Forward SIGTERM (sent to the daemon by `pty kill`) to the child, so the
+    // child's exit runs our clean-shutdown path (exit metadata + final screen).
+    let child_pid = child.process_id().unwrap_or(0) as i32;
+    CHILD_PID.store(child_pid, Ordering::SeqCst);
+    unsafe {
+        let handler = forward_sigterm as extern "C" fn(i32);
+        libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+    }
 
     let reader = pair.master.try_clone_reader().map_err(std::io::Error::other)?;
     let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
@@ -106,7 +127,10 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
         last_attach_at: None,
     };
     registry::write_metadata(&cfg.name, &meta)?;
-    std::fs::write(registry::pid_path(&cfg.name), child_pid.to_string())?;
+    // Record the DAEMON pid (matching node: `<name>.pid` holds the server
+    // process's own pid, and `ls --json` exposes it). `kill` SIGTERMs this; the
+    // handler above forwards to the child.
+    std::fs::write(registry::pid_path(&cfg.name), std::process::id().to_string())?;
 
     // ── libghostty terminal ──
     let pending: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
@@ -210,8 +234,11 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
             DaemonMsg::ClientAttach { id, rows, cols, geometry_neutral } => {
                 if let Some(c) = clients.get_mut(&id) {
                     c.streaming = true;
-                    // Replay the current screen (VT) so the client repaints.
-                    let screen = capture(&terminal).ansi;
+                    // Replay the current screen WITH terminal mode/cursor state
+                    // so a reattaching client restores a TUI's full state
+                    // (mouse tracking, alt-screen, cursor visibility, kitty kbd),
+                    // not just its glyphs.
+                    let screen = crate::screenshot::serialize_for_replay(&terminal);
                     let _ = c.tx.send(encode_screen(screen.as_bytes()));
                 }
                 // A non-neutral attach negotiates the shared PTY geometry.
@@ -245,12 +272,13 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                 let _ = terminal.resize(cols, rows, 0, 0);
             }
             DaemonMsg::ClientStatus { id } => {
+                // Count only ATTACHED (streaming) clients — a transient
+                // status/peek connection has not attached, so it isn't counted
+                // (matches node's `attached`).
+                let attached = clients.values().filter(|c| c.streaming).count();
                 let json = format!(
                     "{{\"name\":{:?},\"rows\":{},\"cols\":{},\"clients\":{}}}",
-                    cfg.name,
-                    cur_rows,
-                    cur_cols,
-                    clients.len()
+                    cfg.name, cur_rows, cur_cols, attached
                 );
                 if let Some(c) = clients.get(&id) {
                     let _ = c.tx.send(encode_status_response(&json));

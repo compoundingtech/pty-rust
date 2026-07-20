@@ -279,20 +279,45 @@ fn cmd_ls(args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json");
     let sessions = registry::list_sessions();
     if json {
+        // Match node's ls --json shape exactly (node = reference):
+        //   {name, status, pid(daemon), command, cwd, createdAt, exitCode,
+        //    exitedAt, displayName?}  (displayName omitted when unset).
+        // status enum: "running" | "exited" | "vanished".
+        use serde_json::{Map, Value};
         let items: Vec<String> = sessions
             .iter()
             .map(|s| {
-                format!(
-                    "{{\"name\":{:?},\"alive\":{},\"command\":{:?},\"cwd\":{:?},\"exitCode\":{}}}",
-                    s.name,
-                    s.alive,
-                    s.meta.display_command,
-                    s.meta.cwd,
+                let status = if s.alive {
+                    "running"
+                } else if s.meta.exit_code.is_some() {
+                    "exited"
+                } else {
+                    "vanished"
+                };
+                let pid = registry::read_pid(&s.name); // daemon pid
+                let mut m = Map::new();
+                m.insert("name".into(), Value::from(s.name.clone()));
+                m.insert("status".into(), Value::from(status));
+                m.insert("pid".into(), pid.map(Value::from).unwrap_or(Value::Null));
+                m.insert("command".into(), Value::from(s.meta.display_command.clone()));
+                m.insert("cwd".into(), Value::from(s.meta.cwd.clone()));
+                m.insert("createdAt".into(), Value::from(s.meta.created_at.clone()));
+                m.insert(
+                    "exitCode".into(),
+                    s.meta.exit_code.map(Value::from).unwrap_or(Value::Null),
+                );
+                m.insert(
+                    "exitedAt".into(),
                     s.meta
-                        .exit_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "null".into())
-                )
+                        .exited_at
+                        .clone()
+                        .map(Value::from)
+                        .unwrap_or(Value::Null),
+                );
+                if let Some(dn) = &s.meta.display_name {
+                    m.insert("displayName".into(), Value::from(dn.clone()));
+                }
+                serde_json::to_string(&Value::Object(m)).unwrap()
             })
             .collect();
         println!("[{}]", items.join(","));

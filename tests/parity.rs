@@ -2,7 +2,9 @@
 //! divergences the nesting verification found. Node is the reference; these
 //! assert the values node emits so the two projects share one behavioral spec.
 
+use libghostty_vt::terminal::{Options, Terminal};
 use pty_testkit::client::{resolve_seq_delay_ms, DEFAULT_SEQ_DELAY_MS};
+use pty_testkit::screenshot::serialize_for_replay;
 use pty_testkit::{Session, SpawnOptions};
 
 // ── #3: send --seq pacing (port of node's resolveSeqDelayMs coverage) ──
@@ -65,6 +67,38 @@ fn plain_capture_keeps_trailing_written_space() {
         ss.lines
     );
     s.close();
+}
+
+// ── #D: attach SCREEN replay carries terminal mode-state ──
+
+#[test]
+fn replay_serialization_restores_terminal_modes() {
+    // A TUI enables mouse tracking (1000) + SGR mouse (1006) and hides the
+    // cursor (25l). The attach/replay serialization must carry those modes so a
+    // reattaching client restores them (functional parity with node's SCREEN
+    // payload — byte-exact ANSI isn't the target, the restored mode-set is).
+    let mut t = Terminal::new(Options {
+        cols: 80,
+        rows: 24,
+        max_scrollback: 100,
+    })
+    .unwrap();
+    t.vt_write(b"\x1b[?1000h\x1b[?1006h\x1b[?25lTUI-BODY");
+    let replay = serialize_for_replay(&t);
+
+    assert!(replay.contains("TUI-BODY"), "content missing: {replay:?}");
+    assert!(
+        replay.contains("\x1b[?1000h"),
+        "mouse tracking mode not restored: {replay:?}"
+    );
+    assert!(
+        replay.contains("\x1b[?1006h"),
+        "SGR mouse mode not restored: {replay:?}"
+    );
+    assert!(
+        replay.contains("\x1b[?25l"),
+        "cursor-hidden mode not restored: {replay:?}"
+    );
 }
 
 #[test]
