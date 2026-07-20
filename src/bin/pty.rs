@@ -37,7 +37,9 @@ fn main() {
         "kill" => cmd_kill(rest),
         "status" | "stats" => cmd_status(rest),
         "version" | "--version" | "-v" | "-V" => {
-            println!("pty-rust {}", env!("CARGO_PKG_VERSION"));
+            // Bare semver, matching node's `pty --version` format (node also
+            // appends +<sha>; the number differs by project).
+            println!("{}", env!("CARGO_PKG_VERSION"));
             0
         }
         "help" | "--help" | "-h" => {

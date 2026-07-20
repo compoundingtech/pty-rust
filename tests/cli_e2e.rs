@@ -274,6 +274,26 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn version_is_bare_semver() {
+    // Parity E: `pty version` prints bare semver (node's format), not a
+    // "pty-rust X.Y.Z" label. Node's regex: ^\d+\.\d+\.\d+(\+[0-9a-f]{4,})?$
+    let root = unique_root();
+    for form in ["version", "--version", "-v", "-V"] {
+        let out = ok_pty(&root, &[form]);
+        let ok = out
+            .split('+')
+            .next()
+            .map(|semver| {
+                let parts: Vec<&str> = semver.split('.').collect();
+                parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+            })
+            .unwrap_or(false);
+        assert!(ok, "`pty {form}` not bare semver: {out:?}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn ls_json_matches_node_shape() {
     // Parity A: ls --json fields match node — {name, status, pid(daemon),
     // command, cwd, createdAt, exitCode, exitedAt}; displayName omitted when
