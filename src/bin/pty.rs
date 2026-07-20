@@ -365,6 +365,30 @@ fn cmd_send(args: &[String]) -> i32 {
         }
     };
     let rest = &args[1..];
+    // --paste mode: wrap the payload in bracketed-paste markers so a receiving
+    // TUI treats it as one paste event. Position-independent.
+    if rest.iter().any(|a| a == "--paste") {
+        let mut payload = Vec::new();
+        let mut i = 0;
+        while i < rest.len() {
+            if rest[i] == "--paste" {
+                if let Some(v) = rest.get(i + 1) {
+                    payload.extend_from_slice(v.as_bytes());
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        let wrapped = pty_testkit::paste::wrap_bracketed_paste(&payload);
+        return match client::send(&name, &wrapped) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("pty send: {e}");
+                1
+            }
+        };
+    }
     // --seq mode: ordered sequence, each value literal or `key:<name>`.
     if rest.iter().any(|a| a == "--seq") {
         let mut out = Vec::new();

@@ -115,7 +115,7 @@ thereafter.
 cargo test
 ```
 
-149 tests pass:
+153 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -126,6 +126,7 @@ cargo test
 | `tests/mouse_parse.rs` | `tests/mouse-parse.test.ts` | 9 | pure |
 | `tests/protocol.rs` | `tests/protocol.test.ts` | 20 | pure |
 | `tests/ptyfile.rs` | `tests/ptyfile.test.ts` | 16 | pure |
+| `tests/paste.rs` | `tests/send-paste.test.ts` (wrapping) | 4 | pure |
 | `tests/terminal_queries.rs` (strip) | `tests/terminal-queries.test.ts` | 16 | pure |
 | `tests/terminal_queries.rs` (responses) | `tests/terminal-queries.test.ts` | 3 | **libghostty** |
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
@@ -154,13 +155,19 @@ styling (bold/underline) in the ANSI capture, and carriage-return overwrite.
 
 ## Scope
 
-The `pty` project is ~24.6k lines of tests across 108 files. Most of that suite
-tests the TypeScript **CLI, session daemon, wire protocol, and TUI
-framework/widgets** — porting those means porting the whole application, which is
-outside this experiment. This crate ports the slice where **libghostty is the
-subject**: the PTY → terminal-emulation → screenshot testing path, plus the pure
-utility modules its harness depends on (`keys`, `duration`) and the spawn-env
-isolation logic.
+Ported so far (v0 + hardening): the **testing harness** (`Session` on
+libghostty), the **`pty` CLI + per-session daemon** (`run`/`ls`/`peek`/`send`/
+`attach`/`status`/`kill`/`up`/`down`/`restart`/`rename`/`rm`), the **wire
+protocol**, the **session registry** (`sessions.ts` layout), **pty.toml
+manifests**, and the pure utility modules the harness/CLI depend on (`keys`,
+`duration`, `input`, `queries`, `paste`).
+
+Still on the TypeScript side (not yet ported): the TUI framework + widgets,
+events log, tags, gc, remote/fabric, and the many higher-level CLI niceties
+(`exec`, `stats`, `tag`, filters, follow mode). The `pty` project is ~24.6k
+lines of tests across 108 files; this is a focused, faithful port of the core
+that proves libghostty can back a real `pty`, with the ported tests as the
+correctness net.
 
 ## Layout
 
@@ -178,6 +185,7 @@ src/
   duration.rs     parse/format durations (port of duration.ts)
   input.rs        stdin key + SGR-mouse + Kitty CSI-u parsing (port of tui/input.ts)
   queries.rs      terminal-query stripping (port of stripTerminalQueries)
+  paste.rs        bracketed-paste wrapping (port of paste.ts)
 examples/demo.rs  live libghostty screenshot loop (cargo run --example demo)
 tests/            ported test suites + CLI e2e (see table above)
 ```

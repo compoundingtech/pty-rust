@@ -17,6 +17,7 @@ pub mod daemon;
 pub mod duration;
 pub mod input;
 pub mod keys;
+pub mod paste;
 pub mod protocol;
 pub mod ptyfile;
 pub mod queries;
