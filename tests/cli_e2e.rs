@@ -7,12 +7,24 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use pty_testkit::{Session, SpawnOptions};
 
 fn pty_bin() -> &'static str {
     env!("CARGO_BIN_EXE_pty")
+}
+
+/// Serialize these heavy real-daemon tests. Rust runs a binary's tests in
+/// parallel by default; each of these spawns detached daemons + PTYs, and
+/// enough of them at once starve each other's daemon-startup timing (the "green
+/// in isolation, red under load" class). Holding this lock keeps at most one
+/// running at a time — the same approach the upstream vitest config takes for
+/// its heavy PTY tests. Poison-tolerant so one failure doesn't cascade.
+fn serial() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn unique_root() -> PathBuf {
@@ -30,6 +42,11 @@ fn run_pty(root: &PathBuf, args: &[&str]) -> (String, String, i32) {
     let out = Command::new(pty_bin())
         .args(args)
         .env("PTY_ROOT", root)
+        // These tests deliberately CREATE sessions; scrub any ambient
+        // PTY_SESSION so nesting-prevention (correct in production) doesn't turn
+        // `pty run` into a direct exec when the test harness itself runs inside
+        // a pty session.
+        .env_remove("PTY_SESSION")
         .output()
         .expect("spawn pty");
     (
@@ -48,6 +65,7 @@ fn ok_pty(root: &PathBuf, args: &[&str]) -> String {
 
 #[test]
 fn run_ls_peek_send_kill_lifecycle() {
+    let _serial = serial();
     let root = unique_root();
     // Spawn a persistent bash session.
     let (name, _e, code) = run_pty(
@@ -114,6 +132,7 @@ fn run_ls_peek_send_kill_lifecycle() {
 
 #[test]
 fn up_and_down_from_a_manifest() {
+    let _serial = serial();
     let root = unique_root();
     let work = unique_root();
     std::fs::write(
@@ -157,6 +176,7 @@ fn up_and_down_from_a_manifest() {
 
 #[test]
 fn restart_rename_rm() {
+    let _serial = serial();
     let root = unique_root();
     // A session that prints its own pid so we can tell restarts apart.
     let (name, _e, code) = run_pty(
@@ -211,7 +231,46 @@ fn restart_rename_rm() {
 }
 
 #[test]
+fn nesting_prevention_runs_directly_inside_a_session() {
+    let _serial = serial();
+    let root = unique_root();
+    // PTY_SESSION set + no -d: `pty run` should run the command DIRECTLY (no
+    // session-in-a-session), so stdout is the command's output, not a session id.
+    let out = Command::new(pty_bin())
+        .args(["run", "--", "echo", "nested-direct"])
+        .env("PTY_ROOT", &root)
+        .env("PTY_SESSION", "fake-parent")
+        .output()
+        .expect("spawn pty");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "nested-direct",
+        "should have run the command directly"
+    );
+    // No session was created.
+    let ls = ok_pty(&root, &["ls"]);
+    assert!(ls.contains("No sessions"), "a nested session was created:\n{ls}");
+
+    // With -d, it DOES create a background session even inside a session.
+    let out = Command::new(pty_bin())
+        .args(["run", "-d", "--id", "nbg", "--", "cat"])
+        .env("PTY_ROOT", &root)
+        .env("PTY_SESSION", "fake-parent")
+        .output()
+        .expect("spawn pty");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nbg");
+    let ls = ok_pty(&root, &["ls"]);
+    assert!(ls.contains("nbg") && ls.contains("running"), "ls:\n{ls}");
+
+    let _ = run_pty(&root, &["kill", "nbg"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn attach_is_interactive_and_detaches() {
+    let _serial = serial();
     let root = unique_root();
     let root_str = root.to_string_lossy().to_string();
 

@@ -59,6 +59,7 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut cwd: Option<String> = None;
     let mut rows = 24u16;
     let mut cols = 80u16;
+    let mut background = false;
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -83,8 +84,12 @@ fn cmd_run(args: &[String]) -> i32 {
                 cols = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(80);
                 i += 2;
             }
-            "-d" | "-a" | "-e" | "--no-display-name" => {
-                // Accepted for CLI compatibility; v0 always backgrounds.
+            "-d" => {
+                background = true;
+                i += 1;
+            }
+            "-a" | "-e" | "--no-display-name" => {
+                // Accepted for CLI compatibility (attach/ephemeral/no-label).
                 i += 1;
             }
             "--" => {
@@ -102,6 +107,23 @@ fn cmd_run(args: &[String]) -> i32 {
     if command.is_empty() {
         eprintln!("pty run: no command given (use `pty run -- <cmd> [args...]`)");
         return 2;
+    }
+
+    // Nesting prevention: running `pty run` from inside a pty session would
+    // create a session-inside-a-session. Detect it via PTY_SESSION and just run
+    // the command directly, unless `-d` explicitly asks for a background session.
+    if !background && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false) {
+        let (program, pargs) = command.split_first().unwrap();
+        let mut c = std::process::Command::new(program);
+        c.args(pargs);
+        if let Some(dir) = &cwd {
+            c.current_dir(dir);
+        }
+        use std::os::unix::process::CommandExt;
+        // exec() only returns on failure.
+        let err = c.exec();
+        eprintln!("pty run: exec '{program}' failed: {err}");
+        return 127;
     }
 
     let name = id.unwrap_or_else(registry::generate_id);
@@ -166,7 +188,7 @@ fn spawn_session_daemon(
     dcmd.spawn().map_err(|e| format!("failed to start daemon: {e}"))?;
 
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < Duration::from_secs(15) {
         if client::is_alive(name) {
             return Ok(());
         }
