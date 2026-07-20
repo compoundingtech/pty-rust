@@ -135,7 +135,8 @@ pub const DEFAULT_SEQ_DELAY_MS: u64 = 300;
 pub fn resolve_seq_delay_ms(delay_secs: Option<f64>) -> u64 {
     match delay_secs {
         None => DEFAULT_SEQ_DELAY_MS,
-        Some(n) => (n * 1000.0) as u64,
+        // node uses Math.round (not truncation): 0.4285s -> 429ms.
+        Some(n) => (n * 1000.0).round() as u64,
     }
 }
 

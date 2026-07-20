@@ -25,6 +25,14 @@ fn seq_delay_n_resolves_to_n_seconds() {
     assert_eq!(resolve_seq_delay_ms(Some(2.0)), 2000);
 }
 
+#[test]
+fn seq_delay_rounds_not_truncates() {
+    // node uses Math.round(sec * 1000): 0.4285 -> 429 (not 428). pty-claude
+    // pinned this edge in the node reference tests, so rust matches.
+    assert_eq!(resolve_seq_delay_ms(Some(0.4285)), 429);
+    assert_eq!(resolve_seq_delay_ms(Some(0.4284)), 428);
+}
+
 // ── #2: plain screenshot keeps a trailing WRITTEN space (cursor cell) ──
 
 #[test]

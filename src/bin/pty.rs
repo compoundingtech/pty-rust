@@ -60,7 +60,6 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut rows = 24u16;
     let mut cols = 80u16;
     let mut background = false;
-    let mut force = false;
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -89,14 +88,12 @@ fn cmd_run(args: &[String]) -> i32 {
                 background = true;
                 i += 1;
             }
-            "--force" => {
-                // Node accepts --force to create even from inside a pty session
-                // (bypass the nesting guard). Accept it and bypass exec-directly.
-                force = true;
-                i += 1;
-            }
-            "-a" | "--attach" | "-e" | "--ephemeral" | "--isolate-env" | "--no-display-name" => {
-                // Accepted for CLI compatibility (attach/ephemeral/no-label).
+            "--force" | "-a" | "--attach" | "-e" | "--ephemeral" | "--isolate-env"
+            | "--no-display-name" => {
+                // Accepted for CLI compatibility. On `run`, node's runtime makes
+                // --force a NO-OP (only -d bypasses the nesting guard); --force
+                // only bypasses on `attach`. So we parse it (don't treat it as
+                // the command) but it does not change run's nesting behavior.
                 i += 1;
             }
             "--" => {
@@ -118,12 +115,9 @@ fn cmd_run(args: &[String]) -> i32 {
 
     // Nesting prevention: running `pty run` from inside a pty session would
     // create a session-inside-a-session. Detect it via PTY_SESSION and just run
-    // the command directly, unless `-d` (background) or `--force` explicitly
-    // asks for a real nested session — matching node's contract.
-    if !background
-        && !force
-        && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false)
-    {
+    // the command directly, unless `-d` asks for a background session. Matching
+    // node's RUNTIME: on `run`, only -d bypasses the guard (--force is a no-op).
+    if !background && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false) {
         let (program, pargs) = command.split_first().unwrap();
         let mut c = std::process::Command::new(program);
         c.args(pargs);
