@@ -119,11 +119,10 @@ pub fn status(name: &str) -> std::io::Result<String> {
     stream.write_all(&encode_status())?;
     stream.flush()?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    if let Some(p) = read_packet(&mut stream)? {
-        if p.type_ == MessageType::Status {
+    if let Some(p) = read_packet(&mut stream)?
+        && p.type_ == MessageType::Status {
             return Ok(String::from_utf8_lossy(&p.payload).into_owned());
         }
-    }
     Ok(String::new())
 }
 

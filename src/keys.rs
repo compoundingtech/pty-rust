@@ -123,18 +123,15 @@ pub fn resolve_key(spec: &str) -> Result<String, KeyError> {
     if let Some(digits) = mapped
         .strip_prefix("\x1b[")
         .and_then(|s| s.strip_suffix('~'))
-    {
-        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
             return Ok(format!("\x1b[{digits};{modp}~"));
         }
-    }
 
     // CSI sequences of form ESC [ X  (single uppercase letter: arrows, home, end).
-    if let Some(letter) = mapped.strip_prefix("\x1b[") {
-        if letter.len() == 1 && letter.as_bytes()[0].is_ascii_uppercase() {
+    if let Some(letter) = mapped.strip_prefix("\x1b[")
+        && letter.len() == 1 && letter.as_bytes()[0].is_ascii_uppercase() {
             return Ok(format!("\x1b[1;{modp}{letter}"));
         }
-    }
 
     // Control-char keys (return, tab, escape, space, backspace): CSI-u encoding.
     if let Some(keycode) = csi_u_keycode(&base) {

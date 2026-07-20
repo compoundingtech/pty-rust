@@ -37,16 +37,14 @@ pub struct SessionMetadata {
 /// Resolve the session registry directory: `$PTY_ROOT`, else the deprecated
 /// `$PTY_SESSION_DIR`, else `~/.local/state/pty`.
 pub fn session_dir() -> PathBuf {
-    if let Ok(root) = std::env::var("PTY_ROOT") {
-        if !root.is_empty() {
+    if let Ok(root) = std::env::var("PTY_ROOT")
+        && !root.is_empty() {
             return PathBuf::from(root);
         }
-    }
-    if let Ok(legacy) = std::env::var("PTY_SESSION_DIR") {
-        if !legacy.is_empty() {
+    if let Ok(legacy) = std::env::var("PTY_SESSION_DIR")
+        && !legacy.is_empty() {
             return PathBuf::from(legacy);
         }
-    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".local/state/pty")
 }

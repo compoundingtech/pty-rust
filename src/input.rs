@@ -230,8 +230,8 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                 }
 
                 // Arrow keys, home, end (bare).
-                if p < len {
-                    if let Some(name) = match chars[p] {
+                if p < len
+                    && let Some(name) = match chars[p] {
                         'A' => Some("up"),
                         'B' => Some("down"),
                         'C' => Some("right"),
@@ -244,14 +244,13 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                         i = p + 1;
                         continue;
                     }
-                }
 
                 // Modified arrows: ESC [ 1 ; <mods> <letter>.
                 if p + 1 < len && chars[p] == '1' && chars[p + 1] == ';' {
                     let (mods_raw, q1) = take_digits(&chars, p + 2);
-                    if let Some(mods_raw) = mods_raw {
-                        if q1 < len {
-                            if let Some(name) = match chars[q1] {
+                    if let Some(mods_raw) = mods_raw
+                        && q1 < len
+                            && let Some(name) = match chars[q1] {
                                 'A' => Some("up"),
                                 'B' => Some("down"),
                                 'C' => Some("right"),
@@ -268,8 +267,6 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                                 i = q1 + 1;
                                 continue;
                             }
-                        }
-                    }
                 }
 
                 // Shift+Tab (legacy): ESC [ Z
@@ -280,8 +277,8 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                 }
 
                 // ESC [ 3~ / 5~ / 6~
-                if p + 1 < len && chars[p + 1] == '~' {
-                    if let Some(name) = match chars[p] {
+                if p + 1 < len && chars[p + 1] == '~'
+                    && let Some(name) = match chars[p] {
                         '3' => Some("delete"),
                         '5' => Some("pageup"),
                         '6' => Some("pagedown"),
@@ -291,7 +288,6 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                         i = p + 2;
                         continue;
                     }
-                }
 
                 // Kitty keyboard protocol: ESC [ <code> [; <mods>] u
                 if p < len && chars[p].is_ascii_digit() {
@@ -304,8 +300,8 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                         } else {
                             (Some(1), q1)
                         };
-                        if let Some(mods_wire) = mods_wire {
-                            if q2 < len && chars[q2] == 'u' {
+                        if let Some(mods_wire) = mods_wire
+                            && q2 < len && chars[q2] == 'u' {
                                 let mods = mods_wire.saturating_sub(1);
                                 let shift = mods & 0x01 != 0;
                                 let alt = mods & 0x02 != 0;
@@ -320,7 +316,6 @@ pub fn parse_input(data: &[u8]) -> Vec<InputEvent> {
                                 i = q2 + 1;
                                 continue;
                             }
-                        }
                     }
                 }
 

@@ -22,8 +22,8 @@ fn always_scrubs_pty_session_and_server_config() {
         ]),
         &[],
     );
-    assert!(env.get("PTY_SESSION").is_none());
-    assert!(env.get("PTY_SERVER_CONFIG").is_none());
+    assert!(!env.contains_key("PTY_SESSION"));
+    assert!(!env.contains_key("PTY_SERVER_CONFIG"));
     assert_eq!(env.get("HOME").map(String::as_str), Some("/h")); // unrelated vars pass through
 }
 
@@ -33,8 +33,8 @@ fn scrubs_ambient_root_and_dir_when_caller_didnt_set_them() {
         &kv(&[("PTY_ROOT", "/real/root"), ("PTY_SESSION_DIR", "/real/dir")]),
         &[],
     );
-    assert!(env.get("PTY_ROOT").is_none());
-    assert!(env.get("PTY_SESSION_DIR").is_none());
+    assert!(!env.contains_key("PTY_ROOT"));
+    assert!(!env.contains_key("PTY_SESSION_DIR"));
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn ambient_root_does_not_override_explicit_session_dir() {
         &kv(&[("PTY_ROOT", "/real/root"), ("HOME", "/h")]),
         &kv(&[("PTY_SESSION_DIR", "/tmp/isolated")]),
     );
-    assert!(env.get("PTY_ROOT").is_none());
+    assert!(!env.contains_key("PTY_ROOT"));
     assert_eq!(
         env.get("PTY_SESSION_DIR").map(String::as_str),
         Some("/tmp/isolated")

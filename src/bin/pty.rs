@@ -288,7 +288,7 @@ fn cmd_ls(args: &[String]) -> i32 {
         println!("No sessions.");
         return 0;
     }
-    println!("{:<16} {:<10} {}", "NAME", "STATUS", "COMMAND");
+    println!("{:<16} {:<10} COMMAND", "NAME", "STATUS");
     for s in sessions {
         let status = if s.alive {
             "running".to_string()
@@ -506,11 +506,10 @@ fn manifest_session_name(sess: &PtySessionDef) -> String {
 
 /// Split `up`/`down` args into an optional manifest dir and session filters.
 fn split_dir_and_filters(args: &[String]) -> (Option<String>, Vec<String>) {
-    if let Some(first) = args.first() {
-        if std::path::Path::new(first).is_dir() {
+    if let Some(first) = args.first()
+        && std::path::Path::new(first).is_dir() {
             return (Some(first.clone()), args[1..].to_vec());
         }
-    }
     (None, args.to_vec())
 }
 
