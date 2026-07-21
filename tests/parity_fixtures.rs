@@ -60,6 +60,133 @@ fn strip_one_trailing_nl(s: &str) -> String {
     s.strip_suffix('\n').unwrap_or(s).to_string()
 }
 
+/// Assert `entry[key]` against a shapes.json field policy:
+/// `{exact:<v>}` (=== v, incl null), `{type:"number"|"string"}` (present,
+/// non-null, that type), or `{omitWhenUnset:true}` (key ABSENT).
+fn assert_field(ctx: &str, entry: &serde_json::Value, key: &str, policy: &serde_json::Value) {
+    if policy.get("omitWhenUnset").and_then(|v| v.as_bool()) == Some(true) {
+        assert!(
+            entry.get(key).is_none(),
+            "{ctx}: {key} should be omitted, got {:?}",
+            entry.get(key)
+        );
+    } else if let Some(exact) = policy.get("exact") {
+        assert_eq!(
+            entry.get(key).unwrap_or(&serde_json::Value::Null),
+            exact,
+            "{ctx}: {key} != {exact}"
+        );
+    } else if let Some(t) = policy.get("type").and_then(|v| v.as_str()) {
+        let val = entry.get(key).unwrap_or(&serde_json::Value::Null);
+        match t {
+            "number" => assert!(val.is_number(), "{ctx}: {key} not a number: {val:?}"),
+            "string" => assert!(val.is_string(), "{ctx}: {key} not a string: {val:?}"),
+            other => panic!("{ctx}: unknown type policy {other:?}"),
+        }
+    } else {
+        panic!("{ctx}: unrecognized policy {policy:?}");
+    }
+}
+
+#[test]
+fn shared_json_shape_fixtures_pass() {
+    let _serial = serial();
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/parity/shapes.json"
+    ))
+    .expect("read shapes fixtures");
+    let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid shapes json");
+    let arr = doc["fixtures"].as_array().expect("doc.fixtures array");
+
+    for fx in arr {
+        let id = fx["id"].as_str().unwrap_or("?");
+        let kind = fx["kind"].as_str().unwrap_or("");
+        let settle = fx["settleMs"].as_u64().unwrap_or(700);
+        let env: Vec<(String, String)> = fx["env"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let root = unique_root(id);
+
+        match kind {
+            "ls-json-shape" => {
+                // Create each declared session via its exact CLI args.
+                let sessions = fx["sessions"].as_array().expect("sessions array");
+                for s in sessions {
+                    let run_args: Vec<String> = s["run"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap().to_string())
+                        .collect();
+                    let run_ref: Vec<&str> = run_args.iter().map(String::as_str).collect();
+                    let (_o, err, code) = pty_env(&root, &run_ref, &env);
+                    assert_eq!(code, 0, "[{id}] run {run_args:?} failed: {err}");
+                }
+                std::thread::sleep(Duration::from_millis(settle));
+
+                let (ls, err, code) = pty(&root, &["ls", "--json"]);
+                assert_eq!(code, 0, "[{id}] ls --json failed: {err}");
+                let list: serde_json::Value = serde_json::from_str(&ls).expect("ls json");
+                let list = list.as_array().expect("ls array");
+
+                for s in sessions {
+                    let sid = s["id"].as_str().unwrap();
+                    let entry = list
+                        .iter()
+                        .find(|e| e["name"] == serde_json::json!(sid))
+                        .unwrap_or_else(|| panic!("[{id}] {sid} not in ls --json: {ls}"));
+                    let expect = s["expect"].as_object().expect("expect object");
+                    for (key, policy) in expect {
+                        assert_field(&format!("[{id}/{sid}]"), entry, key, policy);
+                    }
+                }
+            }
+            "stats-clients" => {
+                let run_args: Vec<String> = fx["run"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                let run_ref: Vec<&str> = run_args.iter().map(String::as_str).collect();
+                let sid = run_args
+                    .iter()
+                    .position(|a| a == "--id")
+                    .and_then(|i| run_args.get(i + 1))
+                    .cloned()
+                    .expect("run has --id");
+                let (_o, err, code) = pty_env(&root, &run_ref, &env);
+                assert_eq!(code, 0, "[{id}] run failed: {err}");
+                std::thread::sleep(Duration::from_millis(settle));
+
+                // A transient peek first (must not count as an attached client).
+                if fx["peekFirst"].as_bool() == Some(true) {
+                    let _ = pty(&root, &["peek", &sid]);
+                }
+                let (stats, err, code) = pty(&root, &["stats", "--json", &sid]);
+                assert_eq!(code, 0, "[{id}] stats --json failed: {err}");
+                let v: serde_json::Value = serde_json::from_str(&stats).expect("stats json");
+                // expect.clients.<field> policies.
+                if let Some(clients) = fx["expect"]["clients"].as_object() {
+                    for (key, policy) in clients {
+                        assert_field(&format!("[{id}] clients"), &v["clients"], key, policy);
+                    }
+                }
+                let _ = pty(&root, &["kill", &sid]);
+            }
+            other => panic!("[{id}] unknown json-shape kind {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 #[test]
 fn shared_parity_fixtures_pass() {
     let _serial = serial();

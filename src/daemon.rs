@@ -41,6 +41,8 @@ pub struct DaemonConfig {
     pub ephemeral: bool,
     /// Session tags — `keep=true` forces preserve, `strategy=permanent` too.
     pub tags: std::collections::BTreeMap<String, String>,
+    /// `--name`: display label written to metadata (surfaced by `ls --json`).
+    pub display_name: Option<String>,
 }
 
 enum DaemonMsg {
@@ -200,7 +202,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
         } else {
             Some(cfg.tags.clone())
         },
-        display_name: None,
+        display_name: cfg.display_name.clone(),
         last_attach_at: None,
     };
     registry::write_metadata(&cfg.name, &meta)?;

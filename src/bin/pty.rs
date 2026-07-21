@@ -314,7 +314,6 @@ fn cmd_daemon(args: &[String]) -> i32 {
         return 2;
     }
     let (program, cargs) = command.split_first().unwrap();
-    let _ = &display_name; // display-name is applied by `rename` in a later phase
     let cfg = DaemonConfig {
         name,
         command: program.clone(),
@@ -326,6 +325,7 @@ fn cmd_daemon(args: &[String]) -> i32 {
         env: Vec::new(),
         ephemeral,
         tags,
+        display_name,
     };
     match daemon::run(cfg) {
         Ok(code) => code,
