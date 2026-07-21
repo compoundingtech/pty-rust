@@ -274,6 +274,88 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn stats_json_matches_node_contract() {
+    // Parity B: stats --json shape. EXACT for stable fields (geometry,
+    // scrollbackCapacity=rows+10000, alive, status, modes, client counts,
+    // exited exitCode); SHAPE/TYPE-only for volatile (pids differ, resources,
+    // cursor, uptime, createdAt); OMIT-when-unset (geometryNeutral, capabilities,
+    // gone tags).
+    let _serial = serial();
+    let root = unique_root();
+    let (_n, _e, code) = run_pty(
+        &root,
+        &["run", "--id", "sj", "--rows", "30", "--cols", "100", "--", "cat"],
+    );
+    assert_eq!(code, 0);
+    // wait until up
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if run_pty(&root, &["stats", "--json", "sj"]).2 == 0
+            && run_pty(&root, &["stats", "--json", "sj"]).0.contains("\"terminal\"")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let out = ok_pty(&root, &["stats", "--json", "sj"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+
+    // EXACT-value fields.
+    assert_eq!(v["name"], "sj");
+    assert_eq!(v["terminal"]["cols"], 100);
+    assert_eq!(v["terminal"]["rows"], 30);
+    assert_eq!(v["terminal"]["scrollbackCapacity"], 30 + 10000);
+    assert_eq!(v["process"]["alive"], true);
+    assert_eq!(v["clients"]["total"], 0);
+    assert_eq!(v["clients"]["attached"], 0);
+    assert_eq!(v["clients"]["readOnly"], 0);
+    assert_eq!(v["modes"]["sgrMouse"], false);
+    assert_eq!(v["modes"]["cursorHidden"], false);
+    assert_eq!(v["modes"]["kittyKeyboard"], false);
+    assert_eq!(v["modes"]["kittyKeyboardFlags"], serde_json::json!([]));
+
+    // SHAPE/TYPE-only: pids are numbers and differ; resources numeric; uptime
+    // numeric; createdAt string.
+    let ppid = v["process"]["pid"].as_i64().expect("process.pid number");
+    let dpid = v["daemon"]["pid"].as_i64().expect("daemon.pid number");
+    assert_ne!(ppid, dpid, "process.pid must differ from daemon.pid");
+    assert!(v["process"]["resources"]["rssKb"].is_number());
+    assert!(v["process"]["resources"]["cpuPercent"].is_number());
+    assert!(v["daemon"]["resources"]["rssKb"].is_number());
+    assert!(v["terminal"]["cursorX"].is_number());
+    assert!(v["terminal"]["cursorY"].is_number());
+    assert!(v["terminal"]["scrollbackUsed"].is_number());
+    assert!(v["uptimeSeconds"].is_number());
+    assert!(v["createdAt"].is_string());
+
+    // OMIT-when-unset.
+    assert!(v["clients"].get("geometryNeutral").is_none(), "geometryNeutral should be omitted");
+    assert!(v.get("capabilities").is_none(), "capabilities should be omitted");
+
+    // Gone session: small shape.
+    let (_n, _e, code) = run_pty(&root, &["run", "--id", "sg", "--", "sh", "-c", "exit 6"]);
+    assert_eq!(code, 0);
+    let start = Instant::now();
+    let mut gone = String::new();
+    while start.elapsed() < Duration::from_secs(5) {
+        gone = ok_pty(&root, &["stats", "--json", "sg"]);
+        if gone.contains("\"exited\"") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let g: serde_json::Value = serde_json::from_str(&gone).expect("valid gone json");
+    assert_eq!(g["name"], "sg");
+    assert_eq!(g["status"], "exited");
+    assert_eq!(g["exitCode"], 6);
+    assert!(g["exitedAt"].is_string());
+    assert!(g.get("tags").is_none(), "tags should be omitted when unset");
+
+    let _ = run_pty(&root, &["kill", "sj"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn version_is_bare_semver() {
     // Parity E: `pty version` prints bare semver (node's format), not a
     // "pty-rust X.Y.Z" label. Node's regex: ^\d+\.\d+\.\d+(\+[0-9a-f]{4,})?$

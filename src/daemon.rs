@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
-use libghostty_vt::terminal::{Options, Terminal};
+use libghostty_vt::terminal::{Mode, Options, Terminal};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::protocol::{
@@ -54,6 +54,7 @@ enum DaemonMsg {
 struct Client {
     tx: Sender<Vec<u8>>,
     streaming: bool,
+    geometry_neutral: bool,
 }
 
 /// The child (session) pid, for the SIGTERM handler to forward to. Node records
@@ -113,12 +114,14 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
     let master = pair.master;
 
     // ── metadata + pid ──
+    let created_at = now_iso8601();
+    let created_epoch = now_epoch_f64();
     let meta = SessionMetadata {
         command: cfg.command.clone(),
         args: cfg.args.clone(),
         display_command: cfg.display_command.clone(),
         cwd: cfg.cwd.clone(),
-        created_at: now_iso8601(),
+        created_at: created_at.clone(),
         exit_code: None,
         exited_at: None,
         last_lines: None,
@@ -229,11 +232,19 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                 });
             }
             DaemonMsg::ClientConnect { id, tx } => {
-                clients.insert(id, Client { tx, streaming: false });
+                clients.insert(
+                    id,
+                    Client {
+                        tx,
+                        streaming: false,
+                        geometry_neutral: false,
+                    },
+                );
             }
             DaemonMsg::ClientAttach { id, rows, cols, geometry_neutral } => {
                 if let Some(c) = clients.get_mut(&id) {
                     c.streaming = true;
+                    c.geometry_neutral = geometry_neutral;
                     // Replay the current screen WITH terminal mode/cursor state
                     // so a reattaching client restores a TUI's full state
                     // (mouse tracking, alt-screen, cursor visibility, kitty kbd),
@@ -272,14 +283,61 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                 let _ = terminal.resize(cols, rows, 0, 0);
             }
             DaemonMsg::ClientStatus { id } => {
-                // Count only ATTACHED (streaming) clients — a transient
-                // status/peek connection has not attached, so it isn't counted
-                // (matches node's `attached`).
-                let attached = clients.values().filter(|c| c.streaming).count();
-                let json = format!(
-                    "{{\"name\":{:?},\"rows\":{},\"cols\":{},\"clients\":{}}}",
-                    cfg.name, cur_rows, cur_cols, attached
-                );
+                // Client counts (streaming only; transient status/peek
+                // connections are not counted). geometry-neutral streaming
+                // clients (e.g. `peek -f`) count as read-only.
+                let attached = clients
+                    .values()
+                    .filter(|c| c.streaming && !c.geometry_neutral)
+                    .count();
+                let read_only = clients
+                    .values()
+                    .filter(|c| c.streaming && c.geometry_neutral)
+                    .count();
+                let kitty_bits = terminal
+                    .kitty_keyboard_flags()
+                    .map(|f| f.bits())
+                    .unwrap_or(0);
+                let stats = crate::stats::StatsResult {
+                    name: cfg.name.clone(),
+                    terminal: crate::stats::TerminalStats {
+                        cols: cur_cols,
+                        rows: cur_rows,
+                        cursor_x: terminal.cursor_x().unwrap_or(0),
+                        cursor_y: terminal.cursor_y().unwrap_or(0),
+                        scrollback_used: terminal.scrollback_rows().unwrap_or(0),
+                        scrollback_capacity: cur_rows as usize + 10_000,
+                    },
+                    process: crate::stats::ProcessStats {
+                        alive: true,
+                        exit_code: None,
+                        pid: Some(child_pid),
+                        resources: crate::stats::read_resources(child_pid),
+                    },
+                    daemon: crate::stats::DaemonStats {
+                        pid: std::process::id() as i32,
+                        resources: crate::stats::read_resources(std::process::id() as i32),
+                    },
+                    clients: crate::stats::ClientStats {
+                        total: attached + read_only,
+                        attached,
+                        read_only,
+                        geometry_neutral: if read_only > 0 { Some(read_only) } else { None },
+                    },
+                    modes: crate::stats::ModeStats {
+                        sgr_mouse: terminal.mode(Mode::SGR_MOUSE).unwrap_or(false),
+                        cursor_hidden: !terminal.is_cursor_visible().unwrap_or(true),
+                        kitty_keyboard: kitty_bits != 0,
+                        kitty_keyboard_flags: if kitty_bits != 0 {
+                            vec![kitty_bits]
+                        } else {
+                            vec![]
+                        },
+                    },
+                    uptime_seconds: Some((now_epoch_f64() - created_epoch).max(0.0)),
+                    created_at: Some(created_at.clone()),
+                };
+                let json = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into());
                 if let Some(c) = clients.get(&id) {
                     let _ = c.tx.send(encode_status_response(&json));
                 }
@@ -398,6 +456,15 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<DaemonMsg>) {
 
 fn exit_code(status: portable_pty::ExitStatus) -> Option<i32> {
     Some(if status.success() { 0 } else { status.exit_code() as i32 })
+}
+
+/// Current epoch time in seconds (fractional), for uptime.
+pub fn now_epoch_f64() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// A minimal ISO-8601 UTC timestamp (no external date crate).

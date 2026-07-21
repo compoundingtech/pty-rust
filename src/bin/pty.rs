@@ -807,32 +807,71 @@ fn cmd_kill(args: &[String]) -> i32 {
     0
 }
 
-/// `pty status <ref>`
+/// The small gone-session stats shape, from metadata.
+fn gone_stats(name: &str, meta: &registry::SessionMetadata) -> pty_testkit::stats::GoneStats {
+    let status = if meta.exit_code.is_some() {
+        "exited"
+    } else {
+        "vanished"
+    };
+    pty_testkit::stats::GoneStats {
+        name: name.to_string(),
+        status: status.to_string(),
+        exit_code: meta.exit_code,
+        exited_at: meta.exited_at.clone(),
+        tags: meta.tags.clone(),
+    }
+}
+
+/// `pty stats [--json] [--all] [<ref>]` — a running session emits the full
+/// StatsResult (queried from the daemon); a gone session emits the small shape;
+/// with no ref, an array of all (gone entries only with --all).
 fn cmd_status(args: &[String]) -> i32 {
-    let reference = match args.first() {
-        Some(r) => r.clone(),
-        None => {
-            eprintln!("pty status: usage: pty status <ref>");
-            return 2;
-        }
-    };
-    let name = match registry::resolve_ref(&reference) {
-        Some(n) => n,
-        None => {
-            eprintln!("pty status: no such session '{reference}'");
-            return 1;
-        }
-    };
-    match client::status(&name) {
-        Ok(json) => {
+    let all = args.iter().any(|a| a == "--all");
+    let reference = args.iter().find(|a| !a.starts_with('-')).cloned();
+
+    if let Some(reference) = reference {
+        let name = match registry::resolve_ref(&reference) {
+            Some(n) => n,
+            None => {
+                eprintln!("pty stats: no such session '{reference}'");
+                return 1;
+            }
+        };
+        // Running: query the live StatsResult from the daemon.
+        if client::is_alive(&name)
+            && let Ok(json) = client::status(&name)
+            && !json.is_empty()
+        {
             println!("{json}");
-            0
+            return 0;
         }
-        Err(e) => {
-            eprintln!("pty status: {e}");
-            1
+        // Gone: emit the small shape from metadata.
+        if let Some(meta) = registry::read_metadata(&name) {
+            println!("{}", serde_json::to_string(&gone_stats(&name, &meta)).unwrap());
+            return 0;
+        }
+        eprintln!("pty stats: no such session '{reference}'");
+        return 1;
+    }
+
+    // No ref: an array of all sessions.
+    let mut items: Vec<String> = Vec::new();
+    for s in registry::list_sessions() {
+        if s.alive {
+            match client::status(&s.name) {
+                Ok(json) if !json.is_empty() => items.push(json),
+                _ => items.push(format!(
+                    "{{\"name\":{},\"error\":\"query failed\"}}",
+                    serde_json::to_string(&s.name).unwrap()
+                )),
+            }
+        } else if all {
+            items.push(serde_json::to_string(&gone_stats(&s.name, &s.meta)).unwrap());
         }
     }
+    println!("[{}]", items.join(","));
+    0
 }
 
 fn print_help() {
@@ -852,7 +891,7 @@ fn print_help() {
          \x20 pty rename <ref> <label>\n\
          \x20 pty rm <ref>\n\
          \x20 pty kill <ref>\n\
-         \x20 pty status <ref>\n\
+         \x20 pty stats [--json] [--all] [<ref>]\n\
          \x20 pty version"
     );
 }

@@ -24,6 +24,7 @@ pub mod queries;
 pub mod registry;
 pub mod screenshot;
 pub mod session;
+pub mod stats;
 
 pub use screenshot::Screenshot;
 pub use session::{build_spawn_env, Session, SpawnOptions};
