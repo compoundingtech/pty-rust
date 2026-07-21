@@ -62,6 +62,7 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut rows = 24u16;
     let mut cols = 80u16;
     let mut background = false;
+    let mut force = false;
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -90,12 +91,15 @@ fn cmd_run(args: &[String]) -> i32 {
                 background = true;
                 i += 1;
             }
-            "--force" | "-a" | "--attach" | "-e" | "--ephemeral" | "--isolate-env"
-            | "--no-display-name" => {
-                // Accepted for CLI compatibility. On `run`, node's runtime makes
-                // --force a NO-OP (only -d bypasses the nesting guard); --force
-                // only bypasses on `attach`. So we parse it (don't treat it as
-                // the command) but it does not change run's nesting behavior.
+            "--force" => {
+                // Canonical (CoS/Nathan ruling, node code fixed to match its
+                // --help docs): --force creates even from inside a pty session
+                // (bypasses the nesting guard), symmetric with attach's --force.
+                force = true;
+                i += 1;
+            }
+            "-a" | "--attach" | "-e" | "--ephemeral" | "--isolate-env" | "--no-display-name" => {
+                // Accepted for CLI compatibility (attach/ephemeral/no-label).
                 i += 1;
             }
             "--" => {
@@ -116,10 +120,14 @@ fn cmd_run(args: &[String]) -> i32 {
     }
 
     // Nesting prevention: running `pty run` from inside a pty session would
-    // create a session-inside-a-session. Detect it via PTY_SESSION and just run
-    // the command directly, unless `-d` asks for a background session. Matching
-    // node's RUNTIME: on `run`, only -d bypasses the guard (--force is a no-op).
-    if !background && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false) {
+    // create a session-inside-a-session. Detect it via PTY_SESSION and run the
+    // command directly, unless `-d` (background) or `--force` explicitly asks
+    // for a real nested session — the canonical behavior (node code fixed to
+    // match its docs; --force creates).
+    if !background
+        && !force
+        && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false)
+    {
         let (program, pargs) = command.split_first().unwrap();
         let mut c = std::process::Command::new(program);
         c.args(pargs);

@@ -385,18 +385,17 @@ fn post_exit_peek_returns_final_screen() {
 }
 
 #[test]
-fn run_force_parsed_but_only_dash_d_bypasses_nesting() {
-    // Parity #4 (node RUNTIME, confirmed by pty-claude): on `run`, --force is a
-    // parsed no-op — only -d bypasses the nesting guard. (node's --help text
-    // says --force "creates even when nested", contradicting its runtime; that
-    // docs/behavior mismatch is being reconciled upstream. We match runtime.)
+fn run_force_creates_nested_session() {
+    // Parity #4 (canonical, CoS/Nathan ruling): --force CREATES a session even
+    // from inside a pty session (PTY_SESSION set) — bypasses the nesting guard,
+    // matching node's --help + the fixed node code. Both --force alone and
+    // --force -d create; and --force is parsed (not treated as the command).
     let _serial = serial();
     let root = unique_root();
 
-    // (a) --force -d creates a session (the -d does it) and --force is parsed
-    //     (not treated as the command).
+    // --force alone (no -d), nested, creates a real session.
     let out = Command::new(pty_bin())
-        .args(["run", "--force", "-d", "--id", "fd", "--", "cat"])
+        .args(["run", "--force", "--id", "fc", "--", "cat"])
         .env("PTY_ROOT", &root)
         .env("PTY_SESSION", "fake-parent")
         .output()
@@ -404,34 +403,29 @@ fn run_force_parsed_but_only_dash_d_bypasses_nesting() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "run --force -d failed: {}",
+        "run --force failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fd");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fc");
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("fd") && ls.contains("running"), "ls:\n{ls}");
+    assert!(
+        ls.contains("fc") && ls.contains("running"),
+        "--force should create a nested session:\n{ls}"
+    );
 
-    // (b) --force ALONE (no -d) inside a session runs the command DIRECTLY — no
-    //     session is created (node runtime: --force is a no-op on run).
+    // --force -d also creates (belt-and-suspenders form used in the report).
     let out = Command::new(pty_bin())
-        .args(["run", "--force", "--", "echo", "direct-not-session"])
+        .args(["run", "--force", "-d", "--id", "fd", "--", "cat"])
         .env("PTY_ROOT", &root)
         .env("PTY_SESSION", "fake-parent")
         .output()
         .expect("spawn pty");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "direct-not-session",
-        "--force alone should exec directly, not create a session"
-    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fd");
     let ls = ok_pty(&root, &["ls"]);
-    // Only 'fd' exists; the --force-alone run created nothing.
-    assert!(
-        ls.contains("fd") && !ls.contains("direct-not-session"),
-        "--force alone should not have created a session:\n{ls}"
-    );
+    assert!(ls.contains("fd") && ls.contains("running"), "ls:\n{ls}");
 
+    let _ = run_pty(&root, &["kill", "fc"]);
     let _ = run_pty(&root, &["kill", "fd"]);
     let _ = std::fs::remove_dir_all(&root);
 }
