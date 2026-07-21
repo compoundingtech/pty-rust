@@ -10,8 +10,8 @@
   {
     "id": "post-exit-final-screen",
     "kind": "plain-screen",
-    "description": "exited session retains its final screen for peek (idempotent)",
-    "spawn": { "command": "sh", "args": ["-c", "printf 'LINE_A\\nLINE_B\\nDONE'; exit 7"], "rows": 24, "cols": 80 },
+    "description": "exited session retains its final screen for peek in PRESERVE mode (idempotent)",
+    "spawn": { "command": "sh", "args": ["-c", "printf 'LINE_A\\nLINE_B\\nDONE'; exit 7"], "rows": 24, "cols": 80, "env": { "PTY_REAP_ON_EXIT": "false" } },
     "settleMs": 1200,
     "expect": { "plainScreen": "LINE_A\nLINE_B\nDONE", "status": "exited", "exitCode": 7 }
   }

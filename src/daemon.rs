@@ -37,6 +37,10 @@ pub struct DaemonConfig {
     pub rows: u16,
     pub cols: u16,
     pub env: Vec<(String, String)>,
+    /// `-e/--ephemeral`: force reap-on-exit (see [`should_reap`]).
+    pub ephemeral: bool,
+    /// Session tags — `keep=true` forces preserve, `strategy=permanent` too.
+    pub tags: std::collections::BTreeMap<String, String>,
 }
 
 enum DaemonMsg {
@@ -57,19 +61,69 @@ struct Client {
     geometry_neutral: bool,
 }
 
-/// The child (session) pid, for the SIGTERM handler to forward to. Node records
+/// The child (session) pid, for the signal handler to forward to. Node records
 /// the DAEMON pid in `<name>.pid`, so `kill` targets the daemon; the daemon then
 /// forwards the signal to the child, which triggers a clean exit + metadata.
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 
-extern "C" fn forward_sigterm(_sig: i32) {
+/// Set by the signal handler when the daemon is stopped EXTERNALLY (kill /
+/// SIGTERM / SIGINT). An external stop preserves the session regardless of the
+/// reap config (unless ephemeral) — only a child terminating on its own
+/// consults the config default.
+static EXTERNAL_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_external_stop(_sig: i32) {
+    EXTERNAL_STOP.store(true, Ordering::SeqCst);
     let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
-        // SAFETY: kill() is async-signal-safe.
+        // SAFETY: kill() is async-signal-safe. SIGHUP (terminal hangup) is the
+        // natural "session ended" signal — interactive shells (which IGNORE
+        // SIGTERM) and most programs terminate on it. A watchdog thread
+        // escalates to SIGKILL if the child ignores SIGHUP too.
         unsafe {
-            libc::kill(pid, libc::SIGTERM);
+            libc::kill(pid, libc::SIGHUP);
         }
     }
+}
+
+/// Falsey values for `PTY_REAP_ON_EXIT` (→ PRESERVE). Same set node uses.
+fn is_falsey(v: &str) -> bool {
+    matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no" | "off")
+}
+
+/// The reap default from `PTY_REAP_ON_EXIT`: unset → reap; falsey → preserve;
+/// anything else → reap.
+fn config_reap() -> bool {
+    match std::env::var("PTY_REAP_ON_EXIT") {
+        Ok(v) => !is_falsey(&v),
+        Err(_) => true,
+    }
+}
+
+/// Decide whether to reap (remove) the session on exit. Precedence (node #114):
+/// an external stop preserves unless ephemeral; otherwise keep=true → preserve,
+/// ephemeral → reap, strategy=permanent → preserve, else the config default.
+pub fn should_reap(
+    external_stop: bool,
+    ephemeral: bool,
+    keep: bool,
+    permanent: bool,
+    config_reap: bool,
+) -> bool {
+    if external_stop {
+        // External stop preserves unless the session is ephemeral.
+        return ephemeral;
+    }
+    if keep {
+        return false; // preserve (also gc-exempt)
+    }
+    if ephemeral {
+        return true; // reap
+    }
+    if permanent {
+        return false; // preserve (supervisor respawn needs metadata)
+    }
+    config_reap
 }
 
 /// Run the session daemon to completion. Blocks until the child process exits
@@ -105,9 +159,25 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
     let child_pid = child.process_id().unwrap_or(0) as i32;
     CHILD_PID.store(child_pid, Ordering::SeqCst);
     unsafe {
-        let handler = forward_sigterm as extern "C" fn(i32);
+        let handler = on_external_stop as extern "C" fn(i32);
         libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
     }
+    // Watchdog: on an external stop, if the child ignores SIGHUP (e.g. a
+    // program that traps it), escalate to SIGKILL after a short grace so the
+    // daemon can proceed to its clean shutdown.
+    std::thread::spawn(move || loop {
+        if EXTERNAL_STOP.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if child_pid > 0 {
+                unsafe {
+                    libc::kill(child_pid, libc::SIGKILL);
+                }
+            }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    });
 
     let reader = pair.master.try_clone_reader().map_err(std::io::Error::other)?;
     let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
@@ -125,7 +195,11 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
         exit_code: None,
         exited_at: None,
         last_lines: None,
-        tags: None,
+        tags: if cfg.tags.is_empty() {
+            None
+        } else {
+            Some(cfg.tags.clone())
+        },
         display_name: None,
         last_attach_at: None,
     };
@@ -346,34 +420,44 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                 clients.remove(&id);
             }
             DaemonMsg::PtyExited(code) => {
-                // Record exit + last screen lines, notify clients.
-                let ss = capture(&terminal);
-                let tail: Vec<String> = ss
-                    .lines
-                    .iter()
-                    .rev()
-                    .take(50)
-                    .rev()
-                    .cloned()
-                    .collect();
-                // Persist the final screen so `peek` still works after the
-                // daemon/socket is gone (parity with node).
-                let _ = registry::write_final_screen(
-                    &cfg.name,
-                    &registry::FinalScreen {
-                        plain: ss.text.clone(),
-                        ansi: ss.ansi.clone(),
-                    },
-                );
-                if let Some(mut m) = registry::read_metadata(&cfg.name) {
-                    m.exit_code = Some(code);
-                    m.exited_at = Some(now_iso8601());
-                    m.last_lines = Some(tail);
-                    let _ = registry::write_metadata(&cfg.name, &m);
-                }
+                // Decide reap vs preserve (node #114 precedence).
+                let external = EXTERNAL_STOP.load(Ordering::SeqCst);
+                let keep = cfg.tags.get("keep").map(|v| v == "true").unwrap_or(false);
+                let permanent = cfg
+                    .tags
+                    .get("strategy")
+                    .map(|v| v == "permanent")
+                    .unwrap_or(false);
+                let reap = should_reap(external, cfg.ephemeral, keep, permanent, config_reap());
+
+                // Notify clients of the exit either way.
                 let packet = encode_exit(code);
                 for c in clients.values() {
                     let _ = c.tx.send(packet.clone());
+                }
+
+                if reap {
+                    // Remove the session entirely (metadata + events + socket +
+                    // pid + final-screen). Post-exit peek -> ENOENT; ls omits it.
+                    registry::cleanup(&cfg.name);
+                } else {
+                    // Preserve: keep the session as status=exited, peekable.
+                    let ss = capture(&terminal);
+                    let tail: Vec<String> =
+                        ss.lines.iter().rev().take(50).rev().cloned().collect();
+                    let _ = registry::write_final_screen(
+                        &cfg.name,
+                        &registry::FinalScreen {
+                            plain: ss.text.clone(),
+                            ansi: ss.ansi.clone(),
+                        },
+                    );
+                    if let Some(mut m) = registry::read_metadata(&cfg.name) {
+                        m.exit_code = Some(code);
+                        m.exited_at = Some(now_iso8601());
+                        m.last_lines = Some(tail);
+                        let _ = registry::write_metadata(&cfg.name, &m);
+                    }
                 }
                 exit_code_final = code;
                 break;

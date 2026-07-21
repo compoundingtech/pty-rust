@@ -30,14 +30,23 @@ fn unique_root(tag: &str) -> PathBuf {
     dir
 }
 
-/// Run a pty subcommand in an isolated registry, scrubbing ambient PTY_SESSION.
+/// Run a pty subcommand in an isolated registry, scrubbing ambient PTY_SESSION
+/// and PTY_REAP_ON_EXIT (so a fixture's own env — e.g. PTY_REAP_ON_EXIT=false —
+/// is the only source of reap config, deterministically).
 fn pty(root: &PathBuf, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(pty_bin())
-        .args(args)
+    pty_env(root, args, &[])
+}
+
+fn pty_env(root: &PathBuf, args: &[&str], env: &[(String, String)]) -> (String, String, i32) {
+    let mut c = Command::new(pty_bin());
+    c.args(args)
         .env("PTY_ROOT", root)
         .env_remove("PTY_SESSION")
-        .output()
-        .expect("spawn pty");
+        .env_remove("PTY_REAP_ON_EXIT");
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let out = c.output().expect("spawn pty");
     (
         // NB: only trailing newline stripped (node strips one trailing \n too),
         // NOT full trim — the fixtures assert exact inner + trailing content.
@@ -79,6 +88,15 @@ fn shared_parity_fixtures_pass() {
         let cols = fx["spawn"]["cols"].as_u64().unwrap_or(80).to_string();
         let settle = fx["settleMs"].as_u64().unwrap_or(500);
         let expect_screen = fx["expect"]["plainScreen"].as_str().expect("expect.plainScreen");
+        // Per-fixture spawn env (schema v2), e.g. PTY_REAP_ON_EXIT=false.
+        let spawn_env: Vec<(String, String)> = fx["spawn"]["env"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let root = unique_root(id);
         // Build: run --id <id> --rows R --cols C -- <command> <args...>
@@ -88,7 +106,7 @@ fn shared_parity_fixtures_pass() {
         for a in &args {
             run_args.push(a);
         }
-        let (_o, err, code) = pty(&root, &run_args);
+        let (_o, err, code) = pty_env(&root, &run_args, &spawn_env);
         assert_eq!(code, 0, "[{id}] run failed: {err}");
 
         std::thread::sleep(Duration::from_millis(settle));

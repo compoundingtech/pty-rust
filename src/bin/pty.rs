@@ -63,6 +63,8 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut cols = 80u16;
     let mut background = false;
     let mut force = false;
+    let mut ephemeral = false;
+    let mut tags: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -98,8 +100,19 @@ fn cmd_run(args: &[String]) -> i32 {
                 force = true;
                 i += 1;
             }
-            "-a" | "--attach" | "-e" | "--ephemeral" | "--isolate-env" | "--no-display-name" => {
-                // Accepted for CLI compatibility (attach/ephemeral/no-label).
+            "-e" | "--ephemeral" => {
+                // Force reap-on-exit (highest per-session override except keep).
+                ephemeral = true;
+                i += 1;
+            }
+            "--tag" => {
+                if let Some((k, v)) = args.get(i + 1).and_then(|kv| kv.split_once('=')) {
+                    tags.push((k.to_string(), v.to_string()));
+                }
+                i += 2;
+            }
+            "-a" | "--attach" | "--isolate-env" | "--no-display-name" => {
+                // Accepted for CLI compatibility (attach/no-label).
                 i += 1;
             }
             "--" => {
@@ -153,7 +166,16 @@ fn cmd_run(args: &[String]) -> i32 {
 
     let cwd = cwd.unwrap_or_else(|| daemon::default_cwd().to_string_lossy().into_owned());
 
-    match spawn_session_daemon(&name, &command, &cwd, rows, cols, display_name.as_deref()) {
+    match spawn_session_daemon(
+        &name,
+        &command,
+        &cwd,
+        rows,
+        cols,
+        display_name.as_deref(),
+        ephemeral,
+        &tags,
+    ) {
         Ok(()) => {
             println!("{name}");
             0
@@ -165,7 +187,8 @@ fn cmd_run(args: &[String]) -> i32 {
     }
 }
 
-/// Spawn a detached session daemon and wait for its socket to come up.
+/// Spawn a detached session daemon and wait for it to come up.
+#[allow(clippy::too_many_arguments)]
 fn spawn_session_daemon(
     name: &str,
     command: &[String],
@@ -173,6 +196,8 @@ fn spawn_session_daemon(
     rows: u16,
     cols: u16,
     display_name: Option<&str>,
+    ephemeral: bool,
+    tags: &[(String, String)],
 ) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
     let mut dcmd = std::process::Command::new(exe);
@@ -188,6 +213,12 @@ fn spawn_session_daemon(
     if let Some(dn) = display_name {
         dcmd.arg("--display-name").arg(dn);
     }
+    if ephemeral {
+        dcmd.arg("--ephemeral");
+    }
+    for (k, v) in tags {
+        dcmd.arg("--tag").arg(format!("{k}={v}"));
+    }
     dcmd.arg("--").args(command);
     dcmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -200,7 +231,9 @@ fn spawn_session_daemon(
             Ok(())
         });
     }
-    dcmd.spawn().map_err(|e| format!("failed to start daemon: {e}"))?;
+    let mut daemon = dcmd
+        .spawn()
+        .map_err(|e| format!("failed to start daemon: {e}"))?;
 
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(15) {
@@ -208,12 +241,17 @@ fn spawn_session_daemon(
         if client::is_alive(name) {
             return Ok(());
         }
-        // ...or the session already ran and exited (a fast-exiting command's
-        // socket can appear and vanish before we observe it). The daemon
-        // records exit_code in metadata on exit, so this confirms it ran.
+        // ...or the session already ran and exited in PRESERVE mode (metadata
+        // records the exit)...
         if let Some(meta) = registry::read_metadata(name)
             && meta.exit_code.is_some()
         {
+            return Ok(());
+        }
+        // ...or the daemon process itself has already exited — a fast-exiting
+        // command may have run and been REAPED (leaving no trace) before we
+        // observed the socket. The daemon exiting means the session ran.
+        if let Ok(Some(_)) = daemon.try_wait() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(30));
@@ -228,10 +266,22 @@ fn cmd_daemon(args: &[String]) -> i32 {
     let mut cols = 80u16;
     let mut cwd = String::from(".");
     let mut display_name: Option<String> = None;
+    let mut ephemeral = false;
+    let mut tags: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let mut command: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--ephemeral" => {
+                ephemeral = true;
+                i += 1;
+            }
+            "--tag" => {
+                if let Some((k, v)) = args.get(i + 1).and_then(|kv| kv.split_once('=')) {
+                    tags.insert(k.to_string(), v.to_string());
+                }
+                i += 2;
+            }
             "--name" => {
                 name = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
@@ -274,6 +324,8 @@ fn cmd_daemon(args: &[String]) -> i32 {
         rows,
         cols,
         env: Vec::new(),
+        ephemeral,
+        tags,
     };
     match daemon::run(cfg) {
         Ok(code) => code,
@@ -620,7 +672,22 @@ fn cmd_up(args: &[String]) -> i32 {
             .cwd
             .clone()
             .unwrap_or_else(|| file.dir.to_string_lossy().into_owned());
-        match spawn_session_daemon(&name, &command, &cwd, 24, 80, Some(&sess.display_name)) {
+        let sess_tags: Vec<(String, String)> = sess
+            .tags
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        match spawn_session_daemon(
+            &name,
+            &command,
+            &cwd,
+            24,
+            80,
+            Some(&sess.display_name),
+            false,
+            &sess_tags,
+        ) {
             Ok(()) => {
                 println!("started {name} ({})", sess.display_name);
                 started += 1;
@@ -671,21 +738,32 @@ fn cmd_down(args: &[String]) -> i32 {
 }
 
 /// SIGTERM (then SIGKILL) a session's process and clean up if the daemon didn't.
+/// SIGTERM a session's daemon (an EXTERNAL stop). The daemon forwards SIGHUP to
+/// the child, escalates to SIGKILL via its watchdog if needed, then PRESERVES
+/// the session (status=exited) unless it's ephemeral — matching node #114. We
+/// wait for the daemon to finish its clean shutdown (so the exit metadata is
+/// written) rather than SIGKILL it early. It does NOT remove the session from
+/// the registry; that's `rm`.
 fn kill_session(name: &str) {
     if let Some(pid) = registry::read_pid(name) {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
-        std::thread::sleep(Duration::from_millis(300));
+        // Wait for the daemon to run its shutdown (child dies → preserve/reap →
+        // exit). ~3s budget covers the watchdog's 500ms SIGKILL escalation.
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            if !registry::pid_alive(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Last resort if the daemon itself is wedged.
         if registry::pid_alive(pid) {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
-    }
-    std::thread::sleep(Duration::from_millis(200));
-    if !client::is_alive(name) {
-        registry::cleanup(name);
     }
 }
 
@@ -720,7 +798,22 @@ fn cmd_restart(args: &[String]) -> i32 {
 
     let mut command = vec![meta.command.clone()];
     command.extend(meta.args.iter().cloned());
-    match spawn_session_daemon(&name, &command, &meta.cwd, 24, 80, meta.display_name.as_deref()) {
+    let meta_tags: Vec<(String, String)> = meta
+        .tags
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    match spawn_session_daemon(
+        &name,
+        &command,
+        &meta.cwd,
+        24,
+        80,
+        meta.display_name.as_deref(),
+        false,
+        &meta_tags,
+    ) {
         Ok(()) => {
             println!("restarted {name}");
             0

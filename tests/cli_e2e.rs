@@ -39,22 +39,34 @@ fn unique_root() -> PathBuf {
 /// Run a `pty` subcommand with the given registry root; return
 /// `(stdout, stderr, exit_code)`, all trimmed.
 fn run_pty(root: &PathBuf, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(pty_bin())
-        .args(args)
+    run_pty_env(root, args, &[])
+}
+
+/// Like [`run_pty`] but with extra env vars (e.g. `PTY_REAP_ON_EXIT`).
+fn run_pty_env(root: &PathBuf, args: &[&str], env: &[(&str, &str)]) -> (String, String, i32) {
+    let mut c = Command::new(pty_bin());
+    c.args(args)
         .env("PTY_ROOT", root)
         // These tests deliberately CREATE sessions; scrub any ambient
-        // PTY_SESSION so nesting-prevention (correct in production) doesn't turn
-        // `pty run` into a direct exec when the test harness itself runs inside
-        // a pty session.
+        // PTY_SESSION so nesting-prevention doesn't turn `pty run` into a direct
+        // exec when the harness itself runs inside a pty session. Also scrub
+        // PTY_REAP_ON_EXIT so the reap DEFAULT (reap) is deterministic
+        // regardless of ambient env; preserve-mode tests set it explicitly.
         .env_remove("PTY_SESSION")
-        .output()
-        .expect("spawn pty");
+        .env_remove("PTY_REAP_ON_EXIT");
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let out = c.output().expect("spawn pty");
     (
         String::from_utf8_lossy(&out.stdout).trim().to_string(),
         String::from_utf8_lossy(&out.stderr).trim().to_string(),
         out.status.code().unwrap_or(-1),
     )
 }
+
+/// PTY_REAP_ON_EXIT=false → preserve exited sessions (for post-exit assertions).
+const PRESERVE: &[(&str, &str)] = &[("PTY_REAP_ON_EXIT", "false")];
 
 /// Run a `pty` subcommand and assert it exited 0; return stdout (trimmed).
 fn ok_pty(root: &PathBuf, args: &[&str]) -> String {
@@ -117,13 +129,14 @@ fn run_ls_peek_send_kill_lifecycle() {
     let status = ok_pty(&root, &["status", &name]);
     assert!(status.contains(&name), "status missing name:\n{status}");
 
-    // kill tears it down.
+    // kill is an external stop → the session is PRESERVED as exited (node #114),
+    // not left running.
     let (_o, _e, code) = run_pty(&root, &["kill", &name]);
     assert_eq!(code, 0);
     std::thread::sleep(Duration::from_millis(300));
     let ls2 = ok_pty(&root, &["ls"]);
     assert!(
-        !ls2.contains(&name) || ls2.contains("exited") || ls2.contains("No sessions"),
+        !ls2.contains("running"),
         "session still running after kill:\n{ls2}"
     );
 
@@ -160,13 +173,13 @@ fn up_and_down_from_a_manifest() {
     }
     assert!(running, "manifest session not running after up");
 
-    // down stops it.
+    // down stops it (external stop → preserved as exited, not running).
     let (_o, _e, code) = run_pty(&root, &["down", &work_str]);
     assert_eq!(code, 0);
     std::thread::sleep(Duration::from_millis(400));
     let ls = ok_pty(&root, &["ls"]);
     assert!(
-        !ls.contains("echoer") || ls.contains("No sessions"),
+        !ls.contains("running"),
         "session still running after down:\n{ls}"
     );
 
@@ -332,8 +345,9 @@ fn stats_json_matches_node_contract() {
     assert!(v["clients"].get("geometryNeutral").is_none(), "geometryNeutral should be omitted");
     assert!(v.get("capabilities").is_none(), "capabilities should be omitted");
 
-    // Gone session: small shape.
-    let (_n, _e, code) = run_pty(&root, &["run", "--id", "sg", "--", "sh", "-c", "exit 6"]);
+    // Exited session (preserve mode) → the small gone shape.
+    let (_n, _e, code) =
+        run_pty_env(&root, &["run", "--id", "sg", "--", "sh", "-c", "exit 6"], PRESERVE);
     assert_eq!(code, 0);
     let start = Instant::now();
     let mut gone = String::new();
@@ -409,8 +423,9 @@ fn ls_json_matches_node_shape() {
         "displayName should be omitted when unset: {running}"
     );
 
-    // Exited session: status "exited", exitCode + exitedAt populated.
-    let (_n, _e, code) = run_pty(&root, &["run", "--id", "je", "--", "sh", "-c", "exit 5"]);
+    // Exited session (preserve mode so it stays visible as exited).
+    let (_n, _e, code) =
+        run_pty_env(&root, &["run", "--id", "je", "--", "sh", "-c", "exit 5"], PRESERVE);
     assert_eq!(code, 0);
     let start = Instant::now();
     let mut exited_json = String::new();
@@ -430,14 +445,65 @@ fn ls_json_matches_node_shape() {
 }
 
 #[test]
+fn default_reap_removes_session_on_self_exit() {
+    // Parity (node #114): with NO PTY_REAP_ON_EXIT (default = reap), a session
+    // that exits ON ITS OWN is removed entirely — post-exit peek fails and
+    // ls --json omits it.
+    let _serial = serial();
+    let root = unique_root();
+    let (name, _e, code) = run_pty(
+        &root,
+        &["run", "--id", "rp", "--", "sh", "-c", "echo GONE; exit 3"],
+    );
+    assert_eq!(code, 0, "run failed: {_e}");
+    assert_eq!(name, "rp");
+    // Give the daemon time to run + reap.
+    std::thread::sleep(Duration::from_millis(600));
+    // peek fails (session gone).
+    let (_o, _e, peek_code) = run_pty(&root, &["peek", "--plain", "rp"]);
+    assert_ne!(peek_code, 0, "reaped session should not be peekable");
+    // ls --json omits it.
+    let ls = ok_pty(&root, &["ls", "--json"]);
+    assert!(!ls.contains("\"rp\""), "reaped session should be omitted from ls: {ls}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn external_kill_preserves_session() {
+    // Parity (node #114): an external stop (`pty kill`) PRESERVES the session
+    // (status=exited) even under the default reap config — only self-exit reaps.
+    let _serial = serial();
+    let root = unique_root();
+    let (name, _e, code) = run_pty(&root, &["run", "--id", "ek", "--", "cat"]);
+    assert_eq!(code, 0, "run failed: {_e}");
+    assert_eq!(name, "ek");
+    // Wait until up, then kill.
+    std::thread::sleep(Duration::from_millis(400));
+    let (_o, _e, code) = run_pty(&root, &["kill", "ek"]);
+    assert_eq!(code, 0);
+    std::thread::sleep(Duration::from_millis(500));
+    // Preserved as exited (NOT removed).
+    let ls = ok_pty(&root, &["ls", "--json"]);
+    assert!(
+        ls.contains("\"ek\"") && ls.contains("\"status\":\"exited\""),
+        "external kill should preserve the session as exited: {ls}"
+    );
+
+    let _ = run_pty(&root, &["rm", "ek"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn post_exit_peek_returns_final_screen() {
     // Parity #1: after a session exits, `peek --plain` still returns its final
     // screen (node retains it); rust previously failed with ENOENT.
     let _serial = serial();
     let root = unique_root();
-    let (name, _e, code) = run_pty(
+    let (name, _e, code) = run_pty_env(
         &root,
         &["run", "--id", "px", "--", "sh", "-c", "echo FINAL-OUTPUT-LINE; exit 7"],
+        PRESERVE,
     );
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "px");
