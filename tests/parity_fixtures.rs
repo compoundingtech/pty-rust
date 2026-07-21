@@ -68,17 +68,14 @@ fn shared_parity_fixtures_pass() {
         "/tests/fixtures/parity/screens.json"
     ))
     .expect("read fixtures");
-    let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid fixtures json");
-    let arr = fixtures.as_array().expect("fixtures is an array");
+    let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid fixtures json");
+    // Schema v2: { version, note, fixtures: [...] }.
+    let arr = doc["fixtures"].as_array().expect("doc.fixtures is an array");
     assert!(!arr.is_empty(), "no fixtures loaded");
 
     for fx in arr {
         let id = fx["id"].as_str().unwrap_or("?");
         let kind = fx["kind"].as_str().unwrap_or("");
-        // v1 mirror handles plain-screen fixtures.
-        if kind != "plain-screen" {
-            continue;
-        }
         let command = fx["spawn"]["command"].as_str().expect("spawn.command");
         let args: Vec<String> = fx["spawn"]["args"]
             .as_array()
@@ -87,9 +84,8 @@ fn shared_parity_fixtures_pass() {
         let rows = fx["spawn"]["rows"].as_u64().unwrap_or(24).to_string();
         let cols = fx["spawn"]["cols"].as_u64().unwrap_or(80).to_string();
         let settle = fx["settleMs"].as_u64().unwrap_or(500);
-        let expect_screen = fx["expect"]["plainScreen"].as_str().expect("expect.plainScreen");
-        // Per-fixture spawn env (schema v2), e.g. PTY_REAP_ON_EXIT=false.
-        let spawn_env: Vec<(String, String)> = fx["spawn"]["env"]
+        // Fixture-level `env` overlay (daemon env), e.g. PTY_REAP_ON_EXIT=false.
+        let env: Vec<(String, String)> = fx["env"]
             .as_object()
             .map(|m| {
                 m.iter()
@@ -99,48 +95,62 @@ fn shared_parity_fixtures_pass() {
             .unwrap_or_default();
 
         let root = unique_root(id);
-        // Build: run --id <id> --rows R --cols C -- <command> <args...>
         let mut run_args: Vec<&str> =
             vec!["run", "--id", id, "--rows", &rows, "--cols", &cols, "--"];
         run_args.push(command);
         for a in &args {
             run_args.push(a);
         }
-        let (_o, err, code) = pty_env(&root, &run_args, &spawn_env);
+        let (_o, err, code) = pty_env(&root, &run_args, &env);
         assert_eq!(code, 0, "[{id}] run failed: {err}");
 
         std::thread::sleep(Duration::from_millis(settle));
 
-        let (screen, err, code) = pty(&root, &["peek", "--plain", id]);
-        assert_eq!(code, 0, "[{id}] peek failed: {err}");
-        assert_eq!(screen, expect_screen, "[{id}] plainScreen mismatch");
+        match kind {
+            // Live or preserved screen → peek --plain must equal the exact bytes.
+            "plain-screen" | "plain-screen-after-exit" => {
+                let expect_screen =
+                    fx["expect"]["plainScreen"].as_str().expect("expect.plainScreen");
+                let (screen, err, code) = pty(&root, &["peek", "--plain", id]);
+                assert_eq!(code, 0, "[{id}] peek failed: {err}");
+                assert_eq!(screen, expect_screen, "[{id}] plainScreen mismatch");
 
-        if let Some(len) = fx["expect"]["plainScreenLength"].as_u64() {
-            // Length of the last line's content (the fixture's len is the visible
-            // cell count of the single-line prompt scenario).
-            assert_eq!(
-                screen.chars().count() as u64,
-                len,
-                "[{id}] plainScreenLength mismatch: {screen:?}"
-            );
-        }
-
-        if let Some(exp_status) = fx["expect"]["status"].as_str() {
-            let (ls, _e, _c) = pty(&root, &["ls", "--json"]);
-            assert!(
-                ls.contains(&format!("\"status\":\"{exp_status}\"")),
-                "[{id}] ls --json status != {exp_status}: {ls}"
-            );
-        }
-        if let Some(exp_code) = fx["expect"]["exitCode"].as_i64() {
-            let (ls, _e, _c) = pty(&root, &["ls", "--json"]);
-            assert!(
-                ls.contains(&format!("\"exitCode\":{exp_code}")),
-                "[{id}] ls --json exitCode != {exp_code}: {ls}"
-            );
-            // idempotent: a second peek is byte-identical to the first.
-            let (screen2, _e, _c) = pty(&root, &["peek", "--plain", id]);
-            assert_eq!(screen2, expect_screen, "[{id}] post-exit peek not idempotent");
+                if let Some(len) = fx["expect"]["plainScreenLength"].as_u64() {
+                    assert_eq!(
+                        screen.chars().count() as u64,
+                        len,
+                        "[{id}] plainScreenLength mismatch: {screen:?}"
+                    );
+                }
+                if let Some(exp_status) = fx["expect"]["status"].as_str() {
+                    let (ls, _e, _c) = pty(&root, &["ls", "--json"]);
+                    assert!(
+                        ls.contains(&format!("\"status\":\"{exp_status}\"")),
+                        "[{id}] ls --json status != {exp_status}: {ls}"
+                    );
+                }
+                if let Some(exp_code) = fx["expect"]["exitCode"].as_i64() {
+                    let (ls, _e, _c) = pty(&root, &["ls", "--json"]);
+                    assert!(
+                        ls.contains(&format!("\"exitCode\":{exp_code}")),
+                        "[{id}] ls --json exitCode != {exp_code}: {ls}"
+                    );
+                    // idempotent: a second peek is byte-identical.
+                    let (screen2, _e, _c) = pty(&root, &["peek", "--plain", id]);
+                    assert_eq!(screen2, expect_screen, "[{id}] post-exit peek not idempotent");
+                }
+            }
+            // Default-reap: the session removed itself → peek fails + ls omits.
+            "reaped-after-exit" => {
+                let (_o, _e, peek_code) = pty(&root, &["peek", "--plain", id]);
+                assert_ne!(peek_code, 0, "[{id}] reaped session should not be peekable");
+                let (ls, _e, _c) = pty(&root, &["ls", "--json"]);
+                assert!(
+                    !ls.contains(&format!("\"{id}\"")),
+                    "[{id}] reaped session should be omitted from ls: {ls}"
+                );
+            }
+            other => panic!("[{id}] unknown fixture kind {other:?}"),
         }
 
         let _ = pty(&root, &["kill", id]);
