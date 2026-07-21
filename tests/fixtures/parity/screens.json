@@ -1,0 +1,18 @@
+[
+  {
+    "id": "idle-prompt-plain",
+    "kind": "plain-screen",
+    "description": "idle shell prompt preserves the trailing written cursor cell (not padded)",
+    "spawn": { "command": "sh", "args": ["-c", "printf 'READY> '; exec cat"], "rows": 24, "cols": 80 },
+    "settleMs": 700,
+    "expect": { "plainScreen": "READY> ", "plainScreenLength": 7 }
+  },
+  {
+    "id": "post-exit-final-screen",
+    "kind": "plain-screen",
+    "description": "exited session retains its final screen for peek (idempotent)",
+    "spawn": { "command": "sh", "args": ["-c", "printf 'LINE_A\\nLINE_B\\nDONE'; exit 7"], "rows": 24, "cols": 80 },
+    "settleMs": 1200,
+    "expect": { "plainScreen": "LINE_A\nLINE_B\nDONE", "status": "exited", "exitCode": 7 }
+  }
+]
