@@ -209,7 +209,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
     // Record the DAEMON pid (matching node: `<name>.pid` holds the server
     // process's own pid, and `ls --json` exposes it). `kill` SIGTERMs this; the
     // handler above forwards to the child.
-    std::fs::write(registry::pid_path(&cfg.name), std::process::id().to_string())?;
+    registry::write_pid(&cfg.name, std::process::id())?;
 
     // ── libghostty terminal ──
     let pending: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));

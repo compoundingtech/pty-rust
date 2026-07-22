@@ -5,6 +5,7 @@
 //! per-session files `<name>.sock`, `<name>.pid`, `<name>.json`.
 
 use std::io;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -145,6 +146,28 @@ pub fn read_pid(name: &str) -> Option<i32> {
     data.trim().parse().ok()
 }
 
+/// Write a session's pid file atomically (temp + rename), so a concurrent
+/// reader never catches a partial/empty pid mid-write. Node's pid write is
+/// non-atomic; this is rust-side hygiene that shrinks the transient-unreadable
+/// window — correctness is already guaranteed by the socket-aware liveness in
+/// [`list_sessions`] (node #117), so this is defence-in-depth, not the fix.
+pub fn write_pid(name: &str, pid: u32) -> io::Result<()> {
+    let path = pid_path(name);
+    let tmp = path.with_extension("pid.tmp");
+    std::fs::write(&tmp, pid.to_string())?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Is the session's control socket reachable — i.e. is a process actually
+/// listening on it? A stale `<name>.sock` left by a dead daemon refuses the
+/// connect (ECONNREFUSED), so this is true only for a live listener, mirroring
+/// [`crate::client::connect`]. Used as the "reachable socket ⇒ alive"
+/// positive-life proof in [`list_sessions`] (node #117).
+fn socket_reachable(name: &str) -> bool {
+    UnixStream::connect(socket_path(name)).is_ok()
+}
+
 /// Enumerate all sessions in the registry (by `<name>.json` files).
 pub fn list_sessions() -> Vec<SessionInfo> {
     let dir = session_dir();
@@ -172,7 +195,19 @@ pub fn list_sessions() -> Vec<SessionInfo> {
             None => continue,
         };
         if let Some(meta) = read_metadata(&name) {
-            let alive = read_pid(&name).map(pid_alive).unwrap_or(false) && meta.exit_code.is_none();
+            // Liveness mirrors node #117's read-layer fix: a session is only
+            // reported NOT alive on POSITIVE proof of death — a readable pid
+            // whose process is gone AND an unreachable control socket. A live
+            // pid ⇒ alive; a reachable socket ⇒ alive; an unreadable/absent pid
+            // with no reachable socket is INDETERMINATE (e.g. mid-launch, before
+            // the pid file lands) and is reported running, never treated as
+            // dead. This keeps the `ls`/`stats` status field in lockstep with
+            // node even mid-launch, and never mislabels a launching daemon dead.
+            // (`socket_reachable` is only probed when the pid says "dead", so the
+            // common live-pid / exited-metadata paths pay no connect cost.)
+            let dead = matches!(read_pid(&name), Some(pid) if !pid_alive(pid))
+                && !socket_reachable(&name);
+            let alive = meta.exit_code.is_none() && !dead;
             out.push(SessionInfo { name, meta, alive });
         }
     }
