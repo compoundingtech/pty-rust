@@ -15,6 +15,34 @@ Two things live here:
    `Session` type), which is also the foundation the CLI is built on and the
    correctness net for the port.
 
+## Direction: compatibility and embedding
+
+The long-term target is a behavior-compatible Rust implementation of the Node
+`pty`, plus a first-class Rust API for embedding a live terminal in clients such
+as Fractal. The Node implementation is the behavioral reference while the port
+converges. This README does not claim that the current experiment has reached
+full parity.
+
+Compatibility means that the same user-visible operations and wire messages have
+the same result. It does not require identical source code or internal design.
+Rust, `portable-pty`, and `libghostty` can require a different implementation.
+When that difference changes behavior, record a decision that states the Node
+behavior, the Rust behavior, the reason, the client effect, and the conformance
+test.
+
+The embedding API should serve the Rust CLI and other Rust clients through one
+implementation. Its terminal handle should eventually provide the capabilities
+that Node's `@myobie/pty/tui` `PtyHandle` provides: attach lifecycle, input,
+resize, typed cell-grid and wrapped-line reads, cursor and terminal-mode state,
+scrollback access, and activity or exit events. `libghostty::Terminal` is not
+`Send`, so one clear actor must own it and publish typed events or snapshots to
+consumers.
+
+Keep the current protocol as the baseline. Add a protocol feature only after a
+real failing use case shows that the current byte-framed messages cannot express
+the required behavior. Track the compatibility matrix, crate boundaries, and
+acceptance tests in [issue #1](https://github.com/compoundingtech/pty-rust/issues/1).
+
 [libghostty]: https://libghostty.tip.ghostty.org/
 [Ghostty]: https://ghostty.org
 
@@ -120,7 +148,7 @@ thereafter.
 cargo test
 ```
 
-156 tests pass:
+173 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -137,7 +165,10 @@ cargo test
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach (Ctrl+\\ detach + double-tap) / follow / nesting | 7 | **libghostty** |
+| `tests/parity.rs` | Node behavior parity cases | 7 | pure + **libghostty** |
+| `tests/parity_fixtures.rs` | shared Node/Rust JSON fixtures | 2 | **libghostty** |
+| `tests/registry_liveness.rs` | Node-compatible registry liveness | 1 | pure |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach (Ctrl+\\ detach + double-tap) / follow / nesting | 14 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
