@@ -23,6 +23,11 @@ as Fractal. The Node implementation is the behavioral reference while the port
 converges. This README does not claim that the current experiment has reached
 full parity.
 
+The durable constraints and implementation contract live in
+[`docs/vrs/requirements.md`](docs/vrs/requirements.md) and
+[`docs/vrs/spec.md`](docs/vrs/spec.md). Issues remain the work/discussion
+surface; they do not replace the VRS.
+
 Compatibility means that the same user-visible operations and wire messages have
 the same result. It does not require identical source code or internal design.
 Rust, `portable-pty`, and `libghostty` can require a different implementation.
@@ -129,7 +134,7 @@ drains into the terminal on demand.
 
 ## Build requirements
 
-- **Rust** (edition 2021; built with 1.97).
+- **Rust** (edition 2024; built with 1.97).
 - **Zig 0.15.2** on `PATH`. The `libghostty-vt-sys` build script fetches the
   Ghostty source and compiles the VT core with `zig build`, so a matching Zig
   toolchain must be installed. Install it with:
