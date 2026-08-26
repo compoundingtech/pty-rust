@@ -14,8 +14,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use libghostty_vt::terminal::{Mode, Options, Terminal};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -204,6 +205,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
         },
         display_name: cfg.display_name.clone(),
         last_attach_at: None,
+        last_output_at_ms: None,
     };
     registry::write_metadata(&cfg.name, &meta)?;
     // Record the DAEMON pid (matching node: `<name>.pid` holds the server
@@ -276,6 +278,20 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
     let mut cur_rows = cfg.rows;
     let mut cur_cols = cfg.cols;
 
+    let mut last_output_at_ms: Option<u64> = None;
+    let mut activity_persist_deadline: Option<Instant> = None;
+
+    let persist_activity = |timestamp: Option<u64>| {
+        let Some(timestamp) = timestamp else {
+            return;
+        };
+        if let Some(mut metadata) = registry::read_metadata(&cfg.name)
+            && metadata.last_output_at_ms != Some(timestamp)
+        {
+            metadata.last_output_at_ms = Some(timestamp);
+            let _ = registry::write_metadata(&cfg.name, &metadata);
+        }
+    };
     let flush_pending = |writer: &mut Box<dyn Write + Send>, pending: &Rc<RefCell<Vec<u8>>>| {
         let out = std::mem::take(&mut *pending.borrow_mut());
         if !out.is_empty() {
@@ -286,15 +302,44 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
 
     let exit_code_final;
     loop {
-        let msg = match rx.recv() {
-            Ok(m) => m,
-            Err(_) => {
-                exit_code_final = -1;
-                break;
+        // A permanently nonempty PTY queue must not starve the deadline:
+        // `recv_timeout(Duration::ZERO)` may keep returning queued messages.
+        // Settle the persist before dequeuing once the absolute deadline passed.
+        if activity_persist_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            persist_activity(last_output_at_ms);
+            activity_persist_deadline = None;
+            continue;
+        }
+        let msg = if let Some(deadline) = activity_persist_deadline {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => {
+                    persist_activity(last_output_at_ms);
+                    activity_persist_deadline = None;
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    exit_code_final = -1;
+                    break;
+                }
+            }
+        } else {
+            match rx.recv() {
+                Ok(message) => message,
+                Err(_) => {
+                    exit_code_final = -1;
+                    break;
+                }
             }
         };
         match msg {
             DaemonMsg::PtyData(bytes) => {
+                if !bytes.is_empty() {
+                    last_output_at_ms = Some(now_epoch_ms());
+                    if activity_persist_deadline.is_none() {
+                        activity_persist_deadline = Some(Instant::now() + Duration::from_secs(1));
+                    }
+                }
                 terminal.vt_write(&bytes);
                 flush_pending(&mut writer, &pending);
                 // Broadcast to streaming clients; drop dead ones.
@@ -458,6 +503,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                         m.exit_code = Some(code);
                         m.exited_at = Some(now_iso8601());
                         m.last_lines = Some(tail);
+                        m.last_output_at_ms = last_output_at_ms;
                         let _ = registry::write_metadata(&cfg.name, &m);
                     }
                 }
@@ -542,6 +588,15 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<DaemonMsg>) {
 
 fn exit_code(status: portable_pty::ExitStatus) -> Option<i32> {
     Some(if status.success() { 0 } else { status.exit_code() as i32 })
+}
+
+/// Current epoch time in unix milliseconds, saturating at `u64::MAX`.
+pub fn now_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 /// Current epoch time in seconds (fractional), for uptime.
