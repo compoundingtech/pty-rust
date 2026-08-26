@@ -75,6 +75,67 @@ fn ok_pty(root: &PathBuf, args: &[&str]) -> String {
     out
 }
 
+fn metadata_json(root: &PathBuf, name: &str) -> serde_json::Value {
+    let raw = std::fs::read_to_string(root.join(format!("{name}.json")))
+        .expect("read session metadata");
+    serde_json::from_str(&raw).expect("parse session metadata")
+}
+
+#[test]
+fn output_activity_stamp_appears_and_advances() {
+    let _serial = serial();
+    let root = unique_root();
+    let (_name, err, code) = run_pty(&root, &["run", "--id", "oa", "--", "cat"]);
+    assert_eq!(code, 0, "run failed: {err}");
+
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && !root.join("oa.json").exists() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        metadata_json(&root, "oa").get("lastOutputAtMs").is_none(),
+        "silent session must not fabricate activity"
+    );
+
+    let before = now_ms();
+    ok_pty(&root, &["send", "oa", "--seq", "first", "--seq", "key:return"]);
+    let first = wait_last_output_ms(&root, "oa", None);
+    assert!(first >= before.saturating_sub(1_000));
+
+    // The actor's trailing-edge persist window lives in the daemon process;
+    // wait it out before requiring a later output burst to advance the stamp.
+    std::thread::sleep(Duration::from_millis(1_200));
+    ok_pty(&root, &["send", "oa", "--seq", "second", "--seq", "key:return"]);
+    let second = wait_last_output_ms(&root, "oa", Some(first));
+    assert!(second > first);
+
+    let _ = run_pty(&root, &["kill", "oa"]);
+    let _ = run_pty(&root, &["rm", "oa"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn wait_last_output_ms(root: &PathBuf, name: &str, after: Option<u64>) -> u64 {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Some(value) = metadata_json(root, name)
+            .get("lastOutputAtMs")
+            .and_then(serde_json::Value::as_u64)
+            && after.is_none_or(|previous| value > previous)
+        {
+            return value;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("lastOutputAtMs did not satisfy expected bound");
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
 #[test]
 fn run_ls_peek_send_kill_lifecycle() {
     let _serial = serial();
@@ -520,6 +581,13 @@ fn post_exit_peek_returns_final_screen() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(exited, "session never recorded exit:7");
+    let metadata = metadata_json(&root, "px");
+    assert_eq!(metadata["exitCode"], 7);
+    assert!(
+        metadata["lastOutputAtMs"].as_u64().is_some(),
+        "exit metadata must carry the final output stamp: {metadata}"
+    );
+
 
     // peek --plain must succeed AND contain the final output (not ENOENT).
     let (screen, err, code) = run_pty(&root, &["peek", "--plain", "px"]);

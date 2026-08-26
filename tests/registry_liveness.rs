@@ -34,6 +34,7 @@ fn meta(exit_code: Option<i32>) -> SessionMetadata {
         tags: None,
         display_name: None,
         last_attach_at: None,
+        last_output_at_ms: None,
     }
 }
 

@@ -33,6 +33,10 @@ pub struct SessionMetadata {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_attach_at: Option<String>,
+    /// Unix-millisecond timestamp of the last PTY output chunk processed by
+    /// the daemon. Evidence only: consumers classify activity; PTY does not.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_output_at_ms: Option<u64>,
 }
 
 /// Resolve the session registry directory: `$PTY_ROOT`, else the deprecated
