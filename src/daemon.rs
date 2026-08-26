@@ -302,6 +302,14 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
 
     let exit_code_final;
     loop {
+        // A permanently nonempty PTY queue must not starve the deadline:
+        // `recv_timeout(Duration::ZERO)` may keep returning queued messages.
+        // Settle the persist before dequeuing once the absolute deadline passed.
+        if activity_persist_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            persist_activity(last_output_at_ms);
+            activity_persist_deadline = None;
+            continue;
+        }
         let msg = if let Some(deadline) = activity_persist_deadline {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(message) => message,
