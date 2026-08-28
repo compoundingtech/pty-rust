@@ -150,3 +150,173 @@ fn attach_is_interactive_and_detaches() {
     let _ = run_pty(&root, &["kill", &name]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ── The surface a supervisor drives ──────────────────────────────────────────
+//
+// These tests pin the exact command lines st2 issues. Each one failed before the
+// v0 CLI grew the options and the list fields they cover.
+
+/// Read the one-and-only session object out of `pty list --json`.
+fn one_session(root: &PathBuf) -> serde_json::Value {
+    let (out, _e, code) = run_pty(root, &["list", "--json"]);
+    assert_eq!(code, 0, "list --json failed");
+    let mut items: Vec<serde_json::Value> = serde_json::from_str(&out).expect("list --json parses");
+    assert_eq!(items.len(), 1, "expected exactly one session:\n{out}");
+    items.remove(0)
+}
+
+#[test]
+fn run_accepts_the_full_supervisor_option_set() {
+    let root = unique_root();
+    let (name, err, code) = run_pty(
+        &root,
+        &[
+            "run",
+            "-d",
+            "--force",
+            "--id",
+            "sup.agent",
+            "--no-display-name",
+            "--cwd",
+            "/tmp",
+            "--tag",
+            "agent.presentation.schema=1",
+            "--tag",
+            "role=agent",
+            "--env",
+            "CATALOG=/somewhere",
+            "--unset-env",
+            "NO_COLOR",
+            "--",
+            "sh",
+            "-c",
+            "sleep 30",
+        ],
+    );
+    assert_eq!(code, 0, "supervisor spawn line rejected: {err}");
+    assert_eq!(name, "sup.agent");
+
+    let session = one_session(&root);
+    assert_eq!(session["status"], "running");
+    assert_eq!(session["name"], "sup.agent");
+    // A supervisor identifies one generation by pid + creation time. Without both it
+    // cannot tell a restarted session from the one it already knew.
+    assert!(session["pid"].is_number(), "no pid:\n{session}");
+    assert!(session["createdAt"].is_string(), "no createdAt:\n{session}");
+    // Tags and display name are read back exactly as they were given at spawn, which is
+    // what lets a supervisor skip a separate metadata-patch step entirely.
+    assert_eq!(session["tags"]["agent.presentation.schema"], "1");
+    assert_eq!(session["tags"]["role"], "agent");
+    assert!(session["displayName"].is_null());
+
+    let _ = run_pty(&root, &["kill", "sup.agent"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn run_names_an_unknown_option_instead_of_running_it() {
+    let root = unique_root();
+    // The parser used to treat an unrecognised token as the start of the command, so
+    // this ran `--bogus` as a program and reported only that the daemon never came up.
+    let (_o, err, code) = run_pty(
+        &root,
+        &["run", "--bogus", "--id", "x", "--", "sh", "-c", "true"],
+    );
+    assert_eq!(code, 2, "unknown option was accepted");
+    assert!(err.contains("--bogus"), "error does not name the flag: {err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn run_stores_a_display_name_and_no_display_name_clears_it() {
+    let root = unique_root();
+    let (_o, _e, code) = run_pty(
+        &root,
+        &[
+            "run", "-d", "--id", "named", "--name", "Friendly", "--cwd", "/tmp", "--", "sh", "-c",
+            "sleep 30",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(one_session(&root)["displayName"], "Friendly");
+    let _ = run_pty(&root, &["kill", "named"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn kill_keeps_the_exit_evidence_and_rm_discards_it() {
+    let root = unique_root();
+    let (_o, _e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", "keeper", "--cwd", "/tmp", "--", "sh", "-c", "sleep 30"],
+    );
+    assert_eq!(code, 0);
+
+    let (_o, _e, code) = run_pty(&root, &["kill", "keeper"]);
+    assert_eq!(code, 0);
+    std::thread::sleep(Duration::from_millis(400));
+
+    // A supervisor reads how the session ended AFTER it kills it. `kill` used to delete
+    // the metadata, which answered "how did it die" with "it was never here".
+    let session = one_session(&root);
+    assert_eq!(session["status"], "exited");
+    assert!(session["exitCode"].is_number(), "no exit code:\n{session}");
+
+    let (out, _e, code) = run_pty(&root, &["rm", "keeper"]);
+    assert_eq!(code, 0, "rm failed on a dead session");
+    assert!(out.contains("keeper"));
+
+    let (out, _e, _c) = run_pty(&root, &["list", "--json"]);
+    assert_eq!(out, "[]", "session survived rm");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rm_refuses_to_strip_a_running_session() {
+    let root = unique_root();
+    let (_o, _e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", "live", "--cwd", "/tmp", "--", "sh", "-c", "sleep 30"],
+    );
+    assert_eq!(code, 0);
+    let (_o, err, code) = run_pty(&root, &["rm", "live"]);
+    assert_eq!(code, 1, "rm removed a live session");
+    assert!(err.contains("still running"), "unexpected error: {err}");
+    // The session is untouched and still serving.
+    assert_eq!(one_session(&root)["status"], "running");
+    let _ = run_pty(&root, &["kill", "live"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn send_with_delay_waits_between_sequences() {
+    let root = unique_root();
+    let (_o, _e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", "delayed", "--cwd", "/tmp", "--", "sh", "-c", "sleep 30"],
+    );
+    assert_eq!(code, 0);
+
+    // Three sequences with a 0.3s gap must take at least two gaps to send. The flag was
+    // once parsed and then ignored, which is the same defect as swallowing an unknown
+    // option: accepted, not honoured, and it fails somewhere else later.
+    let start = Instant::now();
+    let (_o, err, code) = run_pty(
+        &root,
+        &[
+            "send", "delayed", "--with-delay", "0.3", "--seq", "a", "--seq", "b", "--seq", "c",
+        ],
+    );
+    assert_eq!(code, 0, "send failed: {err}");
+    assert!(
+        start.elapsed() >= Duration::from_millis(600),
+        "--with-delay was not honoured: took {:?}",
+        start.elapsed()
+    );
+
+    let (_o, err, code) = run_pty(&root, &["send", "delayed", "--with-delay", "nope", "--seq", "a"]);
+    assert_eq!(code, 2, "a bad delay was accepted: {err}");
+
+    let _ = run_pty(&root, &["kill", "delayed"]);
+    let _ = std::fs::remove_dir_all(&root);
+}

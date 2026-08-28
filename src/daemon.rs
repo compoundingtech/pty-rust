@@ -37,6 +37,12 @@ pub struct DaemonConfig {
     pub rows: u16,
     pub cols: u16,
     pub env: Vec<(String, String)>,
+    /// Variables to drop from the inherited environment (`--unset-env`).
+    pub unset_env: Vec<String>,
+    /// st2-owned tag snapshot recorded in metadata (`--tag k=v`).
+    pub tags: std::collections::BTreeMap<String, String>,
+    /// Friendly name recorded in metadata (`--name`); `None` means none is set.
+    pub display_name: Option<String>,
 }
 
 enum DaemonMsg {
@@ -76,6 +82,10 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
     cmd.args(&cfg.args);
     cmd.cwd(&cfg.cwd);
     // Inherit env, then apply extras and mark the session for nesting detection.
+    // Removals run first so an explicit `--env` for the same key still wins.
+    for k in &cfg.unset_env {
+        cmd.env_remove(k);
+    }
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
@@ -101,8 +111,8 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
         exit_code: None,
         exited_at: None,
         last_lines: None,
-        tags: None,
-        display_name: None,
+        tags: (!cfg.tags.is_empty()).then(|| cfg.tags.clone()),
+        display_name: cfg.display_name.clone(),
         last_attach_at: None,
     };
     registry::write_metadata(&cfg.name, &meta)?;
