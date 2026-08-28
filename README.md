@@ -10,7 +10,8 @@ Two things live here:
 
 1. **The `pty` CLI (v0)** — a runnable `pty` binary with a per-session daemon
    that owns the PTY and a libghostty terminal: `run` / `ls` / `peek` / `send` /
-   `attach` / `kill` / `status`. See [The `pty` CLI](#the-pty-cli-v0) below.
+   `attach` / `kill` / `rm` / `status`. See [The `pty` CLI](#the-pty-cli-v0)
+   below.
 2. **`pty-testkit`** — the Rust port of pty's terminal testing harness (the
    `Session` type), which is also the foundation the CLI is built on and the
    correctness net for the port.
@@ -30,11 +31,28 @@ $PTY peek <id>                                 # print the current screen (ANSI)
 $PTY peek --plain <id>                         # ... as plain text
 $PTY peek --wait "Ready" -t 10 <id>            # wait until text appears
 $PTY send <id> --seq "echo hi" --seq key:return   # send an ordered key sequence
+$PTY send <id> --with-delay 0.5 --seq "..." --seq key:return   # ... pausing between them
 $PTY send <id> "literal text"                  # or literal text (no newline)
 $PTY attach <id>                               # attach interactively (Ctrl-] to detach)
 $PTY status <id>                               # session stats as JSON
-$PTY kill <id>                                 # terminate the session
+$PTY kill <id>                                 # terminate the session (keeps its exit record)
+$PTY rm <id>                                   # discard a dead session, freeing its id
 ```
+
+A process supervisor can drive these sessions from a script. `run` also takes
+`--id`, `--name` or `--no-display-name`, `--cwd`, and repeatable `--tag k=v`,
+`--env k=v` and `--unset-env k`; it stores the tags and the display name with the
+session. `list --json` reports `status` ("running", "exited" or "vanished"),
+`pid`, `createdAt`, `tags` and `displayName`, so a caller can identify one run of
+a session and tell a restart from the session it already knew.
+
+`kill` leaves the session's record in place. The daemon writes the exit code, the
+exit time and the last lines of the screen as it shuts down, and a supervisor
+reads that afterwards to learn how the session ended. `rm` is what finally
+discards it.
+
+**[What this pty costs, next to the Node one](docs/cost-vs-node.md)** — memory and
+CPU measured side by side, with the method and with what was not tested.
 
 Each session runs in a detached daemon that hosts the PTY and a libghostty
 terminal; clients connect to a per-session unix socket under `$PTY_ROOT`
@@ -95,7 +113,7 @@ thereafter.
 cargo test
 ```
 
-111 tests pass:
+137 tests pass:
 
 | Test file | Ported from | Count | Backend |
 | --- | --- | --- | --- |
@@ -104,12 +122,13 @@ cargo test
 | `tests/env_isolation.rs` | `tests/env-isolation.test.ts` | 5 | pure |
 | `tests/input_parse.rs` | `tests/input-parse.test.ts` | 21 | pure |
 | `tests/mouse_parse.rs` | `tests/mouse-parse.test.ts` | 9 | pure |
+| `tests/protocol.rs` | `tests/protocol.test.ts` | 20 | pure |
 | `tests/terminal_queries.rs` (strip) | `tests/terminal-queries.test.ts` | 16 | pure |
 | `tests/terminal_queries.rs` (responses) | `tests/terminal-queries.test.ts` | 3 | **libghostty** |
 | `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
 | `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
 | `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle + attach | 2 | **libghostty** |
+| `tests/cli_e2e.rs` | `pty` CLI lifecycle, attach, supervisor surface | 8 | **libghostty** |
 | doctest | — | 1 | — |
 
 `interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
@@ -144,7 +163,7 @@ isolation logic.
 
 ```
 src/
-  bin/pty.rs      the `pty` CLI: run/ls/peek/send/attach/kill/status + __daemon
+  bin/pty.rs      the `pty` CLI: run/ls/peek/send/attach/kill/rm/status + __daemon
   daemon.rs       per-session daemon: PTY + libghostty terminal, serves protocol
   client.rs       client ops: peek / send / status / interactive attach
   protocol.rs     wire packet framing (port of protocol.ts)
