@@ -90,7 +90,7 @@ fn run_ls_peek_send_kill_lifecycle() {
     // ls shows it running.
     let ls = ok_pty(&root, &["ls"]);
     assert!(ls.contains(&name), "ls missing session:\n{ls}");
-    assert!(ls.contains("running"), "session not running:\n{ls}");
+    assert!(ls.contains("Active sessions:"), "session not running:\n{ls}");
 
     // peek shows the bash prompt.
     let mut prompt_seen = false;
@@ -126,7 +126,7 @@ fn run_ls_peek_send_kill_lifecycle() {
     assert!(output_seen, "never saw command output via peek");
 
     // status returns JSON with the name.
-    let status = ok_pty(&root, &["status", &name]);
+    let status = ok_pty(&root, &["stats", &name]);
     assert!(status.contains(&name), "status missing name:\n{status}");
 
     // kill is an external stop → the session is PRESERVED as exited (node #114),
@@ -165,7 +165,7 @@ fn up_and_down_from_a_manifest() {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         let ls = ok_pty(&root, &["ls"]);
-        if ls.contains("echoer") && ls.contains("running") {
+        if ls.contains("echoer") && ls.contains("Active sessions:") {
             running = true;
             break;
         }
@@ -179,7 +179,7 @@ fn up_and_down_from_a_manifest() {
     std::thread::sleep(Duration::from_millis(400));
     let ls = ok_pty(&root, &["ls"]);
     assert!(
-        !ls.contains("running"),
+        !ls.contains("Active sessions:"),
         "session still running after down:\n{ls}"
     );
 
@@ -226,17 +226,23 @@ fn restart_rename_rm() {
 
     // restart respawns with a new pid.
     let (_o, _e, code) = run_pty(&root, &["restart", "svc"]);
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "restart failed: {_e}");
     let pid2 = wait_pid(&pid1);
     assert_ne!(pid1, pid2, "restart should change the pid");
 
-    // rm removes it entirely.
-    let (_o, _e, code) = run_pty(&root, &["rm", "svc"]);
+    // rm refuses a running session (node: `Use "pty kill <name>" first.`);
+    // kill, then rm removes it entirely.
+    let (_o, e, code) = run_pty(&root, &["rm", "svc"]);
+    assert_eq!(code, 1);
+    assert_eq!(e, "Session \"svc\" is still running. Use \"pty kill svc\" first.");
+    let (_o, _e, code) = run_pty(&root, &["kill", "svc"]);
     assert_eq!(code, 0);
+    let (_o, e, code) = run_pty(&root, &["rm", "svc"]);
+    assert_eq!(code, 0, "rm failed: {e}");
     std::thread::sleep(Duration::from_millis(300));
     let ls = ok_pty(&root, &["ls"]);
     assert!(
-        !ls.contains("svc") || ls.contains("No sessions"),
+        !ls.contains("svc") || ls.contains("No active sessions."),
         "session remained after rm:\n{ls}"
     );
 
@@ -553,7 +559,7 @@ fn run_force_creates_nested_session() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fc");
     let ls = ok_pty(&root, &["ls"]);
     assert!(
-        ls.contains("fc") && ls.contains("running"),
+        ls.contains("fc") && ls.contains("Active sessions:"),
         "--force should create a nested session:\n{ls}"
     );
 
@@ -567,7 +573,7 @@ fn run_force_creates_nested_session() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fd");
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("fd") && ls.contains("running"), "ls:\n{ls}");
+    assert!(ls.contains("fd") && ls.contains("Active sessions:"), "ls:\n{ls}");
 
     let _ = run_pty(&root, &["kill", "fc"]);
     let _ = run_pty(&root, &["kill", "fd"]);
@@ -644,7 +650,7 @@ fn nesting_prevention_runs_directly_inside_a_session() {
     );
     // No session was created.
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("No sessions"), "a nested session was created:\n{ls}");
+    assert!(ls.contains("No active sessions."), "a nested session was created:\n{ls}");
 
     // With -d, it DOES create a background session even inside a session.
     let out = Command::new(pty_bin())
@@ -656,7 +662,7 @@ fn nesting_prevention_runs_directly_inside_a_session() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nbg");
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("nbg") && ls.contains("running"), "ls:\n{ls}");
+    assert!(ls.contains("nbg") && ls.contains("Active sessions:"), "ls:\n{ls}");
 
     let _ = run_pty(&root, &["kill", "nbg"]);
     let _ = std::fs::remove_dir_all(&root);
@@ -705,7 +711,7 @@ fn attach_is_interactive_and_detaches() {
     // The session must still be alive after detach.
     let ls = ok_pty(&root, &["ls"]);
     assert!(
-        ls.contains(&name) && ls.contains("running"),
+        ls.contains(&name) && ls.contains("Active sessions:"),
         "session should survive detach:\n{ls}"
     );
 
