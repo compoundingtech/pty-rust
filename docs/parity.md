@@ -3,7 +3,7 @@
 This document maps the distance between this Rust port and the Node `pty`
 (`@compoundingtech/pty` 0.12.0). It lists every surface a drop-in replacement
 must carry, what the Rust port has today, and what is missing. It is the input
-to the plan that closes the gap. It does not decide anything by itself.
+to the plan that closes the gap. Section 12 records the decisions taken on it.
 
 Compared versions, read on 2026-08-29:
 
@@ -36,7 +36,7 @@ per part:
 - `have` — the Rust port has it and it matches.
 - `partial` — the Rust port has it, but the behavior, text, or shape differs.
 - `missing` — the Rust port does not have it.
-- `decide` — a candidate to leave off. Section 12 collects these.
+- `dropped` / `deferred` — decided on 2026-08-29. Section 12 collects these.
 
 Sizes are rough and relative: S = hours, M = a day or two, L = several days,
 XL = a week or more. They cover code, tests, and docs.
@@ -79,23 +79,23 @@ Two facts from this table shape the plan:
 | `send` | partial (S) | `--paste` is a modifier in Node, a value flag in Rust. `--with-delay` position rule. Rejects extra positional args. Typo flags rejected. `--remote`. Key chord separators `-`, `_`, `C-`. |
 | `events` | missing (M) | `--all`, `--recent`, `--json`, `--wait <type>`, `-t`, follow mode, text format `[HH:MM:SS] <session>: ...`. |
 | `list` / `ls` | partial (M) | Missing `tags` in JSON, `--tags`, `--filter-tag`, `--status`, `--older-than`, `--newer-than`, `--summary`, `--remote [<peer>]`, sort by display name, the whole text layout with sections, colors, `[permanent]`/`[flapping]`, `~` paths, `timeAgo`. |
-| `remote-serve` | missing (M) | `--stdio` control protocol (`{"op":"list"}`, `{"op":"route"}`), `--socket <path>` form (decide). |
+| `remote-serve` | missing (M) | `--stdio` control protocol (`{"op":"list"}`, `{"op":"route"}`). The `--socket <path>` form is dropped. |
 | `stats` | partial (S) | Text output missing (Rust always prints JSON). JSON: add `clients.connections[]`, remove `geometryNeutral` or record it as a decision. Gone-session text. `--all` layout. |
 | `restart` | partial (M) | Missing `-y`, `--force`, running prompt, stateful-agent guard, gc bookkeeping tag strip, persisted `rows/cols/env` reuse, `ST_AGENT`/`ST_ROOT` scrub, `Session "<n>" restarted.`, nested note, attach after restart. |
 | `kill` | partial (S) | Exit 1 when not running (`not running` / `not found`), strip `strategy` on permanent, 7 s wait text, `Session "<n>" killed.`, ptyfile note. |
-| `recover` | missing (XL, decide) | Full authenticated rebind of a live daemon. Section 12. |
+| `recover` | deferred | Full authenticated rebind of a live daemon. Documented as absent. Section 12. |
 | `rm` / `remove` | partial (S) | Refuse when running, 7 s wait, generation check, `Session "<n>" removed.` / `not found`. |
-| `gc` | missing (L, decide in part) | Debris, orphan kill, abandoned, permanent respawn, flapping, sweep, tag prune, dry-run, footer text, `--print-launchd-plist`. Section 12. |
+| `gc` | missing (M) | Debris, orphan kill, sweep, tag prune, dry-run, footer text, `--print-launchd-plist`. Permanent respawn, flapping, and abandoned reap are dropped. Section 12. |
 | `tag` | missing (S) | Show, set, `--rm`, ordering rules, `tags_change` event, ptyfile warning. |
 | `tag-multi` | missing (M) | Selectors `<ref>...`, `--filter-tag`, `--all --yes`; `--json`; own help. |
 | `emit` | missing (S) | `user.*` validation, `--json`, `--text`, default ref from `PTY_SESSION`. |
 | `rename` | partial (S) | Missing `--show`, `--clear`, inside-session single-arg form, validation, `display_name_change` event, lock, exact stdout text. |
 | `metadata patch` | missing (S) | `--id`, JSON patch on stdin, `{changed, metadata}` reply, validation text, `metadata_change` event. `st2` calls this. |
-| `evidence snapshot` / `remove` | missing (M, decide) | Tagged JSON results, strict reader, exact-generation remove. |
+| `evidence snapshot` / `remove` | deferred | Tagged JSON results, strict reader, exact-generation remove. Documented as absent. Section 12. |
 | `up` / `down` | partial (S) | Node binds by the `(ptyfile, ptyfile.session)` tag pair, syncs tags, prints `● <label> (started)` lines. Rust binds by name. |
-| `test` | missing (decide) | A vitest wrapper for the Node repository. |
+| `test` | dropped | A vitest wrapper for the Node repository. |
 | `completions <shell>` | missing (S) | fish, bash, zsh. Output must equal the checked-in files byte for byte. Exit 2 on a bad shell. |
-| `version` / `--version` / `-v` / `-V` | partial (S) | Node prints `<semver>+<short-sha>` in a git checkout, `<semver>` otherwise. Rust prints `0.1.0`. The version number itself is a decision. |
+| `version` / `--version` / `-v` / `-V` | partial (S) | Node prints `<semver>+<short-sha>` in a git checkout, `<semver>` otherwise. Rust prints `0.1.0`. Decided: `0.13.x-rust+<short-sha>`. |
 | `help` / `--help` / `-h`, per-command `--help` | partial (S) | Top-level and per-command help text, verbatim. Rust has one fixed block. |
 | `pty-<cmd>` forwarding | missing (S) | Unknown command → `which pty-<cmd>` → exec with inherited stdio; else `Unknown command: <cmd>` + usage, exit 1. |
 
@@ -140,7 +140,7 @@ gap is in what the daemon does with the frames.
 | `EXIT` code = `128 + signal` on a signal death | unverified | |
 | `STATUS` JSON with `clients.connections[]` | partial | See `stats` above. |
 | Readonly clients never write; command sockets excluded from counts | missing | |
-| `DATA` from the client written as UTF-8 text; Rust writes raw bytes | decide | Issue #1 names this as the first decision record. |
+| `DATA` from the client written as UTF-8 text; Rust writes raw bytes | decision record | Issue #1 names this as the first decision record. The plan settles it with a byte round-trip fixture. |
 | Machine stream `--attach-stream-fd-v1` on the client side | missing | Section 3. |
 | Reconnect with backoff (`--remote`) | missing | |
 
@@ -161,7 +161,7 @@ gap is in what the daemon does with the frames.
 | On preserve: `exitCode`, `exitedAt`, `lastLines` (≤ 200) | partial | Rust keeps 50 lines and writes a Rust-only `<name>.screen` file. |
 | Scrollback 10000, `scrollbackCapacity = rows + 10000` | have | |
 | Terminal events to the event log: `bell`, `title_change`, `notification` (OSC 9/99/777), `focus_request`, `cursor_visible`, `session_start`, `session_exit` | missing | |
-| Live recovery request handling (`.recovery/`) | missing (decide) | |
+| Live recovery request handling (`.recovery/`) | deferred | |
 
 ## 5. Registry on disk (`$PTY_ROOT`)
 
@@ -171,7 +171,7 @@ gap is in what the daemon does with the frames.
 | `<name>.sock`, `<name>.pid` | have | Node: socket `0600`, pid written after listen. |
 | `<name>.events.jsonl` (1000 → 500 retention, truncated at daemon start) | missing | |
 | `<name>.lock` creation/metadata lock; `<name>.events.lock`; lock order events → creation; stale-lock steal by pid | missing | Every mutation in Node takes these. A Rust writer without them can tear a Node writer's update. |
-| `.recovery/` | missing (decide) | |
+| `.recovery/` | deferred | |
 | `theme`, `gc.log` | missing | Small. |
 | `<name>.screen` | Rust-only | Remove once `lastLines` matches. |
 | Root created `0700` on demand | have | |
@@ -183,7 +183,7 @@ gap is in what the daemon does with the frames.
 |---|---|
 | `command` (resolved path), `args`, `displayCommand`, `cwd`, `createdAt` (ms precision) | partial (`command` as typed; seconds precision) |
 | `generation`, `daemonPid` | missing |
-| `recovery{...}` | missing (decide) |
+| `recovery{...}` | deferred (preserved on rewrite, never written) |
 | `rows`, `cols`, `ephemeral`, `isolateEnv`, `extraEnv`, `unsetEnv`, `env` | missing |
 | `tags`, `displayName`, `lastAttachAt` | have |
 | `exitCode`, `exitedAt`, `lastLines` | partial (50 vs 200 lines) |
@@ -223,7 +223,7 @@ and a recorded decision where the two differ.
 | Behavior | Rust status |
 |---|---|
 | `remote-serve --stdio`: one JSON request line, `list` or `route`, `{"ok":true}` then splice | missing (M) |
-| `remote-serve --socket <path>` listening form | missing (decide: the Node docs call it transitional) |
+| `remote-serve --socket <path>` listening form | dropped (the Node docs call it transitional) |
 | `--remote <peer>` on `list`, `peek`, `send`, `attach`; `fabric dial <peer> pty-remote`; 10 s timeouts; `RouteRefusedError` | missing (M) |
 | Bare `list --remote` via `pty-relay ls --json` | missing (S) |
 
@@ -243,12 +243,12 @@ test process), screenshots `{lines, text, ansi}`, `waitForText` /
 | TypeScript package that drives a TUI Playwright-style | missing (L) | See the design note below. |
 | Executable docs | missing (S) | |
 
-**Design note for the TypeScript package.** The Node library needs `node-pty`
-and `@xterm/headless` in the test process. A new package can instead use the
-Rust `pty` binary as its engine: spawn the target with `pty run -d` under a
-temporary `PTY_ROOT`, send keys as `DATA`, and take screenshots with `PEEK`.
-Then the TypeScript and Rust harnesses see the same bytes, and the package has
-no native dependency. This is a plan-phase decision.
+**Decided 2026-08-29: the Rust `pty` binary is the engine of the TypeScript
+package.** The Node library needs `node-pty` and `@xterm/headless` in the test
+process. The new package instead spawns the target with `pty run -d` under a
+temporary `PTY_ROOT`, sends keys as `DATA`, and takes screenshots with `PEEK`.
+The TypeScript and Rust harnesses then see the same bytes, and the package has
+no native dependency.
 
 ## 9. TUI library and the session manager
 
@@ -291,9 +291,8 @@ Capabilities the session manager and a `pty-layout`-class program need:
 Note: the README's directory picker and name/command prompt no longer exist
 in the Node code. Creation is one keystroke.
 
-**Plan-phase decision.** Build on `ratatui` + `crossterm` (layout, widgets,
-buffer diff come for free) and add the pty pane on libghostty. Or write the
-framework from scratch. The capability list is the same either way.
+**Decided 2026-08-29: build on `ratatui` + `crossterm`** (layout, widgets, and
+buffer diff come with them) and add the pty pane on libghostty.
 
 ## 10. Rust embedding API
 
@@ -323,23 +322,23 @@ against a Rust daemon and the reverse.
 
 ## 12. Candidates to leave off
 
-Each row is a decision. The recommendation is one opinion.
+Decided on 2026-08-29. Each row records the decision.
 
-| Item | Size | Recommendation |
+| Item | Size | Decision |
 |---|---|---|
-| `pty test` (vitest wrapper) | — | Drop. It belongs to the Node repository. |
-| `pty-kill-releases-socket-test` second binary | S | Drop. Port the case as a Rust test. |
-| `remote-serve --socket <path>` | S | Drop. Keep `--stdio`. The Node docs mark it transitional. |
-| Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Drop. Nothing in the network uses it. |
-| `gc`: permanent respawn, flapping classifier, abandoned reap | L | Drop. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Keep: debris, orphan kill, sweep, `keep`, tag prune, dry-run, footer, `--print-launchd-plist`. Keep `strategy=permanent` as a preserve flag. |
-| `recover` and the `recovery{}` capability | XL | Defer. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust must still preserve the field on rewrite. |
-| `evidence snapshot` / `remove` | M | Port later. Pure file logic; the VRS pins it. |
-| `--attach-stream-fd-v1` | M | Keep. An eval cell and relays use it. |
-| `PTY_SPAWNER_PID` watchdog | S | Keep. Small. |
-| Rust `ATTACH` geometry-neutral flag and `stats.clients.geometryNeutral` | S | Drop, or keep as a recorded extension. Node's readonly role covers `peek -f`. |
-| Rust-only `<name>.screen` file | S | Drop once `lastLines` matches. |
-| Rust `run --rows/--cols` | S | Keep as an extension. Node persists rows/cols anyway. |
-| `up`/`down` and `pty.toml` | S | Keep. Already ported; the binding rule needs the tag pair. |
+| `pty test` (vitest wrapper) | — | Dropped. It belongs to the Node repository. |
+| `pty-kill-releases-socket-test` second binary | S | Dropped. The case becomes a Rust test. |
+| `remote-serve --socket <path>` | S | Dropped. `--stdio` stays. The Node docs mark the socket form transitional. |
+| Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
+| `gc`: permanent respawn, flapping classifier, abandoned reap | L | Dropped. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Kept: debris, orphan kill, sweep, `keep`, tag prune, dry-run, footer, `--print-launchd-plist`. `strategy=permanent` stays as a preserve flag. |
+| `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite. |
+| `evidence snapshot` / `remove` | M | Deferred and documented as absent. Its user is not known. |
+| `--attach-stream-fd-v1` | M | Kept. An eval cell and relays use it. |
+| `PTY_SPAWNER_PID` watchdog | S | Kept. Small. |
+| Rust `ATTACH` geometry-neutral flag and `stats.clients.geometryNeutral` | S | Dropped. Node's readonly role covers `peek -f`. |
+| Rust-only `<name>.screen` file | S | Dropped once `lastLines` matches. |
+| Rust `run --rows/--cols` | S | Kept as an extension. Node persists rows/cols anyway. |
+| `up`/`down` and `pty.toml` | S | Kept. Already ported; the binding rule needs the tag pair. |
 
 ## 13. In flight, not on `main`
 
@@ -361,7 +360,7 @@ Each row is a decision. The recommendation is one opinion.
 | `libghostty-vt-sys` needs Zig 0.15.2 and fetches Ghostty source at build | have | A nix package needs a fixed-output fetch. |
 | `flake.nix` for this repo | missing | `st2`'s flake still pins the Node `pty`. |
 | Completion files vendored byte for byte | missing | |
-| Version string | decide | `0.12.0+sha` to match Node, or a new line. |
+| Version string | decided | `0.13.x-rust+<short-sha>`: one minor above the Node line, a `rust` pre-release tag, and the commit. |
 | Node test corpus: 120 files, 31k lines; 13 VRS requirements each mapped to test files | oracle | The plan decides which suites to port, which to run as black-box CLI tests against both binaries. |
 | Shared fixtures `tests/fixtures/parity/{screens,shapes}.json` | have | Node-owned, vendored here byte-identical. Extend per section 6. |
 | Rust tests today: 173 | have | |
