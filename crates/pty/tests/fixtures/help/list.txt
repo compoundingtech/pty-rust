@@ -1,0 +1,20 @@
+Usage: pty list [--json] [--tags] [--filter-tag k=v] [--remote [<peer>]] [--status <s>] [--summary]
+
+List sessions (alias: pty ls). User tags show by default.
+
+Flags:
+  --json               Emit JSON
+  --tags               Include internal bookkeeping tags (ptyfile*, strategy.*)
+  --filter-tag k=v     Only sessions with the tag (repeatable, ALL must match)
+  --remote <peer>      Also list a fabric peer's sessions (over fabric; the peer
+                       runs 'pty remote-serve' exposed as 'fabric expose pty-remote')
+  --remote             Bare (no peer): include pty-relay hosts (when installed)
+  --status <state>     Filter by status: running | exited | vanished
+  --older-than <dur>   Only sessions older than a duration (e.g. 30m, 2h, 3d)
+  --newer-than <dur>   Only sessions newer than a duration
+  --summary            Print a one-line count summary instead of the list
+
+Examples:
+  pty list
+  pty list --remote hetzner
+  pty list --filter-tag role=web --json

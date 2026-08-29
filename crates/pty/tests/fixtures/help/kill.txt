@@ -1,0 +1,7 @@
+Usage: pty kill <ref>
+
+Terminate a running session's daemon and exact descendant tree. Metadata is kept —
+restart or `pty rm` it later.
+
+Examples:
+  pty kill myserver

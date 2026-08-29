@@ -1,0 +1,12 @@
+Usage: pty rename <new-display-name>          Inside a session: set displayName
+       pty rename <ref> <new-display-name>    Outside: set displayName on <ref>
+       pty rename --show <ref>                Show the current displayName
+       pty rename --clear [ref]               Clear the displayName
+
+displayName is a mutable, non-unique label; the session's stable id (name) never changes.
+An ambiguous displayName must be replaced with one of the reported stable ids.
+
+Examples:
+  pty rename my-friendly-name
+  pty rename webapp "Web Frontend"
+  pty rename --show webapp

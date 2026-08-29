@@ -6,6 +6,9 @@
 //! `crate::daemon`) that owns the PTY and a libghostty terminal and serves the
 //! wire protocol over a unix socket.
 
+pub mod completions;
+pub mod help;
+
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -926,26 +929,4 @@ pub(crate) fn cmd_status(args: &[String]) -> i32 {
     }
     println!("[{}]", items.join(","));
     0
-}
-
-pub(crate) fn print_help() {
-    println!(
-        "pty — persistent terminal sessions (Rust + libghostty)\n\
-         \n\
-         USAGE:\n\
-         \x20 pty run [--id X] [--name X] [--cwd D] [--rows R] [--cols C] -- <cmd...>\n\
-         \x20 pty ls [--json]\n\
-         \x20 pty peek [--plain] [--full] [-f] [--wait TEXT [-t SECS]] <ref>\n\
-         \x20 pty send <ref> <text> | [--with-delay <sec>] --seq <value> ...\n\
-         \x20                             (--seq gap defaults to 0.3s; --with-delay 0 = stream)\n\
-         \x20 pty attach <ref>            (Ctrl+\\ to detach; twice sends it to the child)\n\
-         \x20 pty up [dir] [names...]     (start sessions from pty.toml)\n\
-         \x20 pty down [dir] [names...]   (stop them)\n\
-         \x20 pty restart <ref>\n\
-         \x20 pty rename <ref> <label>\n\
-         \x20 pty rm <ref>\n\
-         \x20 pty kill <ref>\n\
-         \x20 pty stats [--json] [--all] [<ref>]\n\
-         \x20 pty version"
-    );
 }

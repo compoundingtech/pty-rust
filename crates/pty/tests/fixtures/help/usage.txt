@@ -1,0 +1,122 @@
+Usage:
+  pty                                     Interactive session manager (fullscreen TUI)
+  pty --preselect-new                     Open the TUI with "Create new session..." pre-selected
+  pty --filter-tag key=value              Filter the TUI to sessions matching the tag (repeatable);
+                                          new sessions inherit the tag
+
+Create sessions:
+  pty run -- <command> [args...]          Create a session and attach (random id + auto display label)
+  pty run --id <id> -- <command>          Pin the on-disk id (sock / json filename; charset-validated)
+  pty run --name <label> -- <command>     Set a trimmed, single-line display label (≤ 160 Unicode scalars)
+  pty run --no-display-name -- <cmd>      Skip the friendly cwd+command label (just an id)
+  pty run -d -- <command>                 Create in the background (detached)
+  pty run -a -- <command>                 Create OR attach if a session with the same id already exists
+  pty run -e -- <command>                 Ephemeral: auto-remove metadata on clean exit
+  pty run --tag key=value -- <command>    Tag a session (repeatable)
+  pty run --env KEY=VALUE -- <command>    Overlay child environment (repeatable; persisted for restart)
+  pty run --unset-env KEY -- <command>    Remove inherited environment (repeatable; persisted for restart)
+  pty run --cwd /path -- <command>        Run in a specific directory
+  pty run --isolate-env -- <command>      Scrub the child env to a safe allow-list
+                                          (intended for remote-reachable sessions)
+  pty run --force -- <command>            Create even from inside another pty session (nested)
+
+Attach & interact:
+  pty attach <ref>                        Attach to an existing session (alias: pty a)
+  pty attach --force <ref>                Attach even from inside another pty session (nested)
+  pty attach -r <ref>                     Attach, auto-restart if the session is exited
+  pty attach --no-restart <ref>            Attach only; fail if the session is not running
+  pty attach --remote <peer> <ref>        Attach a session on a fabric peer (over fabric)
+  pty exec -- <command> [args...]         Replace the current session's process (inside a session)
+  pty send <ref> "text"                   Send raw text (no implicit newline)
+  pty send <ref> --seq "text" --seq key:return   Send an ordered sequence of chunks / key events
+                                          (0.3s gap between items by default)
+  pty send <ref> --with-delay <sec> --seq ...    Override the gap; --with-delay 0 = straight stream
+  pty send <ref> --paste "<big text>"     Wrap the payload in bracketed-paste markers
+  pty send --remote <peer> <ref> "text"   Send to a session on a fabric peer (over fabric)
+
+Observe:
+  pty peek <ref>                          Print current screen and exit
+  pty peek --plain <ref>                  Print current screen as plain text (no ANSI)
+  pty peek --full <ref>                   Print full scrollback (not just the viewport)
+  pty peek --wait "text" [-t N] <ref>     Wait until text appears (optional timeout in seconds)
+  pty peek -f <ref>                       Follow output read-only (Ctrl+\ to stop)
+  pty peek --remote <peer> <ref>          Peek a session on a fabric peer (over fabric)
+  pty events <ref>                        Follow events from a session
+  pty events --all                        Follow events from every session, interleaved
+  pty events --recent <ref>               Print recent events and exit
+  pty events --json <ref>                 Emit raw JSONL
+  pty stats                               Live CPU / memory / PIDs for every session
+  pty stats <ref>                         Live metrics for a single session
+  pty stats --json                        Emit stats as JSON (one snapshot)
+  pty list                                List sessions (text; alias: pty ls)
+  pty list --json                         List sessions as JSON
+  pty list --tags                         Include internal bookkeeping tags (ptyfile*, strategy.*)
+  pty list --filter-tag key=value         Filter to sessions with the tag (repeatable, ALL must match)
+  pty list --remote <peer>                List a fabric peer's sessions (over fabric)
+  pty list --remote                       Include remote sessions via pty-relay (when installed)
+  pty remote-serve --stdio                Serve remote access on-demand (fabric --exec spawns it per dial)
+  pty remote-serve --socket <path>        Serve remote access as a listening daemon (being retired)
+
+Modify:
+  pty metadata patch --id <id>            Atomically merge displayName/tags from JSON stdin
+  pty evidence snapshot --id <id>         Read exact-generation retained exit evidence as JSON
+  pty rename <label>                      Inside a session: set its displayName
+  pty rename <ref> <label>                Outside: set displayName on <ref>
+  pty rename --show <ref>                 Print the current displayName
+  pty rename --clear [ref]                Remove the displayName
+  pty tag <ref>                           Show tags on a session
+  pty tag <ref> key=value [key=value...]  Set tags
+  pty tag <ref> --rm key [--rm key...]    Remove tags
+  pty tag-multi <selector> [ops...]       Bulk read / write tags across sessions
+                                          Selector (one of): --all | --filter-tag k=v | <ref>...
+                                          Ops (any of): key=value | --rm key
+                                          --all + write requires --yes
+  pty emit user.<type> [--json <p>] [--text <s>]     Publish a user.* event (inside a session)
+  pty emit <ref> user.<type> [...]        Same, targeting a specific session
+
+Lifecycle:
+  pty restart <ref>                       SIGTERM + respawn using stored metadata (prompts if running)
+  pty restart -y <ref>                    Same, no prompt
+  pty kill <ref>                          Terminate a running session and its descendants
+  pty recover <name> --snapshot <file>    Rebind a supporting live daemon after registry unlink
+  pty rm <ref>                            Remove an exited session's metadata (alias: pty remove)
+  pty evidence remove --id <id> --expected-generation <opaque>
+                                          Remove only the matching terminal generation
+  pty gc                                  Reconciliation pass: orphan-kill, abandoned-reap,
+                                          permanent-respawn, exited-sweep
+  pty gc --dry-run                        Preview without changing anything (alias: -n)
+  pty gc --idle-days N                    Also reap permanents with no attach in N days
+  pty gc --fast-fail-window=N             Fast-fail window (seconds) for the respawn cap
+                                          (default 60; per-session strategy.fast-fail-window wins)
+  pty gc --fast-fail-limit=N              Consecutive fast fails before a permanent is flagged
+                                          flapping (default 3; per-session tag wins)
+  pty gc --print-launchd-plist [--interval=N]
+                                          Print a launchd plist that runs 'pty gc' every N seconds
+                                          (default 30); Label + logPath derived from PTY_ROOT
+
+Multi (pty.toml):
+  pty up                                  Start every session in ./pty.toml
+  pty up <dir>                            Start sessions in <dir>/pty.toml
+  pty up <name> [<name>...]               Start specific sessions from ./pty.toml
+  pty down                                Stop every session in ./pty.toml
+  pty down <dir>                          Stop sessions in <dir>/pty.toml
+  pty down <name> [<name>...]             Stop specific sessions
+
+Global:
+  pty --root <path> <subcommand> [...]    Pin the state registry for this call (== PTY_ROOT env)
+  pty help | pty --help | pty -h          Show this usage
+  pty version | pty --version | pty -v    Print the version (<semver>+<short-sha>)
+  pty test [watch | -t "pattern"]         Run the pty test suite (vitest passthrough)
+
+Session references (<ref>): the on-disk id (validated: [A-Za-z0-9._-], ≤ 255 chars,
+socket path ≤ 104 bytes), or a displayName. Stable ids always win; a displayName
+resolves only when unique. Inside a session, most commands default to $PTY_SESSION
+when the ref is omitted (see 'pty rename', 'pty exec', 'pty emit').
+
+Env:
+  PTY_ROOT                Registry dir (default ~/.local/state/pty). Canonical.
+  PTY_SESSION_DIR         Deprecated alias for PTY_ROOT; still works, one-time notice.
+  PTY_ROOT_LEGACY_SILENT  Suppress the PTY_SESSION_DIR deprecation notice.
+  PTY_SESSION             Set by the daemon inside a session; drives nesting detection.
+
+Detach from an attached session with Ctrl+\ (press twice to send Ctrl+\ to the child).

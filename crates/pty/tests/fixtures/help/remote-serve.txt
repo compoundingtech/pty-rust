@@ -1,0 +1,25 @@
+Usage: pty remote-serve (--stdio | --socket <path>)
+
+Serve the remote-access control protocol so a fabric peer can expose pty and
+other machines can 'pty <cmd> --remote <this-peer>'. Reads sessions from the
+ambient PTY_ROOT — run it in the same env the sessions use. Two forms:
+
+  --stdio            On-demand: serve ONE connection over stdin/stdout, then exit.
+                     fabric spawns it per dial and owns accept + persistence +
+                     roaming (a drop/reconnect reuses the SAME process). No
+                     persistent pty daemon. The recommended fabric form.
+  --socket <path>    Listening daemon: bind a Unix socket for a fabric peer to
+                     expose. Pick a path OUTSIDE PTY_ROOT (a control socket inside
+                     it is mis-scanned as a phantom session). Run it WRAPPED —
+                     'setsid sh -c "…"', systemd, launchd — so pty is a CHILD of
+                     the session leader (exec'd as a bare session leader without a
+                     TTY it can exit on detach). Being retired in favor of --stdio.
+
+Flags:
+  PTY_REMOTE_SERVE_DEBUG=1   Env: log signal/exit/exception lifecycle to stderr
+
+Examples:
+  fabric expose pty-remote --exec -- pty remote-serve --stdio   # on-demand (recommended)
+  pty remote-serve --socket ~/.local/state/pty-remote.sock      # listening daemon
+  setsid sh -c 'pty remote-serve --socket ~/.local/state/pty-remote.sock' </dev/null &   # wrapped
+  fabric expose pty-remote --socket ~/.local/state/pty-remote.sock   # expose the listening form

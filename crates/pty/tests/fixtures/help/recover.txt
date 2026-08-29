@@ -1,0 +1,10 @@
+Usage: pty recover <name> --snapshot <metadata.json>
+
+Ask the original supporting daemon to republish an externally unlinked socket
+and registry without signaling or restarting its PTY child.
+
+The snapshot must have been captured from the same selected PTY_ROOT before
+the registry was unlinked and must advertise a recovery capability.
+
+Example:
+  pty --root /state/pty recover myserver --snapshot ./myserver.json

@@ -1,0 +1,14 @@
+Usage: pty events [--all | <ref>] [--recent] [--json] [--wait <type> [-t <sec>]]
+
+Follow a session's event log (bell, title, notifications, tag/rename changes, user.* events).
+
+Flags:
+  --all                Follow every session, interleaved (omit <ref>)
+  --recent             Print recent events and exit (don't follow)
+  --json               Emit raw JSONL
+  --wait <type>        Block until an event of <type> appears
+  -t, --timeout <sec>  Timeout (seconds) for --wait
+
+Examples:
+  pty events myserver
+  pty events --recent --json myserver

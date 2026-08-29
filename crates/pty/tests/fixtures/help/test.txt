@@ -1,0 +1,7 @@
+Usage: pty test [watch | -t "<pattern>"]
+
+Run the pty test suite (a thin vitest passthrough).
+
+Examples:
+  pty test
+  pty test -t "peek"

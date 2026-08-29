@@ -1,0 +1,7 @@
+Usage: pty evidence snapshot --id <stable-id>
+
+Emit one tagged JSON snapshot of retained terminal evidence for the exact
+stable session id.
+
+Example:
+  pty evidence snapshot --id a1b2c3d4

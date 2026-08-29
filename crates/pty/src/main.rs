@@ -16,7 +16,7 @@ use cli::*;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        print_help();
+        cli::help::print_usage();
         exit(0);
     }
     let cmd = args[0].as_str();
@@ -42,8 +42,9 @@ fn main() {
             println!("{}", env!("PTY_VERSION"));
             0
         }
+        "completions" => cli::completions::run(rest),
         "help" | "--help" | "-h" => {
-            print_help();
+            cli::help::print_usage();
             0
         }
         other => {

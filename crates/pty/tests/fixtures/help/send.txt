@@ -1,0 +1,22 @@
+Usage: pty send <ref> "text"
+       pty send <ref> --seq <chunk> [--seq key:<name>] ...
+       pty send --remote <peer> <ref> "text"
+
+Send text or key events to a session. Raw text is sent with NO implicit newline —
+to send text followed by Enter, use --seq (see the second example).
+
+Flags:
+  --seq <value>        Ordered chunk or key event (repeatable). key:<name> sends a
+                       key, e.g. key:return, key:ctrl+c, key:ctrl-c, key:C-c.
+                       Modifiers also accept _ separators; names ignore case.
+  --with-delay <sec>   Delay (seconds) between --seq items. DEFAULT 0.3s so a
+                       trailing key:return doesn't race ahead of the program
+                       parsing the text. --with-delay 0 = straight stream (no gap).
+  --paste "<text>"     Wrap the payload in bracketed-paste markers
+  --remote <peer>      Send to a session on a fabric peer (over fabric); <ref> is
+                       the session's name/id ON THE REMOTE
+
+Examples:
+  pty send myserver "hello"
+  pty send myserver --seq "git status" --seq key:return        # 0.3s gap by default
+  pty send --remote hetzner myserver --seq "ls" --seq key:return

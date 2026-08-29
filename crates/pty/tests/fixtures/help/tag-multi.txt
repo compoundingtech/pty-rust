@@ -1,0 +1,16 @@
+Usage: pty tag-multi <selector> [ops...]
+
+Bulk read / write tags across many sessions.
+  Selector (one of): --all | --filter-tag k=v (repeatable) | <ref>...
+  Ops (any of):      key=value | --rm key
+
+Flags:
+  --all                Select every session
+  --filter-tag k=v     Select sessions with the tag (repeatable)
+  --rm <key>           Remove a tag key (repeatable)
+  --json               Read mode: emit tags as JSON
+  -y, --yes            Required to write when the selector is --all
+
+Examples:
+  pty tag-multi --filter-tag role=web env=prod
+  pty tag-multi --all --json

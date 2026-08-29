@@ -1,0 +1,13 @@
+Usage: pty metadata patch --id <stable-id>
+
+Atomically merge displayName and tags for one exact stable session id. Reads
+one JSON object from stdin; it never resolves display-name aliases.
+
+Patch fields:
+  displayName   string to set, null to clear, omitted to preserve
+  tags          object of string values to set and null values to remove
+
+Examples:
+  pty metadata patch --id a1b2c3d4 < patch.json
+  printf '%s' '{"displayName":"Worker","tags":{"role":"worker"}}' | pty metadata patch --id a1b2c3d4
+  printf '%s' '{"displayName":null,"tags":{"temporary":null}}' | pty metadata patch --id a1b2c3d4
