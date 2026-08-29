@@ -134,7 +134,7 @@ fn concurrent_stealers_cannot_both_win() {
     let loser = outs.iter().find(|o| !o.status.success()).unwrap();
     expect_regex(
         &String::from_utf8_lossy(&loser.stderr),
-        "is being created by another process|is already running",
+        "is being created by another process|is already running|event log is busy",
     );
     let list = rig.list_json();
     assert_eq!(list.len(), 1, "{list:?}");

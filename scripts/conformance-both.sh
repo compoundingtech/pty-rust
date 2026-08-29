@@ -69,23 +69,35 @@ def parse(path):
     # First line of each failure's stdout section (the panic message).
     for m in re.finditer(r"^---- (\S+) stdout ----\n(.*?)(?=^---- |\nfailures:|\Z)", text, re.M | re.S):
         body = m.group(2)
+        # The panic location line is followed by the message; keep the
+        # message's first line (or the location when there is none).
         first = ""
+        where = ""
         for line in body.splitlines():
             line = line.strip()
-            if not line:
+            if not line or line.startswith("note: run with"):
                 continue
-            mm = re.match(r"thread '.*' panicked at [^:]+:\d+:\d+:\s*(.*)", line)
-            if mm:
-                first = mm.group(1) or first
-                if not first:
-                    continue
-                break
-            if first == "":
-                first = line
-                if line.startswith("thread"):
-                    continue
-                break
-        fails[m.group(1)] = first[:200]
+            if re.match(r"thread '.*' (\(\d+\) )?panicked at ", line):
+                where = line
+                tail = line.split("panicked at ", 1)[1]
+                rest = tail.split(":", 3)[3].strip() if tail.count(":") >= 3 else ""
+                if rest:
+                    first = rest
+                    break
+                continue
+            first = line
+            break
+        msg = (first or where)[:200]
+        # The rig's Out summary follows; the first stderr line usually names
+        # the cause (an unknown command, a different message).
+        if "--- stderr ---" in body:
+            err = body.split("--- stderr ---", 1)[1]
+            for line in err.splitlines():
+                line = line.strip()
+                if line and not line.startswith("note: run with"):
+                    msg += " :: " + line[:160]
+                    break
+        fails[m.group(1)] = msg
     return tests, fails
 rows = []
 red = []
