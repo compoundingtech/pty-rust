@@ -3,8 +3,8 @@
 //! assert the values node emits so the two projects share one behavioral spec.
 
 use libghostty_vt::terminal::{Options, Terminal};
-use pty_testkit::client::{resolve_seq_delay_ms, DEFAULT_SEQ_DELAY_MS};
-use pty_testkit::screenshot::serialize_for_replay;
+use pty_core::client::{resolve_seq_delay_ms, DEFAULT_SEQ_DELAY_MS};
+use pty_terminal::screenshot::serialize_for_replay;
 use pty_testkit::{Session, SpawnOptions};
 
 // ── #3: send --seq pacing (port of node's resolveSeqDelayMs coverage) ──

@@ -194,17 +194,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "pty-testkit"
-version = "0.1.0"
+name = "pty"
+version = "0.13.0-rust"
 dependencies = [
  "libc",
  "libghostty-vt",
  "portable-pty",
+ "pty-core",
+ "pty-terminal",
+ "pty-testkit",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "pty-conformance"
+version = "0.13.0-rust"
+
+[[package]]
+name = "pty-core"
+version = "0.13.0-rust"
+dependencies = [
+ "libc",
  "regex",
  "serde",
  "serde_json",
  "toml",
 ]
+
+[[package]]
+name = "pty-terminal"
+version = "0.13.0-rust"
+dependencies = [
+ "libghostty-vt",
+]
+
+[[package]]
+name = "pty-testkit"
+version = "0.13.0-rust"
+dependencies = [
+ "libghostty-vt",
+ "portable-pty",
+ "pty-core",
+ "pty-terminal",
+]
+
+[[package]]
+name = "pty-tui"
+version = "0.13.0-rust"
 
 [[package]]
 name = "quote"

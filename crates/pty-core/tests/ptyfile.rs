@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use pty_testkit::ptyfile::{command_with_env_exports, read_pty_file, PtySessionDef};
+use pty_core::ptyfile::{command_with_env_exports, read_pty_file, PtySessionDef};
 
 fn make_dir(name: &str, content: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};

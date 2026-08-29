@@ -1,0 +1,15 @@
+[package]
+name = "pty-core"
+description = "Wire protocol, session registry, key/paste/duration/input parsing, pty.toml manifests, and client operations for the pty session tool. No terminal emulator, no zig."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true

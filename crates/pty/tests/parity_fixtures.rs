@@ -93,7 +93,7 @@ fn shared_json_shape_fixtures_pass() {
     let _serial = serial();
     let raw = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/parity/shapes.json"
+        "/../../tests/fixtures/parity/shapes.json"
     ))
     .expect("read shapes fixtures");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid shapes json");
@@ -192,7 +192,7 @@ fn shared_parity_fixtures_pass() {
     let _serial = serial();
     let raw = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/parity/screens.json"
+        "/../../tests/fixtures/parity/screens.json"
     ))
     .expect("read fixtures");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid fixtures json");

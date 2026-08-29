@@ -20,12 +20,12 @@ use std::sync::Arc;
 use libghostty_vt::terminal::{Mode, Options, Terminal};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::protocol::{
+use pty_core::protocol::{
     decode_peek, decode_size, encode_data, encode_exit, encode_screen, encode_status_response,
     MessageType, PacketReader,
 };
-use crate::registry::{self, SessionMetadata};
-use crate::screenshot::capture;
+use pty_core::registry::{self, SessionMetadata};
+use pty_terminal::screenshot::capture;
 
 /// Parameters for launching a session daemon.
 pub struct DaemonConfig {
@@ -325,7 +325,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                     // so a reattaching client restores a TUI's full state
                     // (mouse tracking, alt-screen, cursor visibility, kitty kbd),
                     // not just its glyphs.
-                    let screen = crate::screenshot::serialize_for_replay(&terminal);
+                    let screen = pty_terminal::screenshot::serialize_for_replay(&terminal);
                     let _ = c.tx.send(encode_screen(screen.as_bytes()));
                 }
                 // A non-neutral attach negotiates the shared PTY geometry.
@@ -374,9 +374,9 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                     .kitty_keyboard_flags()
                     .map(|f| f.bits())
                     .unwrap_or(0);
-                let stats = crate::stats::StatsResult {
+                let stats = pty_core::stats::StatsResult {
                     name: cfg.name.clone(),
-                    terminal: crate::stats::TerminalStats {
+                    terminal: pty_core::stats::TerminalStats {
                         cols: cur_cols,
                         rows: cur_rows,
                         cursor_x: terminal.cursor_x().unwrap_or(0),
@@ -384,23 +384,23 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                         scrollback_used: terminal.scrollback_rows().unwrap_or(0),
                         scrollback_capacity: cur_rows as usize + 10_000,
                     },
-                    process: crate::stats::ProcessStats {
+                    process: pty_core::stats::ProcessStats {
                         alive: true,
                         exit_code: None,
                         pid: Some(child_pid),
-                        resources: crate::stats::read_resources(child_pid),
+                        resources: pty_core::stats::read_resources(child_pid),
                     },
-                    daemon: crate::stats::DaemonStats {
+                    daemon: pty_core::stats::DaemonStats {
                         pid: std::process::id() as i32,
-                        resources: crate::stats::read_resources(std::process::id() as i32),
+                        resources: pty_core::stats::read_resources(std::process::id() as i32),
                     },
-                    clients: crate::stats::ClientStats {
+                    clients: pty_core::stats::ClientStats {
                         total: attached + read_only,
                         attached,
                         read_only,
                         geometry_neutral: if read_only > 0 { Some(read_only) } else { None },
                     },
-                    modes: crate::stats::ModeStats {
+                    modes: pty_core::stats::ModeStats {
                         sgr_mouse: terminal.mode(Mode::SGR_MOUSE).unwrap_or(false),
                         cursor_hidden: !terminal.is_cursor_visible().unwrap_or(true),
                         kitty_keyboard: kitty_bits != 0,
@@ -507,8 +507,8 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<DaemonMsg>) {
                         match p.type_ {
                             MessageType::Attach => {
                                 let (rows, cols) = decode_size(&p.payload);
-                                let geometry_neutral = crate::protocol::decode_attach_flags(&p.payload)
-                                    & crate::protocol::ATTACH_FLAG_GEOMETRY_NEUTRAL
+                                let geometry_neutral = pty_core::protocol::decode_attach_flags(&p.payload)
+                                    & pty_core::protocol::ATTACH_FLAG_GEOMETRY_NEUTRAL
                                     != 0;
                                 let _ = tx.send(DaemonMsg::ClientAttach { id, rows, cols, geometry_neutral });
                             }

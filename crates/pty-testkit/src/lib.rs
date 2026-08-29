@@ -9,22 +9,11 @@
 //! into a libghostty terminal, take text/ANSI "screenshots", wait for content,
 //! and send named keys.
 //!
-//! It also ports several of the pty project's pure-logic modules
-//! ([`keys`], [`duration`]) so their test suites can run unchanged against Rust.
+//! Key names come from `pty_core::keys`; screenshots come from
+//! `pty_terminal::screenshot`. Both are re-exported here only as far as the
+//! `Session` API needs them.
 
-pub mod client;
-pub mod daemon;
-pub mod duration;
-pub mod input;
-pub mod keys;
-pub mod paste;
-pub mod protocol;
-pub mod ptyfile;
-pub mod queries;
-pub mod registry;
-pub mod screenshot;
 pub mod session;
-pub mod stats;
 
-pub use screenshot::Screenshot;
-pub use session::{build_spawn_env, Session, SpawnOptions};
+pub use pty_terminal::Screenshot;
+pub use session::{Session, SpawnOptions, build_spawn_env};

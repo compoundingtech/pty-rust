@@ -14,7 +14,7 @@
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
-use pty_testkit::registry::{self, SessionMetadata};
+use pty_core::registry::{self, SessionMetadata};
 
 /// A pid far above Linux's `pid_max`, so no live process can own it → `kill(pid,
 /// 0)` yields ESRCH → treated as dead. Asserted at runtime below so the test

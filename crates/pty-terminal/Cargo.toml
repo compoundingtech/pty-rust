@@ -1,0 +1,11 @@
+[package]
+name = "pty-terminal"
+description = "libghostty-backed terminal state for pty: screenshot capture and replay serialization."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libghostty-vt.workspace = true

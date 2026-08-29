@@ -1,6 +1,6 @@
 //! Port of the pty project's `tests/mouse-parse.test.ts`.
 
-use pty_testkit::input::{is_mouse_event, parse_input, InputEvent, MouseAction, MouseButton, MouseEvent};
+use pty_core::input::{is_mouse_event, parse_input, InputEvent, MouseAction, MouseButton, MouseEvent};
 
 fn parse(s: &str) -> Vec<InputEvent> {
     parse_input(s.as_bytes())
@@ -89,7 +89,7 @@ fn interleaves_mouse_with_key_events() {
 
 #[test]
 fn parse_key_filters_out_mouse_events() {
-    let keys = pty_testkit::input::parse_key("a\x1b[<0;3;4Mb".as_bytes());
+    let keys = pty_core::input::parse_key("a\x1b[<0;3;4Mb".as_bytes());
     let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
     assert_eq!(names, vec!["a", "b"]);
 }

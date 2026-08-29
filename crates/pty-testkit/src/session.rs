@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use libghostty_vt::terminal::{Options, Terminal};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
-use crate::keys::{resolve_key, KeyError};
-use crate::screenshot::{capture, Screenshot};
+use pty_core::keys::{resolve_key, KeyError};
+use pty_terminal::screenshot::{capture, Screenshot};
 
 /// Options for [`Session::spawn`]. Mirrors the TS `SpawnOptions`.
 #[derive(Debug, Clone, Default)]

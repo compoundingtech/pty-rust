@@ -1,6 +1,6 @@
 //! Port of the pty project's `tests/protocol.test.ts`.
 
-use pty_testkit::protocol::{
+use pty_core::protocol::{
     decode_attach_flags, decode_exit, decode_size, encode_attach, encode_data, encode_detach,
     encode_exit, encode_packet, encode_resize, encode_screen, encode_status,
     encode_status_response, MessageType, PacketReader, ATTACH_FLAG_GEOMETRY_NEUTRAL,

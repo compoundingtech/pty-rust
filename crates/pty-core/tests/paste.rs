@@ -2,7 +2,7 @@
 //! `send-paste.test.ts` (the wrapping logic; the CLI wiring is exercised by
 //! `cli_e2e`).
 
-use pty_testkit::paste::{wrap_bracketed_paste, BRACKETED_PASTE_END, BRACKETED_PASTE_START};
+use pty_core::paste::{wrap_bracketed_paste, BRACKETED_PASTE_END, BRACKETED_PASTE_START};
 
 #[test]
 fn markers_are_csi_200_and_201() {

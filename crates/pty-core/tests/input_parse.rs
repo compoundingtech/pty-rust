@@ -1,6 +1,6 @@
 //! Port of the pty project's `tests/input-parse.test.ts`.
 
-use pty_testkit::input::{parse_key, KeyEvent};
+use pty_core::input::{parse_key, KeyEvent};
 
 fn pk(s: &str) -> Vec<KeyEvent> {
     parse_key(s.as_bytes())

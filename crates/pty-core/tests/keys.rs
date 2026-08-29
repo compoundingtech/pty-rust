@@ -1,6 +1,6 @@
 //! Port of the pty project's `tests/keys.test.ts`.
 
-use pty_testkit::keys::{parse_seq_value, resolve_key};
+use pty_core::keys::{parse_seq_value, resolve_key};
 
 fn r(spec: &str) -> String {
     resolve_key(spec).expect("resolve_key")

@@ -1,6 +1,6 @@
 //! Port of the pty project's `tests/duration.test.ts`.
 
-use pty_testkit::duration::{format_duration, parse_duration};
+use pty_core::duration::{format_duration, parse_duration};
 
 // ── parse_duration ──
 

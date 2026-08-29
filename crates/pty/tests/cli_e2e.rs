@@ -370,21 +370,16 @@ fn stats_json_matches_node_contract() {
 }
 
 #[test]
-fn version_is_bare_semver() {
-    // Parity E: `pty version` prints bare semver (node's format), not a
-    // "pty-rust X.Y.Z" label. Node's regex: ^\d+\.\d+\.\d+(\+[0-9a-f]{4,})?$
+fn version_is_semver_with_rust_tag_and_sha() {
+    // Parity E: `pty version` prints `<semver>+<short-sha>` like node's
+    // `0.12.0+500eab2`, not a "pty-rust X.Y.Z" label. The Rust line is one
+    // minor above node with a `-rust` pre-release tag (docs/parity.md §14):
+    // `0.13.<patch>-rust+<hex>`, stamped by crates/pty/build.rs.
+    let re = regex::Regex::new(r"^0\.13\.\d+-rust\+[0-9a-f]{4,}$").unwrap();
     let root = unique_root();
     for form in ["version", "--version", "-v", "-V"] {
         let out = ok_pty(&root, &[form]);
-        let ok = out
-            .split('+')
-            .next()
-            .map(|semver| {
-                let parts: Vec<&str> = semver.split('.').collect();
-                parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
-            })
-            .unwrap_or(false);
-        assert!(ok, "`pty {form}` not bare semver: {out:?}");
+        assert!(re.is_match(&out), "`pty {form}` not 0.13.x-rust+<sha>: {out:?}");
     }
     let _ = std::fs::remove_dir_all(&root);
 }

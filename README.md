@@ -129,10 +129,11 @@ drains into the terminal on demand.
 
 ## Build requirements
 
-- **Rust** (edition 2021; built with 1.97).
-- **Zig 0.15.2** on `PATH`. The `libghostty-vt-sys` build script fetches the
-  Ghostty source and compiles the VT core with `zig build`, so a matching Zig
-  toolchain must be installed. Install it with:
+- **Rust ≥ 1.88** (edition 2024; built with 1.97).
+- **Zig 0.15.2** on `PATH` for every crate except `pty-core`. The
+  `libghostty-vt-sys` build script fetches the Ghostty source and compiles the
+  VT core with `zig build`, so a matching Zig toolchain must be installed.
+  `cargo build -p pty-core` needs no Zig. Install it with:
 
   ```sh
   curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ -C ~/.local/opt
@@ -207,21 +208,37 @@ correctness net.
 
 ## Layout
 
+A Cargo workspace of six crates under `crates/`; `cargo build` at the root
+builds them all, `cargo test --workspace` runs every suite.
+
 ```
-src/
-  bin/pty.rs      the `pty` CLI: run/ls/peek/send/attach/kill/status + __daemon
-  daemon.rs       per-session daemon: PTY + libghostty terminal, serves protocol
-  client.rs       client ops: peek / send / status / interactive attach
-  protocol.rs     wire packet framing (port of protocol.ts)
-  registry.rs     session dir + <name>.sock/.pid/.json (port of sessions.ts)
-  ptyfile.rs      pty.toml manifest parsing (port of ptyfile.ts)
-  session.rs      Session test harness: PTY (portable-pty) + libghostty Terminal
-  screenshot.rs   Screenshot { lines, text, ansi } capture
-  keys.rs         named-key → bytes (port of keys.ts)
-  duration.rs     parse/format durations (port of duration.ts)
-  input.rs        stdin key + SGR-mouse + Kitty CSI-u parsing (port of tui/input.ts)
-  queries.rs      terminal-query stripping (port of stripTerminalQueries)
-  paste.rs        bracketed-paste wrapping (port of paste.ts)
-examples/demo.rs  live libghostty screenshot loop (cargo run --example demo)
-tests/            ported test suites + CLI e2e (see table above)
+crates/
+  pty-core/         no libghostty, no zig
+    protocol.rs     wire packet framing (port of protocol.ts)
+    registry.rs     session dir + <name>.sock/.pid/.json (port of sessions.ts)
+    client.rs       client ops: peek / send / status / interactive attach
+    stats.rs        `pty status` result shapes
+    ptyfile.rs      pty.toml manifest parsing (port of ptyfile.ts)
+    keys.rs         named-key → bytes (port of keys.ts)
+    duration.rs     parse/format durations (port of duration.ts)
+    input.rs        stdin key + SGR-mouse + Kitty CSI-u parsing (port of tui/input.ts)
+    queries.rs      terminal-query stripping (port of stripTerminalQueries)
+    paste.rs        bracketed-paste wrapping (port of paste.ts)
+  pty-terminal/     libghostty terminal state
+    screenshot.rs   Screenshot { lines, text, ansi } capture + replay serialization
+  pty-testkit/      the testing harness
+    session.rs      Session: PTY (portable-pty) + libghostty Terminal
+    examples/demo.rs  live libghostty screenshot loop (cargo run -p pty-testkit --example demo)
+  pty/              the `pty` binary
+    main.rs         argv dispatch
+    cli/mod.rs      run/ls/peek/send/attach/up/down/restart/rm/rename/kill/status
+    daemon/mod.rs   per-session daemon: PTY + libghostty terminal, serves protocol
+    build.rs        stamps the version as 0.13.x-rust+<git short sha> (PTY_BUILD_SHA overrides)
+  pty-tui/          TUI library (skeleton; see docs/parity-plan.md)
+  pty-conformance/  black-box suite against any pty binary (skeleton; see docs/parity-plan.md)
+tests/fixtures/     shared parity fixtures, vendored byte for byte from the node repo
 ```
+
+Each crate's `tests/` holds the ported suites for the code it owns; the CLI
+e2e and fixture suites live under `crates/pty/tests` because they run the
+built binary (see the table above).

@@ -1,61 +1,22 @@
-//! The `pty` command-line tool — a Rust port of the pty project's CLI, backed
-//! by libghostty. v0 surface: run / ls / peek / send / attach / kill / status.
+//! Command implementations for the `pty` binary. `main.rs` dispatches on the
+//! first argv token and calls one `cmd_*` function per command; each returns
+//! the process exit code.
 //!
 //! Persistent sessions are hosted by a per-session daemon (see
-//! `pty_testkit::daemon`) that owns the PTY and a libghostty terminal and serves
-//! the wire protocol over a unix socket.
+//! `crate::daemon`) that owns the PTY and a libghostty terminal and serves the
+//! wire protocol over a unix socket.
 
-use std::process::{exit, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
-use pty_testkit::daemon::{self, DaemonConfig};
-use pty_testkit::keys::parse_seq_value;
-use pty_testkit::ptyfile::{self, command_with_env_exports, PtySessionDef};
-use pty_testkit::registry;
-use pty_testkit::client;
-
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        print_help();
-        exit(0);
-    }
-    let cmd = args[0].as_str();
-    let rest = &args[1..];
-    let code = match cmd {
-        "__daemon" => cmd_daemon(rest),
-        "run" | "spawn" => cmd_run(rest),
-        "ls" | "list" => cmd_ls(rest),
-        "peek" => cmd_peek(rest),
-        "send" => cmd_send(rest),
-        "attach" | "a" => cmd_attach(rest),
-        "up" => cmd_up(rest),
-        "down" => cmd_down(rest),
-        "restart" => cmd_restart(rest),
-        "rm" | "remove" => cmd_rm(rest),
-        "rename" => cmd_rename(rest),
-        "kill" => cmd_kill(rest),
-        "status" | "stats" => cmd_status(rest),
-        "version" | "--version" | "-v" | "-V" => {
-            // Bare semver, matching node's `pty --version` format (node also
-            // appends +<sha>; the number differs by project).
-            println!("{}", env!("CARGO_PKG_VERSION"));
-            0
-        }
-        "help" | "--help" | "-h" => {
-            print_help();
-            0
-        }
-        other => {
-            eprintln!("pty: unknown command '{other}'. Try `pty help`.");
-            1
-        }
-    };
-    exit(code);
-}
+use crate::daemon::{self, DaemonConfig};
+use pty_core::client;
+use pty_core::keys::parse_seq_value;
+use pty_core::ptyfile::{self, PtySessionDef, command_with_env_exports};
+use pty_core::registry;
 
 /// `pty run [--id X] [--name X] [--cwd D] [--tag k=v] [--rows R] [--cols C] -- <cmd...>`
-fn cmd_run(args: &[String]) -> i32 {
+pub(crate) fn cmd_run(args: &[String]) -> i32 {
     let mut id: Option<String> = None;
     let mut display_name: Option<String> = None;
     let mut cwd: Option<String> = None;
@@ -260,7 +221,7 @@ fn spawn_session_daemon(
 }
 
 /// Internal: `pty __daemon --name N --rows R --cols C --cwd D [--display-name X] -- <cmd...>`
-fn cmd_daemon(args: &[String]) -> i32 {
+pub(crate) fn cmd_daemon(args: &[String]) -> i32 {
     let mut name = String::new();
     let mut rows = 24u16;
     let mut cols = 80u16;
@@ -337,7 +298,7 @@ fn cmd_daemon(args: &[String]) -> i32 {
 }
 
 /// `pty ls [--json]`
-fn cmd_ls(args: &[String]) -> i32 {
+pub(crate) fn cmd_ls(args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json");
     let sessions = registry::list_sessions();
     if json {
@@ -404,7 +365,7 @@ fn cmd_ls(args: &[String]) -> i32 {
 }
 
 /// `pty peek [--plain] [--full] [--wait TEXT [-t SECS]] <ref>`
-fn cmd_peek(args: &[String]) -> i32 {
+pub(crate) fn cmd_peek(args: &[String]) -> i32 {
     let mut plain = false;
     let mut full = false;
     let mut follow = false;
@@ -496,7 +457,7 @@ fn cmd_peek(args: &[String]) -> i32 {
 }
 
 /// `pty send <ref> <text> | --seq VALUE [--seq VALUE ...]`
-fn cmd_send(args: &[String]) -> i32 {
+pub(crate) fn cmd_send(args: &[String]) -> i32 {
     if args.is_empty() {
         eprintln!("pty send: usage: pty send <ref> <text> | --seq <value> ...");
         return 2;
@@ -524,7 +485,7 @@ fn cmd_send(args: &[String]) -> i32 {
                 i += 1;
             }
         }
-        let wrapped = pty_testkit::paste::wrap_bracketed_paste(&payload);
+        let wrapped = pty_core::paste::wrap_bracketed_paste(&payload);
         return match client::send(&name, &wrapped) {
             Ok(()) => 0,
             Err(e) => {
@@ -592,7 +553,7 @@ fn cmd_send(args: &[String]) -> i32 {
 }
 
 /// `pty attach <ref>`
-fn cmd_attach(args: &[String]) -> i32 {
+pub(crate) fn cmd_attach(args: &[String]) -> i32 {
     let reference = match args.iter().find(|a| !a.starts_with('-')) {
         Some(r) => r.clone(),
         None => {
@@ -641,7 +602,7 @@ fn matches_filter(sess: &PtySessionDef, filters: &[String]) -> bool {
 }
 
 /// `pty up [dir] [names...]` — start sessions declared in a `pty.toml`.
-fn cmd_up(args: &[String]) -> i32 {
+pub(crate) fn cmd_up(args: &[String]) -> i32 {
     let (dir, filters) = split_dir_and_filters(args);
     let file = match ptyfile::read_pty_file(dir.as_deref().map(std::path::Path::new)) {
         Ok(f) => f,
@@ -709,7 +670,7 @@ fn cmd_up(args: &[String]) -> i32 {
 }
 
 /// `pty down [dir] [names...]` — stop sessions declared in a `pty.toml`.
-fn cmd_down(args: &[String]) -> i32 {
+pub(crate) fn cmd_down(args: &[String]) -> i32 {
     let (dir, filters) = split_dir_and_filters(args);
     let file = match ptyfile::read_pty_file(dir.as_deref().map(std::path::Path::new)) {
         Ok(f) => f,
@@ -768,7 +729,7 @@ fn kill_session(name: &str) {
 }
 
 /// `pty restart <ref>` — stop (if running) and respawn with the same command.
-fn cmd_restart(args: &[String]) -> i32 {
+pub(crate) fn cmd_restart(args: &[String]) -> i32 {
     let reference = match args.first() {
         Some(r) => r.clone(),
         None => {
@@ -826,7 +787,7 @@ fn cmd_restart(args: &[String]) -> i32 {
 }
 
 /// `pty rm <ref>` — kill if running, then remove from the registry.
-fn cmd_rm(args: &[String]) -> i32 {
+pub(crate) fn cmd_rm(args: &[String]) -> i32 {
     let reference = match args.first() {
         Some(r) => r.clone(),
         None => {
@@ -850,7 +811,7 @@ fn cmd_rm(args: &[String]) -> i32 {
 }
 
 /// `pty rename <ref> <new-display-name>` — set the session's display label.
-fn cmd_rename(args: &[String]) -> i32 {
+pub(crate) fn cmd_rename(args: &[String]) -> i32 {
     if args.len() < 2 {
         eprintln!("pty rename: usage: pty rename <ref> <new-display-name>");
         return 2;
@@ -880,7 +841,7 @@ fn cmd_rename(args: &[String]) -> i32 {
 }
 
 /// `pty kill <ref>`
-fn cmd_kill(args: &[String]) -> i32 {
+pub(crate) fn cmd_kill(args: &[String]) -> i32 {
     let reference = match args.first() {
         Some(r) => r.clone(),
         None => {
@@ -901,13 +862,13 @@ fn cmd_kill(args: &[String]) -> i32 {
 }
 
 /// The small gone-session stats shape, from metadata.
-fn gone_stats(name: &str, meta: &registry::SessionMetadata) -> pty_testkit::stats::GoneStats {
+fn gone_stats(name: &str, meta: &registry::SessionMetadata) -> pty_core::stats::GoneStats {
     let status = if meta.exit_code.is_some() {
         "exited"
     } else {
         "vanished"
     };
-    pty_testkit::stats::GoneStats {
+    pty_core::stats::GoneStats {
         name: name.to_string(),
         status: status.to_string(),
         exit_code: meta.exit_code,
@@ -919,7 +880,7 @@ fn gone_stats(name: &str, meta: &registry::SessionMetadata) -> pty_testkit::stat
 /// `pty stats [--json] [--all] [<ref>]` — a running session emits the full
 /// StatsResult (queried from the daemon); a gone session emits the small shape;
 /// with no ref, an array of all (gone entries only with --all).
-fn cmd_status(args: &[String]) -> i32 {
+pub(crate) fn cmd_status(args: &[String]) -> i32 {
     let all = args.iter().any(|a| a == "--all");
     let reference = args.iter().find(|a| !a.starts_with('-')).cloned();
 
@@ -967,7 +928,7 @@ fn cmd_status(args: &[String]) -> i32 {
     0
 }
 
-fn print_help() {
+pub(crate) fn print_help() {
     println!(
         "pty — persistent terminal sessions (Rust + libghostty)\n\
          \n\
