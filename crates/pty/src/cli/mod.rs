@@ -412,15 +412,16 @@ pub(crate) fn cmd_peek(args: &[String]) -> i32 {
         }
     };
     if follow {
-        return match client::follow(&name) {
-            Ok(Some(code)) => {
+        let params = client::PeekParams { name: &name, plain, full, socket: None };
+        return match client::follow(params, &client::ClientIo::default()) {
+            Ok(client::PeekOutcome::Exited(code)) => {
                 if code < 0 {
                     0
                 } else {
                     code
                 }
             }
-            Ok(None) => 0,
+            Ok(_) => 0,
             Err(e) => {
                 eprintln!("pty peek: {e}");
                 1
@@ -428,25 +429,36 @@ pub(crate) fn cmd_peek(args: &[String]) -> i32 {
         };
     }
     if let Some(needle) = wait {
-        match client::peek_wait(&name, &needle, Duration::from_secs(timeout)) {
-            Ok(Some(screen)) => {
-                print!("{screen}");
+        match client::peek_wait(&name, std::slice::from_ref(&needle), timeout as f64, plain) {
+            Ok(screen) => {
+                println!("{screen}");
                 0
             }
-            Ok(None) => {
-                eprintln!("pty peek: timed out waiting for {needle:?}");
-                1
-            }
             Err(e) => {
-                eprintln!("pty peek: {e}");
+                eprintln!("{e}");
                 1
             }
         }
     } else {
-        match client::peek(&name, plain, full) {
-            Ok(screen) => {
+        let params = client::PeekParams { name: &name, plain, full, socket: None };
+        match client::peek(params, &client::ClientIo::default()) {
+            Ok(client::PeekOutcome::Exited(code)) => {
+                if code < 0 {
+                    0
+                } else {
+                    code
+                }
+            }
+            Ok(_) => 0,
+            // Socket gone: an exited session keeps its final screen peekable
+            // (node falls back to `lastLines`; the rewrite in WP7b does that).
+            Err(client::ClientError::NotReachable { .. })
+                if registry::read_final_screen(&name).is_some() =>
+            {
+                let fs = registry::read_final_screen(&name).unwrap();
+                let screen = if plain { fs.plain } else { fs.ansi };
                 print!("{screen}");
-                if plain && !screen.ends_with('\n') {
+                if !screen.ends_with('\n') {
                     println!();
                 }
                 0
@@ -489,7 +501,7 @@ pub(crate) fn cmd_send(args: &[String]) -> i32 {
             }
         }
         let wrapped = pty_core::paste::wrap_bracketed_paste(&payload);
-        return match client::send(&name, &wrapped) {
+        return match client::send(&name, &[wrapped], client::SendOptions::default()) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("pty send: {e}");
@@ -536,7 +548,8 @@ pub(crate) fn cmd_send(args: &[String]) -> i32 {
             }
         }
         let delay = client::resolve_seq_delay_ms(delay_secs);
-        return match client::send_seq(&name, &items, delay) {
+        let opts = client::SendOptions { delay_ms: delay, paste: false };
+        return match client::send(&name, &items, opts) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("pty send: {e}");
@@ -546,7 +559,7 @@ pub(crate) fn cmd_send(args: &[String]) -> i32 {
     }
     // Literal text (no implicit newline), joining any extra args with spaces.
     let text = rest.join(" ");
-    match client::send(&name, text.as_bytes()) {
+    match client::send(&name, &[text.as_bytes()], client::SendOptions::default()) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("pty send: {e}");
@@ -572,14 +585,14 @@ pub(crate) fn cmd_attach(args: &[String]) -> i32 {
         }
     };
     eprintln!("[attached to {name} — press Ctrl+\\ to detach]");
-    match client::attach(&name) {
-        Ok(Some(code)) => code,
-        Ok(None) => 0,
+    let socket = match client::connect_session(&name) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("pty attach: {e}");
-            1
+            eprintln!("{e}");
+            return 1;
         }
-    }
+    };
+    client::attach(client::AttachParams::new(&name, socket), &client::ClientIo::default()).exit_code()
 }
 
 /// The on-disk session name for a manifest entry: its pinned `id`, else the
@@ -897,7 +910,7 @@ pub(crate) fn cmd_status(args: &[String]) -> i32 {
         };
         // Running: query the live StatsResult from the daemon.
         if client::is_alive(&name)
-            && let Ok(json) = client::status(&name)
+            && let Ok(json) = client::query_status_json(&name, client::STATS_TIMEOUT)
             && !json.is_empty()
         {
             println!("{json}");
@@ -916,7 +929,7 @@ pub(crate) fn cmd_status(args: &[String]) -> i32 {
     let mut items: Vec<String> = Vec::new();
     for s in registry::list_sessions() {
         if s.alive {
-            match client::status(&s.name) {
+            match client::query_status_json(&s.name, client::STATS_TIMEOUT) {
                 Ok(json) if !json.is_empty() => items.push(json),
                 _ => items.push(format!(
                     "{{\"name\":{},\"error\":\"query failed\"}}",
