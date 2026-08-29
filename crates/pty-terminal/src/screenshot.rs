@@ -1,19 +1,21 @@
 //! Screenshot capture from a libghostty terminal, matching the semantics of
 //! the pty project's `src/testing/screenshot.ts`.
 
-use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::terminal::Terminal;
+
+use crate::serialize;
 
 /// Captured terminal state at a point in time. Mirrors the TS `Screenshot`.
 #[derive(Debug, Clone)]
 pub struct Screenshot {
-    /// Plain text lines. Trailing whitespace is trimmed per line; trailing
-    /// empty lines are removed.
+    /// Plain text lines, every buffer row (history + viewport). Never-written
+    /// trailing cells are trimmed per line; trailing whitespace-only lines are
+    /// removed.
     pub lines: Vec<String>,
     /// All lines joined with `"\n"`. Convenient for `contains()` assertions.
     pub text: String,
-    /// Full VT-serialized terminal state, including escape codes. Use to verify
-    /// colors, bold, etc.
+    /// Full VT-serialized terminal state, including escape codes, cursor,
+    /// and modes. Use to verify colors, bold, etc.
     pub ansi: String,
 }
 
@@ -24,55 +26,29 @@ impl Screenshot {
     }
 }
 
-fn format(term: &Terminal, opts: FormatterOptions) -> String {
-    let mut f = Formatter::new(term, opts).expect("formatter new");
-    let bytes = f.format_alloc(None).expect("format_alloc");
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
 /// Serialize the terminal for an ATTACH/SCREEN replay: VT sequences that carry
 /// not just the visible cells but the terminal *mode* state (mouse tracking,
 /// alt-screen, cursor visibility, kitty keyboard) so a reattaching client
-/// restores a TUI's full state, not just its glyphs. This is the functional
-/// parity target with node's SCREEN payload (byte-exact ANSI is infeasible
-/// across two different serializers, but the restored mode-set matches).
+/// restores a TUI's full state, not just its glyphs.
+///
+/// This is the body without Node's mode prefix; the daemon gets the full
+/// payload from [`crate::TerminalActor::serialize`].
 pub fn serialize_for_replay(term: &Terminal) -> String {
-    format(
-        term,
-        FormatterOptions::new()
-            .with_format(Format::Vt)
-            .with_modes(true)
-            .with_cursor(true)
-            .with_kitty_keyboard(true),
-    )
+    serialize::vt(term, true)
 }
 
 /// Capture the current terminal state into a [`Screenshot`].
 ///
-/// Replicates the TS harness exactly: each visible row is right-trimmed, then
-/// trailing empty rows are dropped. `ansi` is the VT serialization.
+/// Replicates the TS testing harness (`src/testing/screenshot.ts:5-24`): every
+/// buffer row via `translateToString(true)` (written trailing spaces kept,
+/// never-written cells dropped), then trailing rows that are empty or
+/// whitespace-only popped.
 pub fn capture(term: &Terminal) -> Screenshot {
-    // Plain grid text, one row per '\n'. We do the trimming ourselves so the
-    // result matches xterm's `translateToString(true)` + trailing-empty pop.
-    // libghostty's Plain format already keeps written cells (including trailing
-    // written spaces, e.g. a bash prompt's "$ ") and drops never-written
-    // trailing cells — exactly like xterm's `translateToString(true)` that node
-    // uses. So we do NOT right-trim per line (that would strip the written
-    // cursor-cell space and diverge from node); we only pop trailing blank rows,
-    // matching node's `while (lines[last] === "") lines.pop()`.
-    let plain = format(
-        term,
-        FormatterOptions::new().with_format(Format::Plain),
-    );
-
-    let mut lines: Vec<String> = plain.split('\n').map(|l| l.to_string()).collect();
-
-    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+    let mut lines = serialize::plain_lines_full(term);
+    while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         lines.pop();
     }
-
-    let ansi = format(term, FormatterOptions::new().with_format(Format::Vt));
+    let ansi = serialize::vt(term, true);
     let text = lines.join("\n");
-
     Screenshot { lines, text, ansi }
 }
