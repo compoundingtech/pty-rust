@@ -628,14 +628,19 @@ impl Rig {
         }
     }
 
-    /// Wait (≤ 30 s) for `<id>.sock` and `<id>.json`.
+    /// Wait (≤ 30 s) for `<id>.sock` and `<id>.json`. A command that exits
+    /// at once may already have torn its socket down: metadata carrying an
+    /// `exitCode` counts as published too.
     pub fn wait_for_daemon(&self, d: &Daemon) {
         let sock = d.socket_path();
         let meta = d.meta_path();
         wait_until_for(
             &format!("{} socket and metadata", d.id),
             Duration::from_secs(30),
-            &mut || sock.exists() && read_json(&meta).is_some(),
+            &mut || match read_json(&meta) {
+                Some(m) => sock.exists() || m.get("exitCode").is_some(),
+                None => false,
+            },
         );
     }
 
