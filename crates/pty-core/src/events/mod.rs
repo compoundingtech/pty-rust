@@ -8,6 +8,8 @@
 //!
 //! node: src/events.ts
 
+pub mod follow;
+
 use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -25,6 +27,8 @@ use crate::registry::metadata::TagMap;
 use crate::registry::mutate::MetadataChangeSnapshot;
 use crate::registry::root::{ensure_session_dir, events_path};
 use crate::registry::time::{local_hms, now_iso8601, parse_iso8601_ms};
+
+pub use follow::{EventFollower, FollowerOptions};
 
 /// The system event type names.
 ///
