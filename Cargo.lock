@@ -331,7 +331,11 @@ dependencies = [
 name = "pty-terminal"
 version = "0.13.0-rust"
 dependencies = [
+ "libc",
  "libghostty-vt",
+ "portable-pty",
+ "pty-core",
+ "serde_json",
 ]
 
 [[package]]
