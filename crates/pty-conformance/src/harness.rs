@@ -214,8 +214,6 @@ pub struct DaemonOpts {
     pub cwd: Option<PathBuf>,
     /// Shortcut for `--tag keep=true`.
     pub keep: bool,
-    pub rows: Option<u16>,
-    pub cols: Option<u16>,
     /// Extra process environment for the `pty run` invocation itself
     /// (not the persisted overlay).
     pub invoke_env: Vec<(String, String)>,
@@ -459,7 +457,13 @@ impl Rig {
     /// stdout and stderr. Detached daemons that inherit the pipes do not
     /// block collection: after the process exits the readers get two more
     /// seconds and whatever arrived by then is returned.
-    pub fn run(&self, mut cmd: Command, stdin: Option<Vec<u8>>) -> Out {
+    pub fn run(&self, cmd: Command, stdin: Option<Vec<u8>>) -> Out {
+        self.run_with_timeout(cmd, stdin, CLI_TIMEOUT)
+    }
+
+    /// [`Rig::run`] with a custom timeout, for commands that are expected
+    /// to block (an attach without a tty) and are killed on purpose.
+    pub fn run_with_timeout(&self, mut cmd: Command, stdin: Option<Vec<u8>>, timeout: Duration) -> Out {
         cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -494,7 +498,7 @@ impl Rig {
                 Ok(None) => {}
                 Err(e) => panic!("wait on pty: {e}"),
             }
-            if start.elapsed() > CLI_TIMEOUT {
+            if start.elapsed() > timeout {
                 timed_out = true;
                 let _ = child.kill();
                 let _ = child.wait();
@@ -603,14 +607,6 @@ impl Rig {
         if let Some(cwd) = &opts.cwd {
             args.push("--cwd".into());
             args.push(cwd.to_string_lossy().into_owned());
-        }
-        if let Some(r) = opts.rows {
-            args.push("--rows".into());
-            args.push(r.to_string());
-        }
-        if let Some(c) = opts.cols {
-            args.push("--cols".into());
-            args.push(c.to_string());
         }
         args.push("--".into());
         for c in cmd {
