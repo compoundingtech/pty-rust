@@ -740,7 +740,8 @@ impl Rig {
 
     /// SIGTERM every recorded pid, wait up to 2 s, SIGKILL survivors.
     pub fn teardown_daemons(&self) {
-        let pids = self.recorded_pids();
+        let me = std::process::id() as i32;
+        let pids: Vec<i32> = self.recorded_pids().into_iter().filter(|&p| p != me).collect();
         for &pid in &pids {
             kill_pid(pid, libc::SIGTERM);
         }
@@ -1079,4 +1080,111 @@ pub fn workspace_root() -> PathBuf {
 /// This crate's `fixtures/` directory.
 pub fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+}
+
+/// An ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`, like
+/// `Date#toISOString`) for now plus `offset_secs` (negative = the past).
+pub fn iso_timestamp(offset_secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let millis = (now.as_millis() as i64) + offset_secs * 1000;
+    let secs = millis.div_euclid(1000);
+    let ms = millis.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    // Civil-from-days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z",
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
+}
+
+/// Fields for [`write_fake_metadata`].
+#[derive(Debug, Clone, Default)]
+pub struct FakeMeta {
+    pub created_at: Option<String>,
+    pub exited_at: Option<String>,
+    pub exit_code: Option<i64>,
+    pub tags: Option<Vec<(String, String)>>,
+    pub display_name: Option<String>,
+    pub command: Option<String>,
+    pub extra: Vec<(String, Value)>,
+}
+
+impl FakeMeta {
+    pub fn created(offset_secs: i64) -> Self {
+        Self {
+            created_at: Some(iso_timestamp(offset_secs)),
+            ..Default::default()
+        }
+    }
+
+    pub fn exited(mut self, offset_secs: i64, code: i64) -> Self {
+        self.exited_at = Some(iso_timestamp(offset_secs));
+        self.exit_code = Some(code);
+        self
+    }
+
+    pub fn tag(mut self, k: &str, v: &str) -> Self {
+        self.tags.get_or_insert_with(Vec::new).push((k.into(), v.into()));
+        self
+    }
+
+    pub fn display_name(mut self, dn: &str) -> Self {
+        self.display_name = Some(dn.into());
+        self
+    }
+
+    pub fn extra(mut self, k: &str, v: Value) -> Self {
+        self.extra.push((k.into(), v));
+        self
+    }
+}
+
+/// Write a daemon-less `<name>.json` record (`cat`, cwd `/tmp`) so list
+/// semantics can be tested without waiting on wall-clock time.
+pub fn write_fake_metadata(dir: &Path, name: &str, meta: FakeMeta) {
+    let mut m = serde_json::Map::new();
+    let command = meta.command.clone().unwrap_or_else(|| "cat".into());
+    m.insert("command".into(), Value::String(command.clone()));
+    m.insert("args".into(), Value::Array(vec![]));
+    m.insert("displayCommand".into(), Value::String(command));
+    m.insert("cwd".into(), Value::String("/tmp".into()));
+    m.insert(
+        "createdAt".into(),
+        Value::String(meta.created_at.unwrap_or_else(|| iso_timestamp(0))),
+    );
+    if let Some(e) = meta.exited_at {
+        m.insert("exitedAt".into(), Value::String(e));
+    }
+    if let Some(c) = meta.exit_code {
+        m.insert("exitCode".into(), Value::from(c));
+    }
+    if let Some(tags) = meta.tags {
+        let mut t = serde_json::Map::new();
+        for (k, v) in tags {
+            t.insert(k, Value::String(v));
+        }
+        m.insert("tags".into(), Value::Object(t));
+    }
+    if let Some(dn) = meta.display_name {
+        m.insert("displayName".into(), Value::String(dn));
+    }
+    for (k, v) in meta.extra {
+        m.insert(k, v);
+    }
+    std::fs::write(dir.join(format!("{name}.json")), Value::Object(m).to_string()).unwrap();
 }
