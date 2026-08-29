@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "note": "A DATA frame whose payload is not valid UTF-8 (bytes 0x80-0xff), sent to a session running `stty raw -echo; cat > dump`. Node re-encodes the payload as UTF-8 text before writing to the pty, so every invalid byte becomes U+FFFD (EF BF BD). Rust writes the bytes through unchanged. Decision 0001 (docs/decisions/0001-raw-data-bytes.md).",
+  "payloadHex": "80 9f a0 c0 c1 f5 fe ff",
+  "expect": {
+    "node": { "dumpHex": "ef bf bd ef bf bd ef bf bd ef bf bd ef bf bd ef bf bd ef bf bd ef bf bd" },
+    "rust": { "dumpHex": "80 9f a0 c0 c1 f5 fe ff" }
+  }
+}

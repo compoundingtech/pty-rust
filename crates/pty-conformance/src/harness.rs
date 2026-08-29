@@ -1189,3 +1189,38 @@ pub fn write_fake_metadata(dir: &Path, name: &str, meta: FakeMeta) {
     }
     std::fs::write(dir.join(format!("{name}.json")), Value::Object(m).to_string()).unwrap();
 }
+
+/// The GEOMETRY wire type (10), which pty-core's protocol enum keeps as an
+/// unknown byte.
+pub const GEOMETRY: MessageType = MessageType::Unknown(10);
+
+/// A readable name for a wire type in sequence assertions.
+pub fn type_name(t: MessageType) -> &'static str {
+    match t {
+        MessageType::Data => "DATA",
+        MessageType::Attach => "ATTACH",
+        MessageType::Detach => "DETACH",
+        MessageType::Resize => "RESIZE",
+        MessageType::Exit => "EXIT",
+        MessageType::Screen => "SCREEN",
+        MessageType::Peek => "PEEK",
+        MessageType::Status => "STATUS",
+        MessageType::Unknown(10) => "GEOMETRY",
+        MessageType::Unknown(_) => "UNKNOWN",
+    }
+}
+
+/// Names of a packet-type sequence.
+pub fn sequence_names(seq: &[MessageType]) -> Vec<&'static str> {
+    seq.iter().map(|t| type_name(*t)).collect()
+}
+
+/// Parse a `"80 9f a0"` hex string into bytes.
+pub fn parse_hex(s: &str) -> Vec<u8> {
+    s.split_whitespace().map(|h| u8::from_str_radix(h, 16).expect("hex byte")).collect()
+}
+
+/// Render bytes as a `"80 9f a0"` hex string.
+pub fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}

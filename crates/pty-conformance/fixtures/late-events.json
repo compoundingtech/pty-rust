@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "note": "A client keeps an ATTACHed socket to the first daemon open across a replacement. After `kill` and a new `run --id`, a fresh attach to the replacement must see only the replacement's frames, starting with GEOMETRY then SCREEN, and its SCREEN must contain the replacement's marker; the old socket sees EXIT and/or a close, never frames from the replacement.",
+  "id": "late",
+  "command": ["cat"],
+  "marker": "REPLACEMENT-MARKER",
+  "expect": { "newSequenceStartsWith": ["GEOMETRY", "SCREEN"], "oldSocketEndsWithExitOrClose": true }
+}
