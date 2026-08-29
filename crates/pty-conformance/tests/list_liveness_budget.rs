@@ -1,0 +1,55 @@
+//! Port of tests/list-liveness-budget.test.ts through the binary. Node mocks
+//! `process.kill` and the socket probe in-process; here the EPERM case uses
+//! pid 1 (a real `kill(1, 0)` → EPERM for an unprivileged user) and the
+//! budget case plants 100 unreachable `<n>.sock` files with no pid file and
+//! pins that one `pty list --json` still finishes promptly, in name order,
+//! reporting each defensively as running.
+
+use pty_conformance::*;
+use std::time::Instant;
+
+/// node: tests/list-liveness-budget.test.ts:31
+#[test]
+fn eperm_on_kill_zero_counts_as_process_present() {
+    let rig = Rig::new();
+    std::fs::write(rig.socket_path("seat"), "").unwrap();
+    std::fs::write(rig.pid_path("seat"), "1").unwrap();
+    let found = rig.list_entry("seat").expect("listed");
+    assert_eq!(found["status"], "running");
+}
+
+/// node: tests/list-liveness-budget.test.ts:39
+#[test]
+fn permission_denied_fleet_is_listed_running_in_name_order() {
+    let rig = Rig::new();
+    let mut names: Vec<String> = (0..80).map(|i| format!("seat-{:03}", 79 - i)).collect();
+    for n in &names {
+        std::fs::write(rig.socket_path(n), "").unwrap();
+        std::fs::write(rig.pid_path(n), "1").unwrap();
+    }
+    let list = rig.list_json();
+    let got: Vec<String> = list.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+    names.sort();
+    assert_eq!(got, names);
+    assert!(list.iter().all(|e| e["status"] == "running"), "{list:?}");
+}
+
+/// node: tests/list-liveness-budget.test.ts:61
+#[test]
+fn unreachable_fleet_waits_one_shared_deadline() {
+    let rig = Rig::new();
+    let mut names: Vec<String> = (0..100).map(|i| format!("unreachable-{:03}", 99 - i)).collect();
+    for n in &names {
+        std::fs::write(rig.socket_path(n), "").unwrap();
+    }
+    let started = Instant::now();
+    let list = rig.list_json();
+    let elapsed = started.elapsed();
+    // Node's shared probe budget is 500 ms; a serialized 100 × 500 ms would
+    // take 50 s. Allow process start-up on top of one budget.
+    assert!(elapsed.as_millis() < 3000, "list took {elapsed:?}");
+    let got: Vec<String> = list.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+    names.sort();
+    assert_eq!(got, names);
+    assert!(list.iter().all(|e| e["status"] == "running"), "{list:?}");
+}
