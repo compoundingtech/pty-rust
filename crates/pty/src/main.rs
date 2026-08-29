@@ -14,6 +14,7 @@ use std::process::exit;
 use cli::*;
 
 fn main() {
+    daemon::set_process_title("pty");
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         cli::help::print_usage();
@@ -22,7 +23,7 @@ fn main() {
     let cmd = args[0].as_str();
     let rest = &args[1..];
     let code = match cmd {
-        "__daemon" => cmd_daemon(rest),
+        "__daemon" => daemon::daemon_main(),
         "run" | "spawn" => cmd_run(rest),
         "ls" | "list" => cmd_ls(rest),
         "peek" => cmd_peek(rest),
