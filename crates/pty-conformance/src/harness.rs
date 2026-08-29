@@ -309,6 +309,7 @@ pub struct Rig {
     root: PathBuf,
     home: PathBuf,
     extra_roots: std::sync::Mutex<Vec<PathBuf>>,
+    path_prefix: std::sync::Mutex<Vec<PathBuf>>,
     keep_tmp: bool,
 }
 
@@ -324,6 +325,7 @@ impl Rig {
             root,
             home,
             extra_roots: std::sync::Mutex::new(Vec::new()),
+            path_prefix: std::sync::Mutex::new(Vec::new()),
             keep_tmp: std::env::var("PC_KEEP").map(|v| v == "1").unwrap_or(false),
         }
     }
@@ -369,7 +371,38 @@ impl Rig {
         env.insert("PTY_ROOT_LEGACY_SILENT".into(), "1".into());
         env.insert("TERM".into(), "xterm-256color".into());
         env.insert("HOME".into(), self.home.to_string_lossy().into_owned());
+        env.insert("PATH".into(), self.path());
         env
+    }
+
+    /// `PATH` for processes the rig starts: every stub directory registered
+    /// with [`Rig::stub_bin`] first, then the ambient `PATH`.
+    pub fn path(&self) -> String {
+        let ambient = std::env::var("PATH").unwrap_or_default();
+        let prefix = self.path_prefix.lock().unwrap();
+        if prefix.is_empty() {
+            return ambient;
+        }
+        let mut parts: Vec<String> = prefix.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        parts.push(ambient);
+        parts.join(":")
+    }
+
+    /// Install an executable script as `<name>` in a directory that is put
+    /// at the front of `PATH` for everything the rig runs (stub `fabric`,
+    /// fake commands). Returns the script's path.
+    pub fn stub_bin(&self, name: &str, script: &str) -> PathBuf {
+        let dir = self.tmp.join("stubbin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut prefix = self.path_prefix.lock().unwrap();
+        if !prefix.contains(&dir) {
+            prefix.push(dir);
+        }
+        path
     }
 
     /// A `Command` for the binary under test with the rig's base environment.
@@ -391,7 +424,7 @@ impl Rig {
         let mut cmd = Command::new(pty_bin());
         cmd.args(args);
         cmd.env_clear();
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        cmd.env("PATH", self.path());
         cmd.env("HOME", &self.home);
         for (k, v) in extra {
             cmd.env(k, v);
@@ -536,7 +569,7 @@ impl Rig {
         for (k, v) in extra {
             merged.insert((*k).into(), (*v).into());
         }
-        for k in ["PTY_ROOT", "PTY_ROOT_LEGACY_SILENT", "TERM", "HOME"] {
+        for k in ["PTY_ROOT", "PTY_ROOT_LEGACY_SILENT", "TERM", "HOME", "PATH"] {
             if let Some(v) = merged.get(k) {
                 env_args.push(format!("{k}={v}"));
             }
@@ -560,6 +593,21 @@ impl Rig {
             },
         )
         .expect("spawn pty in a tty")
+    }
+
+    /// Run the CLI inside a real terminal and expose the raw bytes it writes
+    /// (no terminal emulation), for tests about exact escape sequences
+    /// (`attach` sanitize/exit trailers, `peek -f`). Environment as
+    /// [`Rig::pty_tty_env`]; `unset` removes variables.
+    pub fn pty_tty_raw(&self, extra: &[(&str, &str)], unset: &[&str], args: &[&str], rows: u16, cols: u16) -> TtyProc {
+        let mut env = self.base_env();
+        for (k, v) in extra {
+            env.insert((*k).into(), (*v).into());
+        }
+        for k in unset {
+            env.remove(*k);
+        }
+        TtyProc::spawn(pty_bin(), args, &env, &self.tmp, rows, cols)
     }
 
     /// Start a detached session with `pty run -d --id <id> ... -- cmd` and
@@ -1224,4 +1272,182 @@ pub fn parse_hex(s: &str) -> Vec<u8> {
 /// Render bytes as a `"80 9f a0"` hex string.
 pub fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+/// A process running inside a real pty, with its raw output captured
+/// byte-for-byte (see [`Rig::pty_tty_raw`]).
+pub struct TtyProc {
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    output: Vec<u8>,
+    exit: Option<i32>,
+}
+
+impl TtyProc {
+    /// Spawn `bin args` in a fresh pty of `rows`×`cols` with exactly `env`.
+    pub fn spawn(
+        bin: &Path,
+        args: &[&str],
+        env: &BTreeMap<String, String>,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+    ) -> TtyProc {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new(bin);
+        cmd.args(args);
+        cmd.cwd(cwd);
+        cmd.env_clear();
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = pair.slave.spawn_command(cmd).expect("spawn in pty");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        let writer = pair.master.take_writer().expect("pty writer");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        TtyProc {
+            master: pair.master,
+            writer,
+            rx,
+            child,
+            output: Vec::new(),
+            exit: None,
+        }
+    }
+
+    fn pump(&mut self) {
+        while let Ok(chunk) = self.rx.try_recv() {
+            self.output.extend_from_slice(&chunk);
+        }
+    }
+
+    /// Write bytes to the process's terminal (as if typed).
+    pub fn write(&mut self, bytes: &[u8]) {
+        let _ = self.writer.write_all(bytes);
+        let _ = self.writer.flush();
+    }
+
+    /// Everything the process has written so far.
+    pub fn output(&mut self) -> Vec<u8> {
+        self.pump();
+        self.output.clone()
+    }
+
+    /// Output so far as lossy UTF-8.
+    pub fn output_str(&mut self) -> String {
+        String::from_utf8_lossy(&self.output()).into_owned()
+    }
+
+    /// Poll until the output contains `needle` or `timeout` passes.
+    pub fn wait_for_bytes(&mut self, needle: &[u8], timeout: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            self.pump();
+            if self.output.windows(needle.len().max(1)).any(|w| w == needle) {
+                return true;
+            }
+            if start.elapsed() > timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Poll until the output contains `needle`.
+    pub fn wait_for_text(&mut self, needle: &str, timeout: Duration) -> bool {
+        self.wait_for_bytes(needle.as_bytes(), timeout)
+    }
+
+    /// Resize the pty (the process gets SIGWINCH).
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        use portable_pty::PtySize;
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+    }
+
+    /// The child's pid.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    /// Exit code if the process has exited (`-1` for a signal death).
+    pub fn try_exit(&mut self) -> Option<i32> {
+        if let Some(code) = self.exit {
+            return Some(code);
+        }
+        match self.child.try_wait() {
+            Ok(Some(st)) => {
+                let code = st.exit_code() as i32;
+                self.exit = Some(code);
+                Some(code)
+            }
+            _ => None,
+        }
+    }
+
+    /// Wait up to `timeout` for the process to exit; returns the exit code
+    /// (`None` on timeout). Output keeps being collected.
+    pub fn wait_exit(&mut self, timeout: Duration) -> Option<i32> {
+        let start = Instant::now();
+        loop {
+            self.pump();
+            if let Some(c) = self.try_exit() {
+                // Let the reader thread deliver the tail.
+                let _ = poll_for(Duration::from_millis(300), || {
+                    self.pump();
+                    false
+                });
+                self.pump();
+                return Some(c);
+            }
+            if start.elapsed() > timeout {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// SIGKILL the process.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for TtyProc {
+    fn drop(&mut self) {
+        if self.try_exit().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
