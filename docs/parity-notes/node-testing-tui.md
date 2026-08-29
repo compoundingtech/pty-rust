@@ -1,7 +1,7 @@
 # Node `pty` package: testing library, TUI framework, interactive session manager, pty-layout
 
 Inventory of `<node-pty-checkout>` (v0.12.0, `package.json:3`) for the Rust rewrite.
-All paths below are relative to that repo unless prefixed with `/home/...`. Line numbers are as of the working tree read on 2026-08-29.
+All paths below are relative to that repo unless they start with a placeholder such as `<pty-layout-checkout>`. Line numbers are as of the working tree read on 2026-08-29.
 
 Package exports (`package.json:38-63`): `./testing` -> `dist/testing/index.js`, `./tui` -> `dist/tui/index.js`, plus `./client`, `./server`, `./protocol`, `./keys`. Runtime deps (`package.json:76-82`): `@preact/signals-core`, `@xterm/addon-serialize`, `@xterm/headless`, `node-pty`, `smol-toml`.
 
