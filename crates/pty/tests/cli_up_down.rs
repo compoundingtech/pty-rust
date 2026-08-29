@@ -44,8 +44,6 @@ fn up_starts_and_down_stops() {
     assert_eq!(out.stdout, "  ● one (already running)\n  ● two (already running)\nAll sessions already running.\n");
     assert_eq!(by_display(&rig, "one")["name"], name, "re-runs bind by the tag pair");
 
-    let out = rig.ok(&["up", dir.to_str().unwrap(), "fake"]);
-    assert_eq!(out.code, 0);
     let out = rig.run(&["up", dir.to_str().unwrap(), "fake"]);
     assert_eq!(out.code, 1);
     assert_eq!(out.stderr, "Unknown session: fake\nAvailable: one, two\n");
@@ -55,14 +53,13 @@ fn up_starts_and_down_stops() {
     let out = rig.ok(&["down", dir.to_str().unwrap(), "one"]);
     assert_eq!(out.stdout, "  ○ one (stopped)\nStopped 1 session.\n");
     assert_eq!(out.stderr, "\nNote: strategy tags will be restored on the next 'pty up'.\n");
+    cli_common::wait_until("one gone", || by_display(&rig, "one")["status"] != "running");
+    // A gone bound session is cleaned up by `down`.
     let out = rig.ok(&["down", dir.to_str().unwrap()]);
-    assert_eq!(out.stdout, "  ○ two (stopped)\nStopped 1 session.\n");
-    cli_common::wait_until("daemons gone", || {
-        sessions(&rig).iter().all(|s| s["status"] != "running")
-    });
-    // A gone bound session is cleaned up by `down`; nothing left → footer.
+    assert_eq!(out.stdout, "  ○ one (cleaned up)\n  ○ two (stopped)\nStopped 2 sessions.\n");
+    cli_common::wait_until("two gone", || by_display(&rig, "two")["status"] != "running");
     let out = rig.ok(&["down", dir.to_str().unwrap()]);
-    assert_eq!(out.stdout, "  ○ one (cleaned up)\n  ○ two (cleaned up)\nStopped 2 sessions.\n");
+    assert_eq!(out.stdout, "  ○ two (cleaned up)\nStopped 1 session.\n");
     let out = rig.ok(&["down", dir.to_str().unwrap()]);
     assert_eq!(out.stdout, "No sessions to stop.\n");
     assert_eq!(out.stderr, "");

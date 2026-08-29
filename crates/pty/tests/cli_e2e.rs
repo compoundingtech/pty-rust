@@ -126,7 +126,7 @@ fn run_ls_peek_send_kill_lifecycle() {
     assert!(output_seen, "never saw command output via peek");
 
     // status returns JSON with the name.
-    let status = ok_pty(&root, &["status", &name]);
+    let status = ok_pty(&root, &["stats", &name]);
     assert!(status.contains(&name), "status missing name:\n{status}");
 
     // kill is an external stop → the session is PRESERVED as exited (node #114),
@@ -226,13 +226,19 @@ fn restart_rename_rm() {
 
     // restart respawns with a new pid.
     let (_o, _e, code) = run_pty(&root, &["restart", "svc"]);
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "restart failed: {_e}");
     let pid2 = wait_pid(&pid1);
     assert_ne!(pid1, pid2, "restart should change the pid");
 
-    // rm removes it entirely.
-    let (_o, _e, code) = run_pty(&root, &["rm", "svc"]);
+    // rm refuses a running session (node: `Use "pty kill <name>" first.`);
+    // kill, then rm removes it entirely.
+    let (_o, e, code) = run_pty(&root, &["rm", "svc"]);
+    assert_eq!(code, 1);
+    assert_eq!(e, "Session \"svc\" is still running. Use \"pty kill svc\" first.");
+    let (_o, _e, code) = run_pty(&root, &["kill", "svc"]);
     assert_eq!(code, 0);
+    let (_o, e, code) = run_pty(&root, &["rm", "svc"]);
+    assert_eq!(code, 0, "rm failed: {e}");
     std::thread::sleep(Duration::from_millis(300));
     let ls = ok_pty(&root, &["ls"]);
     assert!(

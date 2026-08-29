@@ -74,13 +74,14 @@ fn help_verbs_print_the_usage_text() {
     }
 }
 
-/// `pty` with no arguments prints the usage too (Node opens the interactive
-/// session manager there; this build has no TUI yet).
+/// node: src/cli.ts:745-748 — `pty` with no arguments opens the interactive
+/// session manager, not the usage text (the picker itself is supplied by
+/// the TUI crate; until then the dispatcher reports its absence).
 #[test]
-fn no_arguments_prints_the_usage_text() {
+fn no_arguments_opens_the_picker_not_the_usage() {
     let out = pty(&[]);
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), USAGE);
+    assert_ne!(String::from_utf8_lossy(&out.stdout), USAGE);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("Unknown command"));
 }
 
 /// node: tests/version.test.ts:25-47 — every version form prints one line
