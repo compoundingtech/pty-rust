@@ -91,18 +91,17 @@ fn match_prefer_boundaries(query: &[char], target: &[char]) -> Option<Vec<usize>
     let mut qi = 0;
     let mut ti = 0;
     while qi < query.len() && ti < target.len() {
-        let mut found_boundary = false;
-        for ahead in ti..target.len() {
-            if target[ahead] == query[qi]
+        let boundary = (ti..target.len()).find(|&ahead| {
+            target[ahead] == query[qi]
                 && is_boundary(target, ahead)
                 && can_match(query, qi + 1, target, ahead + 1)
-            {
-                positions.push(ahead);
-                qi += 1;
-                ti = ahead + 1;
-                found_boundary = true;
-                break;
-            }
+        });
+        let mut found_boundary = false;
+        if let Some(ahead) = boundary {
+            positions.push(ahead);
+            qi += 1;
+            ti = ahead + 1;
+            found_boundary = true;
         }
         if !found_boundary {
             while ti < target.len() && target[ti] != query[qi] {

@@ -240,6 +240,7 @@ pub fn to_ratatui(c: Option<Rgb>) -> ratatui::style::Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 const fn t(
     bg1: Rgb,
     bg2: Rgb,
