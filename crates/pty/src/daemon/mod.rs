@@ -200,12 +200,13 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
         tags: if cfg.tags.is_empty() {
             None
         } else {
-            Some(cfg.tags.clone())
+            Some(cfg.tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         },
         display_name: cfg.display_name.clone(),
         last_attach_at: None,
+        ..Default::default()
     };
-    registry::write_metadata(&cfg.name, &meta)?;
+    registry::write_metadata_publication(&cfg.name, &meta)?;
     // Record the DAEMON pid (matching node: `<name>.pid` holds the server
     // process's own pid, and `ls --json` exposes it). `kill` SIGTERMs this; the
     // handler above forwards to the child.
@@ -440,20 +441,14 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
 
                 if reap {
                     // Remove the session entirely (metadata + events + socket +
-                    // pid + final-screen). Post-exit peek -> ENOENT; ls omits it.
+                    // pid). Post-exit peek -> ENOENT; ls omits it.
                     registry::cleanup(&cfg.name);
                 } else {
-                    // Preserve: keep the session as status=exited, peekable.
+                    // Preserve: keep the session as status=exited with its
+                    // exit record and last lines.
                     let ss = capture(&terminal);
                     let tail: Vec<String> =
                         ss.lines.iter().rev().take(50).rev().cloned().collect();
-                    let _ = registry::write_final_screen(
-                        &cfg.name,
-                        &registry::FinalScreen {
-                            plain: ss.text.clone(),
-                            ansi: ss.ansi.clone(),
-                        },
-                    );
                     if let Some(mut m) = registry::read_metadata(&cfg.name) {
                         m.exit_code = Some(code);
                         m.exited_at = Some(now_iso8601());

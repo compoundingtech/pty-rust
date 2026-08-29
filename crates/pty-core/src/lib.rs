@@ -12,6 +12,7 @@
 
 pub mod client;
 pub mod duration;
+pub mod events;
 pub mod input;
 pub mod keys;
 pub mod paste;

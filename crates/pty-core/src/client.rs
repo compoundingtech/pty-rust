@@ -17,20 +17,10 @@ pub fn connect(name: &str) -> std::io::Result<UnixStream> {
 }
 
 /// Peek: request the current screen and return it as a string (plain text or
-/// full ANSI). One-shot. If the session has exited (no live socket), falls back
-/// to the persisted final screen — parity with node, which keeps an exited
-/// session's last screen peekable.
+/// full ANSI). One-shot. When the socket is gone the connect error is
+/// returned; the post-exit view comes from `lastLines` in the metadata.
 pub fn peek(name: &str, plain: bool, full: bool) -> std::io::Result<String> {
-    let mut stream = match connect(name) {
-        Ok(s) => s,
-        Err(e) => {
-            // Socket gone — if the session exited, return its persisted screen.
-            if let Some(fs) = registry::read_final_screen(name) {
-                return Ok(if plain { fs.plain } else { fs.ansi });
-            }
-            return Err(e);
-        }
-    };
+    let mut stream = connect(name)?;
     stream.write_all(&encode_peek(plain, full))?;
     stream.flush()?;
     // Read until we get a SCREEN packet (or EOF).
