@@ -313,13 +313,9 @@ pub(crate) fn cmd_ls(args: &[String]) -> i32 {
         let items: Vec<String> = sessions
             .iter()
             .map(|s| {
-                let status = if s.alive {
-                    "running"
-                } else if s.meta.exit_code.is_some() {
-                    "exited"
-                } else {
-                    "vanished"
-                };
+                let status = s.status.as_str();
+                let meta = s.metadata.clone().unwrap_or_default();
+                let s = &SessionRow { name: s.name.clone(), meta };
                 let pid = registry::read_pid(&s.name); // daemon pid
                 let mut m = Map::new();
                 m.insert("name".into(), Value::from(s.name.clone()));
@@ -355,16 +351,24 @@ pub(crate) fn cmd_ls(args: &[String]) -> i32 {
     }
     println!("{:<16} {:<10} COMMAND", "NAME", "STATUS");
     for s in sessions {
-        let status = if s.alive {
+        let meta = s.metadata.clone().unwrap_or_default();
+        let status = if s.is_running() {
             "running".to_string()
-        } else if let Some(code) = s.meta.exit_code {
+        } else if let Some(code) = meta.exit_code {
             format!("exited:{code}")
         } else {
             "dead".to_string()
         };
-        println!("{:<16} {:<10} {}", s.name, status, s.meta.display_command);
+        println!("{:<16} {:<10} {}", s.name, status, meta.display_command);
     }
     0
+}
+
+/// A listed session with its metadata (defaulted when the record is
+/// missing) for the `ls` renderers above.
+struct SessionRow {
+    name: String,
+    meta: registry::SessionMetadata,
 }
 
 /// `pty peek [--plain] [--full] [--wait TEXT [-t SECS]] <ref>`
@@ -450,16 +454,20 @@ pub(crate) fn cmd_peek(args: &[String]) -> i32 {
                 }
             }
             Ok(_) => 0,
-            // Socket gone: an exited session keeps its final screen peekable
-            // (node falls back to `lastLines`; the rewrite in WP7b does that).
+            // Socket gone: node prints the `lastLines` an exited session saved,
+            // or says there is no saved output. Both exit 0.
             Err(client::ClientError::NotReachable { .. })
-                if registry::read_final_screen(&name).is_some() =>
+                if registry::read_metadata(&name).is_some() =>
             {
-                let fs = registry::read_final_screen(&name).unwrap();
-                let screen = if plain { fs.plain } else { fs.ansi };
-                print!("{screen}");
-                if !screen.ends_with('\n') {
-                    println!();
+                let meta = registry::read_metadata(&name).unwrap();
+                match meta.last_lines.as_deref() {
+                    Some(lines) if !lines.is_empty() => {
+                        println!("{}", lines.join("\n"));
+                    }
+                    _ => {
+                        let status = if meta.exited_at.is_some() { "exited" } else { "vanished" };
+                        eprintln!("Session \"{name}\" has {status} with no saved output.");
+                    }
                 }
                 0
             }
@@ -889,7 +897,10 @@ fn gone_stats(name: &str, meta: &registry::SessionMetadata) -> pty_core::stats::
         status: status.to_string(),
         exit_code: meta.exit_code,
         exited_at: meta.exited_at.clone(),
-        tags: meta.tags.clone(),
+        tags: meta
+            .tags
+            .as_ref()
+            .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
     }
 }
 
@@ -928,7 +939,7 @@ pub(crate) fn cmd_status(args: &[String]) -> i32 {
     // No ref: an array of all sessions.
     let mut items: Vec<String> = Vec::new();
     for s in registry::list_sessions() {
-        if s.alive {
+        if s.is_running() {
             match client::query_status_json(&s.name, client::STATS_TIMEOUT) {
                 Ok(json) if !json.is_empty() => items.push(json),
                 _ => items.push(format!(
@@ -937,7 +948,8 @@ pub(crate) fn cmd_status(args: &[String]) -> i32 {
                 )),
             }
         } else if all {
-            items.push(serde_json::to_string(&gone_stats(&s.name, &s.meta)).unwrap());
+            let meta = s.metadata.clone().unwrap_or_default();
+            items.push(serde_json::to_string(&gone_stats(&s.name, &meta)).unwrap());
         }
     }
     println!("[{}]", items.join(","));

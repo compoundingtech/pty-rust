@@ -12,7 +12,9 @@ repository.workspace = true
 tokio = ["dep:tokio"]
 
 [dependencies]
+indexmap.workspace = true
 libc.workspace = true
+notify.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
