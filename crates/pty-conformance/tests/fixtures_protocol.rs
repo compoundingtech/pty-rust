@@ -404,7 +404,7 @@ fn a_client_that_never_reads_does_not_starve_the_others() {
 
     // The slow reader: attach and never read again.
     let slow = std::os::unix::net::UnixStream::connect(rig.socket_path(id)).unwrap();
-    (&slow).write_all(&pty_core::protocol::encode_attach(24, 80, false)).unwrap();
+    (&slow).write_all(&pty_core::protocol::encode_attach(24, 80)).unwrap();
 
     let mut fast = rig.connect(id);
     fast.attach(24, 80);

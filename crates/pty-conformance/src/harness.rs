@@ -818,12 +818,13 @@ impl Conn {
 
     /// Send an ATTACH with a terminal size.
     pub fn attach(&mut self, rows: u16, cols: u16) {
-        self.write_raw(&protocol::encode_attach(rows, cols, false)).expect("send ATTACH");
+        self.write_raw(&protocol::encode_attach(rows, cols)).expect("send ATTACH");
     }
 
-    /// Send a geometry-neutral ATTACH.
-    pub fn attach_neutral(&mut self, rows: u16, cols: u16) {
-        self.write_raw(&protocol::encode_attach(rows, cols, true)).expect("send ATTACH");
+    /// Join as a read-only client. Node has no read-only ATTACH: a PEEK makes
+    /// the socket read-only, and the daemon keeps streaming DATA to it.
+    pub fn attach_neutral(&mut self, _rows: u16, _cols: u16) {
+        self.write_raw(&protocol::encode_peek(false, false)).expect("send PEEK");
     }
 
     /// Send a PEEK request.
@@ -1192,7 +1193,7 @@ pub fn write_fake_metadata(dir: &Path, name: &str, meta: FakeMeta) {
 
 /// The GEOMETRY wire type (10), which pty-core's protocol enum keeps as an
 /// unknown byte.
-pub const GEOMETRY: MessageType = MessageType::Unknown(10);
+pub const GEOMETRY: MessageType = MessageType::Geometry;
 
 /// A readable name for a wire type in sequence assertions.
 pub fn type_name(t: MessageType) -> &'static str {
@@ -1205,7 +1206,7 @@ pub fn type_name(t: MessageType) -> &'static str {
         MessageType::Screen => "SCREEN",
         MessageType::Peek => "PEEK",
         MessageType::Status => "STATUS",
-        MessageType::Unknown(10) => "GEOMETRY",
+        MessageType::Geometry => "GEOMETRY",
         MessageType::Unknown(_) => "UNKNOWN",
     }
 }
