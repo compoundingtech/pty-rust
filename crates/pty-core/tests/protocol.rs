@@ -1,11 +1,11 @@
 //! Port of the pty project's `tests/protocol.test.ts`.
 
 use pty_core::protocol::{
-    decode_attach_flags, decode_exit, decode_size, encode_attach, encode_data, encode_detach,
-    encode_exit, encode_packet, encode_resize, encode_screen, encode_status,
-    encode_status_response, MessageType, PacketReader, ATTACH_FLAG_GEOMETRY_NEUTRAL,
-    MAX_PACKET_LENGTH,
+    MAX_PACKET_LENGTH, MessageType, PacketReader, decode_exit, decode_geometry, decode_size,
+    encode_attach, encode_data, encode_detach, encode_exit, encode_geometry, encode_packet,
+    encode_resize, encode_screen, encode_status, encode_status_response,
 };
+use pty_core::stats::{ClientStats, ConnectionStats, Constrains, StatsResult};
 
 // ── encodePacket / PacketReader round-trips ──
 
@@ -21,29 +21,48 @@ fn round_trips_data() {
 #[test]
 fn round_trips_attach() {
     let mut reader = PacketReader::new();
-    let packets = reader.feed(&encode_attach(24, 80, false)).unwrap();
+    let packets = reader.feed(&encode_attach(24, 80)).unwrap();
     assert_eq!(packets.len(), 1);
     assert_eq!(packets[0].type_, MessageType::Attach);
     assert_eq!(decode_size(&packets[0].payload), (24, 80));
 }
 
+/// node: tests/protocol.test.ts:49-59
 #[test]
-fn legacy_attach_byte_identical_and_neutral_flag() {
-    let legacy = encode_attach(24, 80, false);
+fn attach_byte_identical_to_hand_built_packet() {
     assert_eq!(
-        legacy,
+        encode_attach(24, 80),
         encode_packet(MessageType::Attach, &[0, 24, 0, 80])
     );
+}
 
+/// node: tests/protocol.test.ts:288-297
+#[test]
+fn round_trips_geometry() {
     let mut reader = PacketReader::new();
-    let neutral = reader.feed(&encode_attach(24, 80, true)).unwrap();
-    assert_eq!(neutral[0].payload, vec![0, 24, 0, 80, 1]);
-    assert_eq!(decode_size(&neutral[0].payload), (24, 80));
-    assert_eq!(
-        decode_attach_flags(&neutral[0].payload) & ATTACH_FLAG_GEOMETRY_NEUTRAL,
-        1
-    );
-    assert_eq!(decode_attach_flags(&[0, 24, 0, 80]), 0);
+    let packets = reader.feed(&encode_geometry(24, 80)).unwrap();
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].type_, MessageType::Geometry);
+    assert_eq!(packets[0].type_.as_u8(), 10);
+    assert_eq!(MessageType::from_u8(10), MessageType::Geometry);
+    assert_eq!(decode_geometry(&packets[0].payload), (24, 80));
+    assert_eq!(decode_geometry(&[0, 1]), (24, 80));
+}
+
+/// node: tests/protocol.test.ts:299-313
+#[test]
+fn older_client_skips_geometry_and_continues_with_data() {
+    let mut reader = PacketReader::new();
+    let mut raw = encode_geometry(24, 80);
+    raw.extend_from_slice(&encode_data(b"after-unknown"));
+    let mut received = Vec::new();
+    for p in reader.feed(&raw).unwrap() {
+        // Models the pre-GEOMETRY client switch, which only handles DATA.
+        if p.type_ == MessageType::Data {
+            received.extend_from_slice(&p.payload);
+        }
+    }
+    assert_eq!(received, b"after-unknown");
 }
 
 #[test]
@@ -122,7 +141,9 @@ fn packet_split_at_header_boundary() {
 #[test]
 fn empty_payload() {
     let mut reader = PacketReader::new();
-    let packets = reader.feed(&encode_packet(MessageType::Detach, &[])).unwrap();
+    let packets = reader
+        .feed(&encode_packet(MessageType::Detach, &[]))
+        .unwrap();
     assert_eq!(packets.len(), 1);
     assert_eq!(packets[0].type_, MessageType::Detach);
     assert_eq!(packets[0].payload.len(), 0);
@@ -179,7 +200,15 @@ fn rejects_oversize_length() {
     let mut reader = PacketReader::new();
     let mut header = vec![MessageType::Data.as_u8()];
     header.extend_from_slice(&((MAX_PACKET_LENGTH as u32) + 1).to_be_bytes());
-    assert!(reader.feed(&header).is_err());
+    let err = reader.feed(&header).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "Packet length {} exceeds maximum {}",
+            MAX_PACKET_LENGTH + 1,
+            MAX_PACKET_LENGTH
+        )
+    );
 }
 
 #[test]
@@ -209,4 +238,67 @@ fn round_trips_status_response() {
     assert_eq!(packets.len(), 1);
     assert_eq!(packets[0].type_, MessageType::Status);
     assert_eq!(String::from_utf8_lossy(&packets[0].payload), json);
+}
+
+/// node: tests/protocol.test.ts:262-286
+#[test]
+fn round_trips_status_response_with_connections() {
+    let mut reader = PacketReader::new();
+    let json = r#"{"name":"test","terminal":{"cols":80,"rows":24},"clients":{"total":1,"attached":1,"readOnly":0,"connections":[{"role":"writable","rows":24,"cols":80,"lastRequestSequence":1,"constrains":{"rows":true,"cols":true}}]}}"#;
+    let packets = reader.feed(&encode_status_response(json)).unwrap();
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].type_, MessageType::Status);
+    let body: serde_json::Value = serde_json::from_slice(&packets[0].payload).unwrap();
+    assert_eq!(
+        body,
+        serde_json::from_str::<serde_json::Value>(json).unwrap()
+    );
+
+    // The typed `clients` shape serializes to exactly the Node key order.
+    let clients: ClientStats = serde_json::from_value(body["clients"].clone()).unwrap();
+    assert_eq!(
+        clients.connections,
+        Some(vec![ConnectionStats::Writable {
+            rows: 24,
+            cols: 80,
+            last_request_sequence: 1,
+            constrains: Constrains {
+                rows: true,
+                cols: true
+            },
+        }])
+    );
+    assert_eq!(
+        serde_json::to_string(&clients).unwrap(),
+        r#"{"total":1,"attached":1,"readOnly":0,"connections":[{"role":"writable","rows":24,"cols":80,"lastRequestSequence":1,"constrains":{"rows":true,"cols":true}}]}"#
+    );
+    let readonly = ConnectionStats::Readonly {
+        constrains: Constrains {
+            rows: false,
+            cols: false,
+        },
+    };
+    assert_eq!(
+        serde_json::to_string(&readonly).unwrap(),
+        r#"{"role":"readonly","constrains":{"rows":false,"cols":false}}"#
+    );
+}
+
+/// node: tests/protocol.test.ts:315-345
+#[test]
+fn accepts_legacy_status_without_connection_details() {
+    let json = r#"{"name":"legacy","terminal":{"cols":80,"rows":24,"cursorX":0,"cursorY":0,"scrollbackUsed":24,"scrollbackCapacity":10024},"process":{"alive":true,"exitCode":null,"pid":123,"resources":null},"daemon":{"pid":456,"resources":null},"clients":{"total":2,"attached":2,"readOnly":0},"modes":{"sgrMouse":false,"cursorHidden":false,"kittyKeyboard":false,"kittyKeyboardFlags":[]},"uptimeSeconds":10,"createdAt":"2026-07-31T00:00:00.000Z"}"#;
+    let mut reader = PacketReader::new();
+    let packets = reader.feed(&encode_status_response(json)).unwrap();
+    let decoded: StatsResult = serde_json::from_slice(&packets[0].payload).unwrap();
+    assert_eq!(decoded.clients.total, 2);
+    assert_eq!(decoded.clients.attached, 2);
+    assert_eq!(decoded.clients.read_only, 0);
+    assert!(decoded.clients.connections.is_none());
+    // Re-serializing keeps `connections` absent, as Node's JSON would.
+    assert_eq!(
+        serde_json::to_string(&decoded.clients).unwrap(),
+        r#"{"total":2,"attached":2,"readOnly":0}"#
+    );
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
 }

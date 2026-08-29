@@ -7,9 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# `client::connection::AsyncConnection` — the tokio flavour of `SessionConnection`.
+tokio = ["dep:tokio"]
+
 [dependencies]
 libc.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+tokio = { version = "1.53", features = ["net", "io-util", "time"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["net", "io-util", "time", "rt", "macros"] }

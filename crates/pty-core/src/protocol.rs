@@ -8,13 +8,14 @@ use std::io::{self, Read};
 /// Message types (byte tag on the wire). Unknown bytes are preserved as
 /// [`MessageType::Unknown`] so a peer's newer message types pass through the
 /// framing unharmed (matching the TS reader, which keeps the numeric type).
+/// Values 8 and 9 are reserved for independent protocol extensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
     /// Terminal data (bidirectional).
     Data,
     /// Client → Server: attaching with terminal size.
     Attach,
-    /// Client → Server: detaching.
+    /// Client → Server: detach. Machine stream → caller: intentional detach.
     Detach,
     /// Client → Server: terminal resized.
     Resize,
@@ -26,6 +27,8 @@ pub enum MessageType {
     Peek,
     /// Bidirectional: request/response for JSON stats.
     Status,
+    /// Server → Client: effective shared rows/cols (wire value 10).
+    Geometry,
     /// An unrecognized wire byte, preserved verbatim.
     Unknown(u8),
 }
@@ -43,6 +46,7 @@ impl MessageType {
             5 => MessageType::Screen,
             6 => MessageType::Peek,
             7 => MessageType::Status,
+            10 => MessageType::Geometry,
             other => MessageType::Unknown(other),
         }
     }
@@ -58,16 +62,24 @@ impl MessageType {
             MessageType::Screen => 5,
             MessageType::Peek => 6,
             MessageType::Status => 7,
+            MessageType::Geometry => 10,
             MessageType::Unknown(b) => b,
         }
     }
 }
 
 /// A decoded packet.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     pub type_: MessageType,
     pub payload: Vec<u8>,
+}
+
+impl Packet {
+    /// Re-frame this packet exactly as it arrived.
+    pub fn encode(&self) -> Vec<u8> {
+        encode_packet(self.type_, &self.payload)
+    }
 }
 
 const HEADER_SIZE: usize = 5;
@@ -75,9 +87,11 @@ const HEADER_SIZE: usize = 5;
 /// Cap on a legitimate packet length (32 MiB), matching the TS implementation.
 pub const MAX_PACKET_LENGTH: usize = 32 * 1024 * 1024;
 
-/// ATTACH flag: interactive client that does not participate in PTY size
-/// negotiation.
-pub const ATTACH_FLAG_GEOMETRY_NEUTRAL: u8 = 0x01;
+/// The message a peer sees when it declares a length above
+/// [`MAX_PACKET_LENGTH`] (TS `PacketTooLargeError.message`).
+fn too_large_message(length: usize) -> String {
+    format!("Packet length {length} exceeds maximum {MAX_PACKET_LENGTH}")
+}
 
 /// Encode a packet.
 pub fn encode_packet(type_: MessageType, payload: &[u8]) -> Vec<u8> {
@@ -94,24 +108,15 @@ pub fn encode_data(data: &[u8]) -> Vec<u8> {
     encode_packet(MessageType::Data, data)
 }
 
-/// Encode an ATTACH with a terminal size.
-pub fn encode_attach(rows: u16, cols: u16, geometry_neutral: bool) -> Vec<u8> {
-    let mut payload = vec![0u8; if geometry_neutral { 5 } else { 4 }];
-    payload[0..2].copy_from_slice(&rows.to_be_bytes());
-    payload[2..4].copy_from_slice(&cols.to_be_bytes());
-    if geometry_neutral {
-        payload[4] = ATTACH_FLAG_GEOMETRY_NEUTRAL;
-    }
-    encode_packet(MessageType::Attach, &payload)
+fn size_payload(rows: u16, cols: u16) -> [u8; 4] {
+    let r = rows.to_be_bytes();
+    let c = cols.to_be_bytes();
+    [r[0], r[1], c[0], c[1]]
 }
 
-/// Read the optional ATTACH flag byte.
-pub fn decode_attach_flags(payload: &[u8]) -> u8 {
-    if payload.len() >= 5 {
-        payload[4]
-    } else {
-        0
-    }
+/// Encode an ATTACH with a terminal size (4-byte payload).
+pub fn encode_attach(rows: u16, cols: u16) -> Vec<u8> {
+    encode_packet(MessageType::Attach, &size_payload(rows, cols))
 }
 
 /// Encode a DETACH.
@@ -121,10 +126,12 @@ pub fn encode_detach() -> Vec<u8> {
 
 /// Encode a RESIZE.
 pub fn encode_resize(rows: u16, cols: u16) -> Vec<u8> {
-    let mut payload = vec![0u8; 4];
-    payload[0..2].copy_from_slice(&rows.to_be_bytes());
-    payload[2..4].copy_from_slice(&cols.to_be_bytes());
-    encode_packet(MessageType::Resize, &payload)
+    encode_packet(MessageType::Resize, &size_payload(rows, cols))
+}
+
+/// Encode a GEOMETRY (effective shared rows/cols, server → client).
+pub fn encode_geometry(rows: u16, cols: u16) -> Vec<u8> {
+    encode_packet(MessageType::Geometry, &size_payload(rows, cols))
 }
 
 /// Encode an EXIT with a process exit code.
@@ -170,6 +177,12 @@ pub fn decode_size(payload: &[u8]) -> (u16, u16) {
     (rows, cols)
 }
 
+/// Decode a GEOMETRY payload (rows, cols); same layout and fallback as
+/// [`decode_size`].
+pub fn decode_geometry(payload: &[u8]) -> (u16, u16) {
+    decode_size(payload)
+}
+
 /// Decode an EXIT payload, defaulting to -1.
 pub fn decode_exit(payload: &[u8]) -> i32 {
     if payload.len() < 4 {
@@ -190,8 +203,9 @@ impl PacketReader {
         Self::default()
     }
 
-    /// Feed bytes; return any complete packets. Returns an error if a peer
-    /// declares a length exceeding [`MAX_PACKET_LENGTH`].
+    /// Feed bytes; return any complete packets. Returns an error (and empties
+    /// the buffer, so a later feed cannot continue past the bad header) if a
+    /// peer declares a length exceeding [`MAX_PACKET_LENGTH`].
     pub fn feed(&mut self, data: &[u8]) -> io::Result<Vec<Packet>> {
         self.buffer.extend_from_slice(data);
         let mut packets = Vec::new();
@@ -212,7 +226,7 @@ impl PacketReader {
                 self.buffer.clear();
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("packet length {length} exceeds maximum {MAX_PACKET_LENGTH}"),
+                    too_large_message(length),
                 ));
             }
             if self.buffer.len() < HEADER_SIZE + length {
@@ -243,7 +257,7 @@ pub fn read_packet<R: Read>(reader: &mut R) -> io::Result<Option<Packet>> {
     if length > MAX_PACKET_LENGTH {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "packet too large",
+            too_large_message(length),
         ));
     }
     let mut payload = vec![0u8; length];

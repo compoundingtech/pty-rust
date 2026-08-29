@@ -344,8 +344,13 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
             DaemonMsg::ClientPeek { id, plain } => {
                 let ss = capture(&terminal);
                 let payload = if plain { ss.text } else { ss.ansi };
-                if let Some(c) = clients.get(&id) {
+                if let Some(c) = clients.get_mut(&id) {
                     let _ = c.tx.send(encode_screen(payload.as_bytes()));
+                    // A peek client is a readonly streaming client (node's
+                    // readonly role): `peek -f` keeps reading DATA after the
+                    // screen; a one-shot peek just closes.
+                    c.streaming = true;
+                    c.geometry_neutral = true;
                 }
             }
             DaemonMsg::ClientData(bytes) => {
@@ -398,7 +403,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                         total: attached + read_only,
                         attached,
                         read_only,
-                        geometry_neutral: if read_only > 0 { Some(read_only) } else { None },
+                        connections: None,
                     },
                     modes: pty_core::stats::ModeStats {
                         sgr_mouse: terminal.mode(Mode::SGR_MOUSE).unwrap_or(false),
@@ -410,7 +415,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<i32> {
                             vec![]
                         },
                     },
-                    uptime_seconds: Some((now_epoch_f64() - created_epoch).max(0.0)),
+                    uptime_seconds: Some((now_epoch_f64() - created_epoch).max(0.0).floor() as i64),
                     created_at: Some(created_at.clone()),
                 };
                 let json = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into());
@@ -507,9 +512,9 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<DaemonMsg>) {
                         match p.type_ {
                             MessageType::Attach => {
                                 let (rows, cols) = decode_size(&p.payload);
-                                let geometry_neutral = pty_core::protocol::decode_attach_flags(&p.payload)
-                                    & pty_core::protocol::ATTACH_FLAG_GEOMETRY_NEUTRAL
-                                    != 0;
+                                // The ATTACH flag byte is gone from the protocol; every
+                                // attach negotiates geometry (the rewrite in WP5 replaces this).
+                                let geometry_neutral = false;
                                 let _ = tx.send(DaemonMsg::ClientAttach { id, rows, cols, geometry_neutral });
                             }
                             MessageType::Peek => {
