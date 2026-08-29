@@ -1,10 +1,11 @@
 //! Port of the pty project's `tests/terminal-queries.test.ts`, second half:
-//! terminal query *responses* — proof that libghostty answers DA1/DSR/DA2
-//! device queries and that the harness flushes those responses back to the
-//! PTY. A program emits the query on stdout; libghostty generates the reply
-//! (verified: DA1→`ESC[?62;22c`, DSR→`ESC[1;1R`, DA2→`ESC[>1;0;0c`); the
-//! harness writes it to the PTY, where the tty's cooked-mode echo renders it
-//! as caret notation (`^[[?62;22c`) — the same round-trip the TS suite uses.
+//! terminal query *responses* — proof that the terminal actor answers
+//! DA1/DSR/DA2 device queries with Node's bytes and that the harness flushes
+//! those responses back to the PTY. A program emits the query on stdout; the
+//! actor generates the reply (DA1→`ESC[?62;22c`, DSR→`ESC[1;1R`,
+//! DA2→`ESC[>0;382;0c`); the harness writes it to the PTY, where the tty's
+//! cooked-mode echo renders it as caret notation (`^[[?62;22c`) — the same
+//! round-trip the TS suite uses.
 //!
 //! The pure `strip_terminal_queries` half lives in
 //! `pty-core/tests/terminal_queries.rs`.
@@ -53,11 +54,12 @@ fn responds_to_dsr_cursor_position() {
     s.close();
 }
 
+/// node: tests/terminal-queries.test.ts:140-149
 #[test]
 fn responds_to_da2() {
-    // DA2 (ESC[>c) → ESC[>1;0;0c under libghostty.
+    // DA2 (ESC[>c) → ESC[>0;382;0c, Node's "xterm version 382" answer.
     let mut s = Session::spawn("sh", &["-c", "printf '\\033[>c'; exec cat"], opts()).unwrap();
-    let ss = s.wait_for_text(">1;0;0", 5000).expect("DA2 response");
-    assert!(ss.text.contains(">1;0;0"), "screen:\n{}", ss.text);
+    let ss = s.wait_for_text(">0;382;0", 5000).expect("DA2 response");
+    assert!(ss.text.contains(">0;382;0"), "screen:\n{}", ss.text);
     s.close();
 }

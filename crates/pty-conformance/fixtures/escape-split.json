@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "note": "Each escape sequence is printed by the child one byte at a time with a pause between bytes, so the daemon's terminal sees it split across pty reads. `after` is printed right after the sequence. `expectPlain` is the plain screen afterwards (no stray bytes from a half-parsed sequence); `expectAltScreen` says whether an ATTACH SCREEN must start with ESC[?1049h.",
+  "cases": [
+    {
+      "id": "sgr-red",
+      "sequence": "[31m",
+      "after": "RED",
+      "expectPlain": "RED"
+    },
+    {
+      "id": "alt-screen",
+      "sequence": "[?1049h",
+      "after": "ALT",
+      "expectPlain": "ALT",
+      "expectAltScreen": true
+    },
+    {
+      "id": "osc-title",
+      "sequence": "]0;split title",
+      "after": "TITLED",
+      "expectPlain": "TITLED"
+    },
+    {
+      "id": "csi-u",
+      "sequence": "[>1u",
+      "after": "KITTY",
+      "expectPlain": "KITTY"
+    }
+  ]
+}

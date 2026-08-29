@@ -15,19 +15,16 @@
 //! s.close();
 //! ```
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use libghostty_vt::terminal::{Options, Terminal};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use pty_core::keys::{resolve_key, KeyError};
-use pty_terminal::screenshot::{capture, Screenshot};
+use pty_terminal::{Screenshot, TerminalActor};
 
 /// Options for [`Session::spawn`]. Mirrors the TS `SpawnOptions`.
 #[derive(Debug, Clone, Default)]
@@ -72,13 +69,13 @@ pub fn build_spawn_env(
 /// A spawned terminal session driving a real process through a PTY, with a
 /// libghostty terminal tracking the screen state.
 pub struct Session {
-    terminal: Terminal<'static, 'static>,
+    /// The libghostty terminal, owned by the actor (query answers, mode
+    /// tracking, and the one serializer shared with the daemon).
+    actor: TerminalActor,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     rx: Receiver<Vec<u8>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    /// Bytes libghostty wants written back to the PTY (query responses etc.).
-    pending: Rc<RefCell<Vec<u8>>>,
     rows: u16,
     cols: u16,
 }
@@ -90,24 +87,10 @@ impl Session {
         let rows = opts.rows.unwrap_or(24);
         let cols = opts.cols.unwrap_or(80);
 
-        // libghostty terminal. Query responses (DA1, DSR, …) are captured into
-        // `pending` and flushed back to the PTY after each pump, so programs
-        // like fish that block on a DA1 reply start promptly.
-        let pending: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
-        let mut terminal = Terminal::new(Options {
-            cols,
-            rows,
-            max_scrollback: 10_000,
-        })
-        .expect("libghostty terminal");
-        {
-            let pending = pending.clone();
-            terminal
-                .on_pty_write(move |_term, data| {
-                    pending.borrow_mut().extend_from_slice(data);
-                })
-                .expect("install on_pty_write");
-        }
+        // The terminal actor answers queries (DA1, DSR, …) into its reply
+        // buffer; `pump` flushes them back to the PTY, so programs like fish
+        // that block on a DA1 reply start promptly.
+        let actor = TerminalActor::new(rows, cols, pty_terminal::actor::DEFAULT_SCROLLBACK);
 
         // Real PTY + child process.
         let pty_system = native_pty_system();
@@ -171,12 +154,11 @@ impl Session {
         });
 
         Ok(Session {
-            terminal,
+            actor,
             master: pair.master,
             writer,
             rx,
             child,
-            pending,
             rows,
             cols,
         })
@@ -187,19 +169,14 @@ impl Session {
     fn pump(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok(chunk) => self.terminal.vt_write(&chunk),
+                Ok(chunk) => {
+                    self.actor.write(&chunk);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
         }
-        let out = {
-            let mut p = self.pending.borrow_mut();
-            if p.is_empty() {
-                Vec::new()
-            } else {
-                std::mem::take(&mut *p)
-            }
-        };
+        let out = self.actor.take_pty_replies();
         if !out.is_empty() {
             let _ = self.writer.write_all(&out);
             let _ = self.writer.flush();
@@ -244,17 +221,20 @@ impl Session {
     /// Capture the current terminal state (drains pending output first).
     pub fn screenshot(&mut self) -> Screenshot {
         self.pump();
-        capture(&self.terminal)
+        self.actor.screenshot()
+    }
+
+    /// The terminal actor behind this session, for typed reads
+    /// (`snapshot`, `modes`, `plain`) after a [`Session::screenshot`] pump.
+    pub fn actor(&self) -> &TerminalActor {
+        &self.actor
     }
 
     /// The current terminal window title (set by the program via OSC 0/2).
     /// Drains pending output first.
     pub fn title(&mut self) -> String {
         self.pump();
-        self.terminal
-            .title()
-            .map(|t| t.to_string())
-            .unwrap_or_default()
+        self.actor.title()
     }
 
     // ── Waiting ──
@@ -317,7 +297,7 @@ impl Session {
             pixel_width: 0,
             pixel_height: 0,
         });
-        let _ = self.terminal.resize(cols, rows, 0, 0);
+        self.actor.resize(cols, rows);
     }
 
     // ── Lifecycle ──

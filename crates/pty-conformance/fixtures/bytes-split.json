@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "note": "Every UTF-8 scalar of `sample` is delivered one byte at a time. `output` cases print the bytes from the child with a pause between them, so the daemon reads each byte in its own pty read and the terminal must reassemble the scalar; `peek --plain` must equal `expectPlain` and the DATA frames an attached client collects must concatenate to the sample bytes. `input` cases send each byte in its own DATA frame to a session running `cat` (echo on); the echoed screen must show the sample. Node decodes each inbound DATA payload as a separate UTF-8 string, so a scalar split across frames is mangled there (decision 0001); those cases carry `node: \"mangled\"`.",
+  "cases": [
+    { "id": "latin-e-acute", "direction": "output", "sample": "é", "expectPlain": "é" },
+    { "id": "euro", "direction": "output", "sample": "€", "expectPlain": "€" },
+    { "id": "emoji", "direction": "output", "sample": "😀", "expectPlain": "😀" },
+    { "id": "cjk", "direction": "output", "sample": "漢字", "expectPlain": "漢字" },
+    { "id": "mixed", "direction": "output", "sample": "aé€😀漢字z", "expectPlain": "aé€😀漢字z" },
+    { "id": "input-latin-e-acute", "direction": "input", "sample": "é", "expectPlain": "é", "node": "mangled" },
+    { "id": "input-cjk", "direction": "input", "sample": "漢字", "expectPlain": "漢字", "node": "mangled" }
+  ]
+}

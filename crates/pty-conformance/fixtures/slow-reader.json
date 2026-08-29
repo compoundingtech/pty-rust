@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "note": "One ATTACHed client never reads its socket. A second ATTACHed client must still receive live DATA within `deliveryWithinMs` of the child starting to emit `outputBytes` bytes, and must receive all of it within `totalWithinMs`. The Node daemon relies on socket buffers (userland writes queue in memory per socket); the bound stated here is what both daemons must meet.",
+  "id": "slow",
+  "outputBytes": 1000000,
+  "deliveryWithinMs": 1000,
+  "totalWithinMs": 10000
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "note": "`run --id <id>`, attach and read STATUS, kill it, `run --id <id>` again: a new attach reaches the replacement daemon, whose STATUS daemon.pid differs from the first one's. No generation is needed to tell them apart; the socket path alone identifies the live daemon.",
+  "id": "ident",
+  "command": ["cat"],
+  "steps": ["run", "attach-status", "kill", "run", "attach-status"],
+  "expect": { "daemonPidDiffers": true, "secondSequenceStartsWith": ["GEOMETRY", "SCREEN"] }
+}
