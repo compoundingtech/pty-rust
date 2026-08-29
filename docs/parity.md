@@ -330,7 +330,7 @@ Decided on 2026-08-29. Each row records the decision.
 | `pty-kill-releases-socket-test` second binary | S | Dropped. The case becomes a Rust test. |
 | `remote-serve --socket <path>` | S | Dropped. `--stdio` stays. The Node docs mark the socket form transitional. |
 | Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
-| `gc`: permanent respawn, flapping classifier, abandoned reap | L | Dropped. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Kept: debris, orphan kill, sweep, `keep`, tag prune, dry-run, footer, `--print-launchd-plist`. `strategy=permanent` stays as a preserve flag. |
+| `gc`: permanent respawn, flapping classifier, abandoned reap | L | Dropped. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Kept: debris, orphan kill, sweep, `keep`, tag prune, dry-run, footer, `--print-launchd-plist`. `strategy=permanent` stays as a preserve flag. Their tuning flags `--idle-days`, `--fast-fail-window`, `--fast-fail-limit` (both `--flag N` and `--flag=N`) are accepted with their value and ignored, never rejected, so scripts written for Node keep working. |
 | `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite. |
 | `evidence snapshot` / `remove` | M | Deferred and documented as absent. Its user is not known. |
 | `--attach-stream-fd-v1` | M | Kept. An eval cell and relays use it. |
