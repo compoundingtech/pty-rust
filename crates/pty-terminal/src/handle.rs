@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use pty_core::protocol::{
-    MessageType, Packet, PacketReader, decode_exit, decode_size, encode_attach, encode_data,
+    MessageType, Packet, PacketReader, decode_exit, decode_size, encode_attach, encode_data, encode_peek,
     encode_detach, encode_resize,
 };
 
@@ -30,7 +30,6 @@ use crate::snapshot::CellGrid;
 
 /// GEOMETRY (server → client, 4 bytes `rows u16BE, cols u16BE`), not yet a
 /// named `MessageType` in `pty-core`.
-const GEOMETRY_TYPE: u8 = 10;
 
 /// Identifies one connection attempt (or the spawned child). Bumped by
 /// [`TerminalHandle::reconnect`]; frames tagged with an older id are ignored.
@@ -265,7 +264,7 @@ impl Core {
                 let code = decode_exit(&packet.payload);
                 self.on_exit(code);
             }
-            MessageType::Unknown(GEOMETRY_TYPE) => {
+            MessageType::Geometry => {
                 let (rows, cols) = decode_size(&packet.payload);
                 self.actor.resize(cols, rows);
                 self.publish();
@@ -456,7 +455,14 @@ fn connect_and_attach(
     tx: Sender<Msg>,
 ) -> io::Result<UnixStream> {
     let stream = UnixStream::connect(session.socket_path())?;
-    (&stream).write_all(&encode_attach(opts.rows, opts.cols, opts.readonly))?;
+    // Node has no read-only ATTACH: a read-only client sends PEEK, which the
+    // daemon answers with GEOMETRY + SCREEN and then keeps streaming DATA to.
+    let hello = if opts.readonly {
+        encode_peek(false, false)
+    } else {
+        encode_attach(opts.rows, opts.cols)
+    };
+    (&stream).write_all(&hello)?;
     (&stream).flush()?;
     let reader = stream.try_clone()?;
     std::thread::spawn(move || {
@@ -1016,10 +1022,7 @@ mod tests {
         let (mut core, _tx) = detached_core();
         core.dispatch(Msg::Frame {
             attempt: AttemptId(1),
-            packet: packet(pty_core::protocol::encode_packet(
-                MessageType::Unknown(GEOMETRY_TYPE),
-                &[0, 3, 0, 10],
-            )),
+            packet: packet(pty_core::protocol::encode_geometry(3, 10)),
         });
         assert_eq!((core.actor.rows(), core.actor.cols()), (3, 10));
         core.dispatch(Msg::Frame {
