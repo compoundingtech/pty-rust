@@ -210,6 +210,13 @@ dependencies = [
 [[package]]
 name = "pty-conformance"
 version = "0.13.0-rust"
+dependencies = [
+ "libc",
+ "pty-core",
+ "pty-testkit",
+ "regex",
+ "serde_json",
+]
 
 [[package]]
 name = "pty-core"
