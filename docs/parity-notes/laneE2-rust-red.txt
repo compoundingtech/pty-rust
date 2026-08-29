@@ -1,0 +1,516 @@
+# Lane E2: conformance tests red against the Rust pty (green on Node 0.12.0+500eab2)
+# Run: scripts/conformance-both.sh at laneE2 (all 66 files, pass one and pass two). 637 green on Node; 235 green / 404 red on Rust.
+# Format: one section per test file; each line is the test name, the first line of its failure message, and (after ::) the first stderr line of the failing CLI call when there is one.
+
+## atomic_writes.rs (6 red)
+- concurrent_emits_and_an_oversized_metadata_event_survive_retention: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- held_event_lock_makes_cli_writers_fail_fast_with_busy: expected /(?i)event log is busy/ to match:
+- reader_never_sees_a_half_written_event_log_during_truncation: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- rm_cannot_clean_through_a_live_metadata_lock_holder: called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+- rm_reclaims_a_stale_event_lock_during_full_cleanup: assertion failed: events.exists()
+- twenty_racing_taggers_leave_valid_json_with_some_updates: no tag update landed: {
+
+## attach_no_restart.rs (8 red)
+- auto_restart_relaunches_without_prompting: no pid for automatic-target
+- contradictory_restart_policies_are_rejected: expected /mutually exclusive/ to match:
+- default_policy_prompts_and_restarts: no pid for legacy-target
+- exited_session_is_refused_before_delayed_input_can_restart_it: no pid for exited-target
+- help_advertises_the_attach_only_policy: assertion `left == right` failed: unexpected exit status: status=2 timed_out=false :: pty attach: usage: pty attach <ref>
+- missing_session_fails_without_prompting: expected "Session \"missing\" not found." in:
+- running_session_is_followed_to_its_exit_without_a_second_incarnation: assertion `left == right` failed
+- vanished_session_is_refused_without_evaluating_its_command: expected "is not running" in:
+
+## attach_stream.rs (15 red)
+- broken_inherited_stream_fails_instead_of_hanging: client attached: Timeout
+- close_without_exit_is_a_truncated_stream: expected /(?i)machine stream truncated before EXIT: connection closed/ to match:
+- data_before_the_initial_screen_is_rejected: expected /(?i)expected SCREEN before DATA/ to match:
+- exit_before_the_initial_screen_is_rejected: expected /(?i)expected SCREEN before EXIT/ to match:
+- exit_inside_the_detach_key_window_wins: assertion failed: cli.wait_for_type(MessageType::Screen, Duration::from_secs(10))
+- frames_a_local_detach_before_closing_fd_3: assertion failed: cli.wait_for_type(MessageType::Screen, Duration::from_secs(10))
+- frames_a_local_detach_before_the_daemon_baseline: client attached: Timeout
+- frames_events_through_fd_3_from_a_real_daemon: assertion failed: cli.wait_for_type(MessageType::Screen, Duration::from_secs(10))
+- help_documents_the_inherited_fd_contract: assertion `left == right` failed: unexpected exit status: status=2 timed_out=false :: pty attach: usage: pty attach <ref>
+- invalid_descriptor_is_rejected_before_resolving_the_session: expected /(?i)attach-stream-fd-v1.*999999.*not writable/ to match:
+- legacy_daemon_sending_screen_first_fails_clearly: expected /(?i)daemon does not support attach stream v1/ to match:
+- missing_descriptor_value_is_rejected: expected /attach-stream-fd-v1 requires a file descriptor/ to match:
+- reframes_fragmented_and_coalesced_packets_in_order: assertion `left == right` failed: status=1 stdout="" stderr="pty attach: no such session '3'\n" stream=[]
+- stdout_stays_the_controlling_tty_for_the_attach_geometry: assertion `left == right` failed: "pty attach: no such session '3'\r\n"
+- transport_reset_is_a_truncated_stream_not_a_missing_session: expected /(?i)machine stream truncated before EXIT/ to match:
+
+## connection.rs (7 red)
+- connects_and_receives_initial_screen: timed out after 10s waiting for: socket closed after DETACH
+- paste_with_nothing_to_send_does_not_emit_markers_alone: assertion `left == right` failed: unexpected exit status: status=0 timed_out=false :: left: 0
+- paste_wraps_a_multi_item_payload_as_one_bracket_pair: assertion `left == right` failed
+- peek_rejects_for_nonexistent_session: expected "Session \"nonexistent\" not found." in:
+- rejects_on_nonexistent_session: expected "Session \"nonexistent\" not found." in:
+- resize_sends_new_dimensions: GEOMETRY after RESIZE
+- send_data_rejects_for_nonexistent_session: expected "Session \"nonexistent\" not found." in:
+
+## display_name.rs (14 red)
+- default_run_generates_random_name_and_auto_display_name: displayName is a string
+- events_recent_resolves_a_long_display_name: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- every_verb_fails_closed_on_an_ambiguous_display_name: pty attach shared: status=1 timed_out=false :: pty attach: no such session 'shared'
+- id_pins_the_name_and_auto_generates_display_name: Object {"name": String("mysvc"), "status": String("running"), "pid": Number(2951539), "command": String("cat"), "cwd": String("/tmp/pc-JDuCPG"), "createdAt": String("2026-08-29T14:56:00Z"), "exitCode"
+- rejects_an_id_that_collides_with_an_existing_session: expected "already in use" in:
+- rejects_invalid_display_names_before_spawning: assertion `left != right` failed: leading whitespace: expected rejection: status=0 timed_out=false :: left: 0
+- rename_clear_inside_a_session_clears_the_current_session: assertion `left == right` failed: unexpected exit status: status=2 timed_out=false :: pty rename: usage: pty rename <ref> <new-display-name>
+- rename_clear_removes_display_name: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty rename: no such session '--clear'
+- rename_inside_a_session_renames_the_current_session: assertion `left == right` failed: unexpected exit status: status=2 timed_out=false :: pty rename: usage: pty rename <ref> <new-display-name>
+- rename_show_prints_the_current_display_name: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty rename: no such session '--show'
+- rename_show_without_display_name_prints_a_hint: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty rename: no such session '--show'
+- rename_with_one_positional_outside_a_session_errors: expected "only allowed inside a pty session" in:
+- restart_keeps_display_name_and_tags: assertion `left == right` failed
+- tag_resolves_a_long_display_name: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+
+## effective_geometry.rs (6 red)
+- orders_geometry_before_output_for_existing_and_smaller_attaching_clients: timed out waiting for large initial attach
+- orders_geometry_before_resize_and_disconnect_output: timed out waiting for large geometry
+- resizes_the_grid_on_peer_attach_resize_and_disconnect: timed out waiting for testing attach geometry
+- resizes_the_terminal_on_peer_attach_resize_and_disconnect: timed out waiting for attachPty attach geometry
+- streams_geometry_to_read_only_viewers_without_letting_them_select_size: timed out waiting for writable geometry
+- updates_effective_geometry_before_subsequent_data: assertion `left == right` failed
+
+## events.rs (15 red)
+- bell_is_logged: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- events_file_is_cleared_at_session_start: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- follow_mode_prints_events_appended_after_it_started: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- formats_bell: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- formats_cursor_visible: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- formats_focus_request: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- formats_notification_with_title_and_body: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- formats_title_change: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- formats_user_event_with_data_as_json: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- formats_user_event_with_text_quoted: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- formats_user_event_without_payload_as_just_the_type: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- identical_title_changes_are_deduplicated: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- osc_777_notification_is_logged: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- osc_9_notification_is_logged: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- title_change_is_logged: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+
+## events_emit.rs (8 red)
+- errors_without_a_ref_or_pty_session: expected /not running inside a pty session|no session ref/ to match:
+- event_type_validation_is_reported_by_the_cli: expected /must start with/ to match:
+- json_and_text_together_land_both_fields: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- publishes_a_user_event_on_a_running_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- rejects_invalid_json_without_writing: expected /not valid JSON|--json/ to match:
+- rejects_non_user_types: expected /must start with/ to match:
+- resolves_pty_session_when_no_ref_is_given: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+- text_lands_on_the_text_field: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'emit'. Try `pty help`.
+
+## exec.rs (10 red)
+- does_not_overwrite_a_writer_holding_the_lock: generation
+- emits_a_session_exec_event: generation
+- errors_on_a_nonexistent_command: generation
+- errors_on_toml_managed_sessions: generation
+- errors_when_no_command_is_given: expected "Usage" in:
+- errors_when_not_inside_a_pty_session: expected "not inside a pty session" in:
+- preserves_existing_tags: generation
+- propagates_the_exit_code: generation
+- refuses_a_replacement_generation: generation
+- updates_metadata_and_runs_the_new_command: generation
+
+## exit_event_race.rs (3 red)
+- captures_session_exit_when_child_exits_naturally: daemonPid
+- captures_session_exit_when_daemon_is_killed_via_sigterm: assertion `left == right` failed: []
+- session_start_is_always_present: daemonPid
+
+## exit_reap.rs (6 red)
+- a_vanished_session_is_left_for_gc: expected "Removed: xr979020" in:
+- gc_reports_kept_sessions: expected "Kept (keep tag): xr347013" in:
+- gc_still_sweeps_a_killed_session: expected "Removed: xr82274" in:
+- honours_a_keep_tag_applied_while_running: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- leaves_nothing_for_gc: expected "Nothing to clean up." in:
+- preserve_default_still_lets_gc_sweep: expected "Removed: xr947710" in:
+
+## exit_signal.rs (2 red)
+- clean_exit_keeps_the_raw_code_and_no_signal: called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+- sigkilled_child_is_recorded_as_137: assertion `left == right` failed: {"command":"sh","args":["-c","exec sleep 300"],"displayCommand":"sh -c exec sleep 300","cwd":"/tmp/pc-MW8boH","ephemeral":false,"createdAt":"2026-08-29T14:56:24Z","ta
+
+## fixtures_protocol.rs (2 red)
+- attach_reaches_the_replacement_daemon: range end index 2 out of range for slice of length 1
+- old_socket_frames_do_not_leak_into_a_new_attach: range end index 2 out of range for slice of length 1
+
+## gc.rs (17 red)
+- default_root_keeps_the_legacy_label: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- does_not_prune_non_layout_colon_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- dry_run_previews_orphan_tag_pruning: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- dry_run_previews_vanished_removal: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- emits_pty_root_in_environment_variables: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- keeps_layout_tags_whose_pid_is_alive: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- n_is_an_alias_for_dry_run: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- non_default_root_gets_a_suffixed_label: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- non_default_root_log_path_lives_inside_the_root: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- print_launchd_plist_emits_a_plist: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- print_launchd_plist_interval_flag: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- print_launchd_plist_preserves_the_invoked_binary: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- prunes_layout_tags_whose_pid_is_dead: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- reaps_synthetic_vanished_metadata: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- removes_vanished_sessions: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- reports_nothing_to_clean_up: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- sanitizes_a_pathological_basename_into_the_label: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+
+## gc_badge.rs (3 red)
+- restart_drops_all_four_gc_bookkeeping_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty restart: no such session '-y'
+- running_flapping_session_shows_flapping_badge: expected "[flapping]" in:
+- session_without_flapping_status_shows_permanent_badge: expected "[permanent]" in:
+
+## gc_parent_child.rs (6 red)
+- cycle_kills_both_in_name_order: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- dry_run_previews_orphan_kill_without_mutating: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- kills_a_child_whose_parent_daemon_is_dead: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- kills_a_child_whose_parent_metadata_is_missing: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- parent_plus_permanent_child_is_killed_not_respawned: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- preserves_a_child_whose_parent_is_alive: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+
+## integration_geometry.rs (12 red)
+- kitty_keyboard_mode_reaches_client_on_late_attach: Kitty keyboard protocol: "\u{1b}[>1u" missing from "ready\u{1b}[=1;1u\u{1b}[2;1H"
+- kitty_keyboard_mode_survives_detach_reattach: Kitty keyboard protocol: "\u{1b}[>1u" missing from "ready\u{1b}[=1;1u\u{1b}[2;1H"
+- recalculates_size_on_clean_detach: timed out waiting for "50 200" in DATA (got: "$ stty size\r\n25 90\r\n$ ")
+- recalculates_size_when_a_client_disconnects: timed out waiting for "50 200" in DATA (got: "$ stty size\r\n30 80\r\n$ ")
+- resize_message_updates_size_negotiation: timed out waiting for "50 200" in DATA (got: "$ stty size\r\n60 250\r\n$ ")
+- screen_cursor_position_matches_process_intent_after_resize: assertion `left == right` failed: payload: "\u{1b}[?1049hTitle\u{1b}[5;60H"
+- status_ignores_resize_from_a_command_socket_until_it_attaches: assertion `left == right` failed: {"name":"st3","terminal":{"cols":37,"rows":13,"cursorX":0,"cursorY":0,"scrollbackUsed":0,"scrollbackCapacity":10013},"process":{"alive":true,"exitCode":null,"pid":296
+- status_relinquishes_a_writable_clients_geometry_constraints_when_it_peeks: GEOMETRY for the remaining writable
+- status_reports_anonymous_client_geometry_and_per_axis_constraints: assertion `left == right` failed: {"name":"st4","terminal":{"cols":120,"rows":30,"cursorX":0,"cursorY":0,"scrollbackUsed":0,"scrollbackCapacity":10030},"process":{"alive":true,"exitCode":null,"pid":29
+- status_reports_exited_process: STATUS response
+- status_responds_with_valid_json_containing_all_expected_fields: {"name":"st1","terminal":{"cols":80,"rows":24,"cursorX":0,"cursorY":1,"scrollbackUsed":0,"scrollbackCapacity":10024},"process":{"alive":true,"exitCode":null,"pid":2966276,"resources":{"rssKb":2016,"cp
+- uses_minimum_of_each_dimension_independently: timed out waiting for "30 80" in DATA (got: "stty size\r\n30 200\r\n$ ")
+
+## integration_sync.rs (15 red)
+- cancels_pending_attach_synchronization_when_the_client_switches_to_peek: assertion `left == right` failed
+- detach_and_reattach_with_screen_replay: daemon did not close the socket after DETACH
+- does_not_change_either_role_for_a_malformed_attach_payload: timed out waiting for packets; got ["SCREEN"]
+- does_not_lose_data_queued_during_attach_synchronization: timed out waiting for packets; got ["SCREEN"]
+- flushes_post_cut_data_before_a_post_cut_exit: timed out waiting for packets; got ["SCREEN"]
+- lock_prevents_double_acquire_release_allows_reacquire: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- lock_with_garbage_content_is_treated_as_stale: stale lock was not released after creation
+- metadata_persists_after_server_closes: no pid for exit2
+- peek_client_does_not_affect_terminal_size: assertion `left == right` failed: {"name":"peek3","terminal":{"cols":10,"rows":10,"cursorX":0,"cursorY":4,"scrollbackUsed":0,"scrollbackCapacity":10010},"process":{"alive":true,"exitCode":null,"pid":2
+- peek_client_input_is_ignored_by_server: did not expect "this should be ignored" in:
+- replaces_a_same_socket_attach_role_with_peek: assertion `left == right` failed: {"name":"role2","terminal":{"cols":60,"rows":18,"cursorX":0,"cursorY":0,"scrollbackUsed":0,"scrollbackCapacity":10018},"process":{"alive":true,"exitCode":null,"pid":2
+- replaces_a_same_socket_peek_role_with_attach: timed out waiting for packets; got []
+- sends_one_exit_after_screen_when_the_child_exits_during_attach_synchronization: timed out waiting for packets; got ["SCREEN"]
+- sends_screen_before_live_data_produced_during_attach_synchronization: timed out waiting for packets; got ["SCREEN"]
+- supersedes_an_earlier_pending_attach_on_the_same_client: timed out waiting for packets; got []
+
+## kill_releases_socket.rs (1 red)
+- kill_releases_the_owned_socket_and_a_replacement_starts: socket owner 2969241 survived kill (it ignores HUP/TERM)
+
+## list_filters.rs (13 red)
+- age_filters_compose_with_filter_tag: assertion `left == right` failed
+- display_name_beats_the_stable_id_when_sorting: assertion `left == right` failed
+- json_output_is_sorted_by_display_name_then_name: assertion `left == right` failed
+- newer_than_filters_out_old_sessions: assertion `left == right` failed
+- older_than_filters_out_recent_sessions: assertion `left == right` failed
+- rejects_a_malformed_duration: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- rejects_an_invalid_status_value: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- status_filters_to_a_single_status: assertion `left == right` failed
+- summary_json_is_structured: assertion `left == right` failed: [{"name":"lf5680711","status":"vanished","pid":null,"command":"cat","cwd":"/tmp","createdAt":"2026-08-29T14:52:02.998Z","exitCode":null,"exitedAt":null}]
+- summary_reports_no_matching_sessions: expected "No matching sessions." in:
+- summary_respects_status_filter: assertion `left == right` failed: [{"name":"lfl3462214","status":"vanished","pid":null,"command":"cat","cwd":"/tmp","createdAt":"2026-08-29T14:57:03.003Z","exitCode":null,"exitedAt":null},{"name":"lfx
+- summary_text_emits_counts_and_oldest_newest: expected "2 sessions" in:
+- text_output_buckets_vanished_sessions: expected "Vanished sessions" in:
+
+## list_purity.rs (4 red)
+- gc_does_not_clean_raw_debris_while_another_creator_owns_the_name: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- gc_dry_run_is_non_mutating_and_gc_cleans_up: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- gc_preserves_dead_pid_debris_when_its_socket_is_reachable: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+- gc_previews_and_applies_guarded_cleanup_of_raw_debris: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'gc'. Try `pty help`.
+
+## metadata_events.rs (23 red)
+- events_text_lists_tags_change_as_k_v: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- events_text_renders_empty_tags_as_braces: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- events_text_renders_metadata_change_snapshots: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'metadata'. Try `pty help`.
+- events_text_shows_display_name_change_previous_and_new: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- events_text_shows_display_name_clear_as_null: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty rename: no such session '--clear'
+- patch_accepts_the_160_scalar_boundary: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'metadata'. Try `pty help`.
+- patch_changes_display_name_and_tags_atomically: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- patch_exposes_the_atomic_operation_through_json_stdin_stdout: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'metadata'. Try `pty help`.
+- patch_refuses_a_same_string_display_name_alias: expected "Session id \"missing-id\" not found" in:
+- patch_rejects_an_invalid_patch_without_writing: expected "Invalid displayName" in:
+- patch_reports_actionable_input_errors: expected /missing required --id/ to match:
+- patch_supports_clear_operations_with_one_event: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'metadata'. Try `pty help`.
+- patch_suppresses_result_and_event_for_a_no_op: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'metadata'. Try `pty help`.
+- rename_clear_does_not_emit_when_already_unset: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty rename: no such session '--clear'
+- rename_clear_emits_a_null_value: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty rename: no such session '--clear'
+- rename_cli_fires_display_name_change: assertion `left == right` failed: []
+- rename_emits_display_name_change_with_previous_and_value: assertion `left == right` failed: []
+- tag_cli_fires_tags_change: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- tag_does_not_emit_on_a_no_op: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- tag_emits_tags_change_with_full_snapshots: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- tag_emits_the_merge_with_previous_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- tag_rm_emits_tags_change: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- tag_rm_of_an_absent_key_does_not_emit: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+
+## nesting.rs (3 red)
+- nested_run_a_runs_the_command_directly: expected "Already inside pty session" in:
+- nested_run_propagates_the_exit_code: expected "Already inside pty session" in:
+- nested_run_runs_the_command_directly: expected "Already inside pty session" in:
+
+## nesting_prevention.rs (13 red)
+- attach_force_bypasses_the_guard: expected "already inside pty session \"outer-session\"" in:
+- attach_force_may_appear_before_or_after_r: expected /not found/ to match:
+- attach_refuses_even_for_a_dead_session: expected "already inside pty session \"outer-session\"" in:
+- attach_refuses_when_nested: expected "already inside pty session \"outer-session\"" in:
+- bare_pty_refuses_when_nested: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- non_nested_restart_attaches_after_restart: expected "Session \"nst813994\" restarted." in:
+- plain_nested_run_runs_directly: expected "Already inside pty session" in:
+- pty_i_refuses_when_nested: expected "already inside pty session" in:
+- pty_interactive_refuses_when_nested: expected "already inside pty session" in:
+- restart_force_restores_the_attach: expected "Session \"nst509245\" restarted." in:
+- restart_skips_the_trailing_attach_when_nested: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty restart: no such session '-y'
+- run_a_falls_through_to_run_directly_when_target_is_not_running: expected "Already inside pty session" in:
+- run_a_refuses_when_target_is_running_and_nested: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+
+## parity_node_reference.rs (1 red)
+- reap_mode_session_is_gone_after_exit: timed out after 30s waiting for: par3 socket and metadata
+
+## peek_wait.rs (3 red)
+- events_wait_for_a_specific_event_type: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'events'. Try `pty help`.
+- events_wait_times_out_when_the_event_never_occurs: expected "Timed out" in:
+- peek_full_shows_the_scrollback: full=100 normal=100
+
+## process_title.rs (1 red)
+- daemon_process_comm_is_pty_daemon: assertion `left == right` failed
+
+## process_tree.rs (1 red)
+- kill_ends_a_descendant_that_ignores_hup_and_term: sleep 2974482 under the leaf survived kill
+
+## pty_root.rs (7 red)
+- root_flag_does_not_swallow_a_following_flag: expected /--root requires a path/ to match:
+- root_flag_overrides_a_too_long_env_root: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command '--root'. Try `pty help`.
+- root_flag_overrides_pty_root_env: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command '--root'. Try `pty help`.
+- root_flag_scopes_list_to_the_given_registry: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command '--root'. Try `pty help`.
+- root_flag_without_a_value_fails: expected /--root requires a path/ to match:
+- too_long_root_fails_at_startup: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- too_long_root_fails_before_dispatch: expected /PTY_ROOT is too long/ to match:
+
+## ratatui_compat.rs (3 red)
+- kitty_flags_combined_with_hidden_cursor_and_sgr_mouse: expected /\[>7u/ to match:
+- kitty_keyboard_push_is_replayed_in_the_mode_prefix_on_reattach: expected /\[>7u/ to match:
+- multiple_kitty_push_pop_cycles_keep_the_stack_right: expected /\[>7u/ to match:
+
+## remote_exec_bridge.rs (4 red)
+- list_remote_works_through_the_exec_bridge: sessions
+- peek_remote_of_a_missing_session_is_a_clean_not_found: expected /not found/ to match:
+- peek_remote_streams_the_screen_back_over_stdio: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty peek: no such session
+- send_remote_delivers_input_over_stdio: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty send: no such session '--remote'
+
+## remote_fabric.rs (9 red)
+- attach_remote_replays_the_screen_and_forwards_input: screen not replayed over the fabric hop: "pty attach: no such session 'testpeer'\r\n"
+- ls_remote_json_lists_the_peer_sessions_and_an_empty_local_root: assertion `left == right` failed: status=0 timed_out=false :: left: Null
+- ls_remote_renders_the_host_group_in_human_output: expected "testpeer" in:
+- ls_remote_reports_a_dial_failure_as_a_host_group_error: assertion `left == right` failed
+- peek_remote_of_a_missing_session_fails_with_not_found: expected /not found/ to match:
+- peek_remote_of_an_ambiguous_display_name_lists_the_stable_ids: expected "Session reference \"Remote Shared\" is ambiguous." in:
+- peek_remote_shows_the_remote_screen: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty peek: no such session
+- send_remote_delivers_input_through_the_route_splice: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty send: no such session '--remote'
+- send_remote_to_a_missing_session_fails_with_not_found: expected /not found/ to match:
+
+## remote_reconnect.rs (4 red)
+- attach_remote_gives_up_cleanly_when_the_session_is_gone: "pty attach: no such session 'testpeer'\r\n"
+- attach_remote_survives_a_long_outage_and_reconnects_when_the_peer_returns: "pty attach: no such session 'testpeer'\r\n"
+- attach_remote_survives_a_tunnel_drop_and_resumes: "pty attach: no such session 'testpeer'\r\n"
+- bridge_tunnels_attach_remote_and_drop_severs_it: "pty attach: no such session 'testpeer'\r\n"
+
+## restart_env_scrub.rs (1 red)
+- restart_does_not_leak_the_restarters_identity: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty restart: no such session '-y'
+
+## restart_guardrail.rs (4 red)
+- does_not_block_a_normal_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty restart: no such session '-y'
+- force_overrides_the_guardrail: expected "restarted" in:
+- refuses_to_restart_a_claude_resume_session: expected /stateful agent/ to match:
+- refuses_to_restart_a_role_agent_session: expected /stateful agent/ to match:
+
+## restart_launch_parity.rs (4 red)
+- keeps_every_ptyfile_launch_field_across_restart: assertion `left == right` failed
+- persists_repeatable_env_and_every_restart_relevant_setting: assertion `left == right` failed
+- restart_preserves_inherited_env_removals: assertion `left == right` failed
+- run_a_preserves_env_removals_when_recreating_an_exited_session: timed out after 5s waiting for: exit metadata
+
+## rm_immediate_reuse.rs (1 red)
+- rm_waits_out_the_old_generation_before_permitting_replacement: [0] daemonPid missing: {"command":"sh","args":["-c","sleep 0.05; exit 0"],"displayCommand":"sh -c sleep 0.05; exit 0","cwd":"/tmp/pc-i88v3i","ephemeral":false,"createdAt":"2026-08-29T14:58:45Z","tags"
+
+## rm_kill_ephemeral.rs (5 red)
+- kill_errors_for_a_nonexistent_session: expected "not found" in:
+- kill_fails_loudly_when_the_daemon_does_not_stop: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- kill_refuses_an_exited_session: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- rm_errors_for_a_nonexistent_session: expected "not found" in:
+- rm_refuses_a_running_session: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+
+## screen_replay_altscreen.rs (1 red)
+- tracks_1047_legacy_variant_as_alt_screen_too: "\u{1b}[?1047halt-1047\u{1b}[1;9H"
+
+## scrollback_fidelity.rs (1 red)
+- alt_screen_and_normal_scrollback_both_survive_reconnect: expected "NORMAL-LINE-000" in:
+
+## security_fixes.rs (4 red)
+- accepts_ordinary_names: expected "Session \"myserver\" created." in:
+- garbage_lock_content_is_treated_as_stale: expected "Session \"race3\" created." in:
+- live_lock_holder_blocks_a_second_creator: assertion `left == right` failed: unexpected exit status: status=0 timed_out=false :: left: 0
+- steals_a_stale_lock_whose_holder_is_dead: expected "Session \"race2\" created." in:
+
+## send_paste.rs (8 red)
+- control_key_spellings_are_equivalent: assertion `left == right` failed: unexpected exit status: status=2 timed_out=false :: pty send: Unknown key: "ctrl-u" in key spec "ctrl-u"
+- paste_composes_with_with_delay: assertion `left == right` failed
+- paste_flag_after_the_text_works: assertion `left == right` failed
+- paste_wraps_an_ordered_seq_payload_as_one_paste: assertion `left == right` failed
+- rejects_an_unknown_flag_after_positional_text: expected "Unexpected argument" in:
+- suggests_seq_key_return_for_enter: expected "--enter" in:
+- suggests_the_real_syntax_for_newline_return_and_cr: expected "--newline" in:
+- validates_the_whole_sequence_before_delivering_anything: expected /(?is)Incomplete key spec.*ctrl-u.*supported keys/ to match:
+
+## spawn_bundle_fallback.rs (1 red)
+- cli_delegation_argv_shape_spawns_a_live_session: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty stats: no such session 'b1abc'
+
+## spawn_options.rs (4 red)
+- isolate_env_scrubs_inherited_variables: timed out after 10s waiting for: /tmp/pc-mpzIqh/iso-env.txt to be written
+- returns_only_after_the_fresh_session_start_is_published: assertion `left == right` failed: [Object {"session": String("spawn-opt404184"), "type": String("session_start"), "ts": String("9999-12-31T23:59:59.999Z")}]
+- surfaces_a_missing_cwd_explicitly: assertion `left == right` failed: unexpected exit status: status=0 timed_out=false :: left: 0
+- surfaces_a_non_directory_cwd_explicitly: assertion `left == right` failed: unexpected exit status: status=0 timed_out=false :: left: 0
+
+## spawner_pid_watchdog.rs (2 red)
+- daemon_exits_at_once_when_the_spawner_is_already_dead: daemon kept running with a dead spawner: status=0 timed_out=false
+- daemon_shuts_down_when_the_spawner_dies: daemon 2983949 outlived its spawner
+
+## stats_cli.rs (2 red)
+- prints_stats_for_a_named_session: expected "Session: s73732" in:
+- queries_all_running_sessions_without_a_name: expected "Session: s912393" in:
+
+## tag_bulk.rs (28 red)
+- allows_an_empty_value: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- bulk_write_fires_exactly_one_event: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- combines_set_and_rm_in_one_call: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- dump_on_empty_says_no_tags: expected /No tags/ to match:
+- errors_on_a_nonexistent_session_ref: expected /not found/ to match:
+- interleaved_set_and_rm_apply_updates_first: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- last_value_wins_for_a_repeated_key: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- merges_with_existing_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- no_op_bulk_write_fires_no_event: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- no_positionals_dumps_current_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- partial_no_op_plus_real_change_fires_one_event: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- rejects_a_positional_without_equals: expected /key=value|--rm/ to match:
+- rejects_an_empty_key_positional: expected /(?i)key/ to match:
+- rejects_rm_at_the_end_without_a_key: expected /--rm/ to match:
+- rejects_rm_with_an_empty_key: expected /(?i)key/ to match:
+- removes_a_single_key: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- removes_multiple_keys_in_one_call: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- removing_every_tag_drops_the_field: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- resolves_a_display_name_for_bulk_ops: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- rm_of_a_nonexistent_key_is_a_silent_no_op: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- rm_of_the_same_key_twice_is_idempotent: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- rm_wins_over_set_of_the_same_key: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- set_and_rm_are_position_independent: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- set_then_rm_of_a_never_present_key_is_a_no_op: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- sets_a_single_key_value: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- sets_multiple_keys_in_one_call: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- splits_on_the_first_equals: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- supports_many_tags_in_one_call: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+
+## tag_multi.rs (37 red)
+- all_on_an_empty_root_is_an_empty_object: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- all_read_matches_per_name_reads: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- all_reads_every_session_without_yes: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- all_without_yes_is_rejected_for_writes: expected /--yes/ to match:
+- all_yes_applies_to_every_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- each_write_fires_its_own_tags_change_event: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- filter_tag_matches_sessions_with_that_tag: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- filter_tag_matching_nothing_writes_nothing: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- filter_tag_with_zero_matches_is_an_empty_object: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- filter_tag_writes_to_each_matching_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- mixed_tagged_and_untagged_reads_are_consistent: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- multiple_filter_tags_are_anded: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- no_op_on_one_session_emits_no_event_for_it: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- read_dumps_tags_for_a_single_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- read_dumps_tags_for_multiple_sessions: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- read_errors_when_a_name_is_unresolvable: expected /not found|no-such-session/ to match:
+- read_json_is_keyed_by_session_name: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- read_json_renders_an_untagged_session_as_empty_object: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- read_resolves_display_names: assertion `left == right` failed: expected success: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- rejects_all_with_explicit_names: expected /(?i)mutually exclusive|pick one/ to match:
+- rejects_all_with_filter_tag: expected /(?i)mutually exclusive|pick one/ to match:
+- rejects_an_empty_key: expected /(?i)key/ to match:
+- rejects_filter_tag_with_explicit_names: expected /(?i)mutually exclusive|pick one/ to match:
+- rejects_filter_tag_without_a_value: expected /(?i)--filter-tag|k=v/ to match:
+- rejects_filter_tag_without_an_equals_sign: expected /(?i)filter|k=v/ to match:
+- rejects_no_selector: expected /(?i)selector/ to match:
+- rejects_ops_without_a_selector: expected /(?i)selector/ to match:
+- rejects_rm_with_an_empty_key: expected /(?i)key/ to match:
+- rejects_trailing_rm_without_a_key: expected /--rm/ to match:
+- rm_wins_over_set_of_the_same_key: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- splits_on_the_first_equals: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- write_combines_set_and_rm_for_each_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- write_removes_a_tag_on_each_named_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- write_resolves_display_names_in_the_list: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- write_sets_a_tag_on_each_named_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- write_to_an_empty_selection_emits_no_events: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+- y_short_form_works_like_yes: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag-multi'. Try `pty help`.
+
+## tag_mutate.rs (8 red)
+- errors_on_a_nonexistent_session: expected "not found" in:
+- removes_tags_with_rm: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- removing_every_tag_clears_the_field: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- sets_tags_on_a_running_session: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- shows_current_tags_with_no_arguments: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- shows_no_tags_when_empty: expected "No tags" in:
+- updates_existing_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- works_on_exited_sessions: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+
+## tags.rs (11 red)
+- filter_tag_filters_json_output: assertion `left == right` failed
+- filter_tag_filters_text_output: did not expect "tago348333" in:
+- filter_tag_requires_all_tags_to_match: assertion `left == right` failed
+- list_hides_bookkeeping_tags_by_default: expected "#role=web" in:
+- list_hides_colon_tags_by_default_and_shows_them_with_tags: expected "#role=web" in:
+- list_shows_tags_as_hashtags_by_default: expected "#role=web" in:
+- list_tags_includes_bookkeeping_tags: expected "#role=web" in:
+- run_a_preserves_tags_of_an_exited_session: assertion `left == right` failed
+- run_tag_with_invalid_format_is_rejected: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- tags_appear_in_list_json: assertion `left == right` failed
+- tags_survive_restart: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty restart: no such session '-y'
+
+## tags_helpers.rs (8 red)
+- a_session_with_no_tags_fails_a_non_empty_filter: assertion failed: listed_names(&rig, &["--filter-tag", "role=web"]).is_empty()
+- every_filter_tag_must_match: assertion `left == right` failed
+- filter_tag_is_position_independent: assertion `left == right` failed
+- filter_tag_preserves_equals_signs_in_values: assertion `left == right` failed
+- filter_tag_without_a_value_is_rejected: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- filter_tag_without_an_equals_sign_is_rejected: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- filter_values_must_match_exactly: assertion failed: listed_names(&rig, &["--filter-tag", "role=Web"]).is_empty()
+- reserved_keys_are_hidden_from_the_default_listing: expected "#role=web" in:
+
+## terminal_queries.rs (5 red)
+- multiple_queries_in_one_chunk_are_all_stripped: timed out waiting for the query response; saw: "\u{1b}[1;1HA\u{1b}]10;?\u{7}\u{1b}]11;?\u{7}\u{1b}[cB\r\n^[[?62;22c"
+- query_embedded_in_output_is_stripped_for_clients: timed out waiting for the query response; saw: "\u{1b}[1;1Hbefore\u{1b}]11;?\u{7}after\r\n"
+- responds_to_da2: timed out waiting for the query response; saw: "^[[>1;0;0c\u{1b}[1;11H"
+- responds_to_osc10_foreground_query: timed out waiting for the query response; saw: "\u{1b}[1;1H"
+- responds_to_osc11_background_query: timed out waiting for the query response; saw: "\u{1b}[1;1H"
+
+## up_down.rs (19 red)
+- down_reports_nothing_to_stop: expected "No sessions to stop" in:
+- down_stops_every_running_session: expected "alpha (stopped)" in:
+- down_stops_only_named_sessions: expected "stop (stopped)" in:
+- up_errors_on_an_unknown_session_name: assertion `left != right` failed: expected failure: status=0 timed_out=false :: left: 0
+- up_filters_by_short_name_with_a_prefix: expected "myapp-web (started)" in:
+- up_is_quiet_for_running_sessions_with_matching_tags: expected "unchanged (already running)" in:
+- up_keeps_manually_added_tags: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- up_preserves_manual_tags_when_manifest_tags_are_removed: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'tag'. Try `pty help`.
+- up_propagates_env_from_the_manifest: expected "envprobe (started)" in:
+- up_propagates_tags_from_the_manifest: assertion `left == right` failed
+- up_removes_every_manifest_tag_when_the_table_is_deleted: expected "-env" in:
+- up_removes_tags_removed_from_the_manifest: assertion `left == right` failed
+- up_replaces_a_manifest_tag_value: expected "env=prod" in:
+- up_sets_ptyfile_tags: assertion `left == right` failed
+- up_skips_already_running_sessions: expected "mycat (already running)" in:
+- up_starts_every_session: expected "one (started)" in:
+- up_starts_only_named_sessions: expected "web (started)" in:
+- up_syncs_tags_to_running_sessions: expected "updated tags: strategy=permanent, role=server" in:
+- up_uses_the_prefix_for_session_names: expected "myapp-web (started)" in:
+
+## up_name_decouple.rs (3 red)
+- up_honors_display_name_override: expected /^[a-z0-9]{6,12}$/ to match:
+- up_matches_existing_sessions_by_ptyfile_tag_pair: expected "svc (already running)" in:
+- up_spawns_a_random_id_with_the_manifest_label_as_display_name: expected /^[a-z0-9]{6,12}$/ to match:
+
+## wrapper_signal_forwarding.rs (1 red)
+- remote_serve_stdio_answers_one_list_request_and_exits: assertion `left == right` failed: unexpected exit status: status=1 timed_out=false :: pty: unknown command 'remote-serve'. Try `pty help`.
