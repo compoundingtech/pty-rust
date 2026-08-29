@@ -14,8 +14,9 @@
 //! PORT = "3000"
 //! ```
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use indexmap::IndexMap;
 
 /// A single session definition from a `pty.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +30,9 @@ pub struct PtySessionDef {
     pub command: String,
     /// Working directory (absolute; relative resolves against the manifest dir).
     pub cwd: Option<String>,
-    pub tags: Option<BTreeMap<String, String>>,
-    pub env: Option<BTreeMap<String, String>>,
+    /// Tags in manifest order (`pty up` prints them in that order).
+    pub tags: Option<IndexMap<String, String>>,
+    pub env: Option<IndexMap<String, String>>,
 }
 
 /// A parsed `pty.toml`.
@@ -82,14 +84,22 @@ pub fn read_pty_file(dir: Option<&Path>) -> Result<PtyFile, String> {
             };
             let d = def
                 .as_table()
-                .ok_or_else(|| format!("Invalid session \"{default_display}\": expected a table"))?;
+                .ok_or_else(|| {
+                    format!(
+                        "Invalid session \"{default_display}\" in {}: expected a table",
+                        file_path.display()
+                    )
+                })?;
 
             let command = d
                 .get("command")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| {
-                    format!("Session \"{default_display}\" is missing a \"command\" field")
+                    format!(
+                        "Session \"{default_display}\" in {} is missing a \"command\" field",
+                        file_path.display()
+                    )
                 })?
                 .to_string();
 
@@ -97,7 +107,10 @@ pub fn read_pty_file(dir: Option<&Path>) -> Result<PtyFile, String> {
             let mut display_name = default_display.clone();
             if let Some(dn) = d.get("display_name") {
                 let s = dn.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
-                    format!("Session \"{default_display}\": \"display_name\" must be a non-empty string")
+                    format!(
+                        "Session \"{default_display}\" in {}: \"display_name\" must be a non-empty string",
+                        file_path.display()
+                    )
                 })?;
                 display_name = s.to_string();
             }
@@ -106,7 +119,10 @@ pub fn read_pty_file(dir: Option<&Path>) -> Result<PtyFile, String> {
             let mut id = None;
             if let Some(idv) = d.get("id") {
                 let s = idv.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
-                    format!("Session \"{default_display}\": \"id\" must be a non-empty string")
+                    format!(
+                        "Session \"{default_display}\" in {}: \"id\" must be a non-empty string",
+                        file_path.display()
+                    )
                 })?;
                 id = Some(s.to_string());
             }
@@ -114,7 +130,7 @@ pub fn read_pty_file(dir: Option<&Path>) -> Result<PtyFile, String> {
             // tags.
             let mut tags = None;
             if let Some(t) = d.get("tags").and_then(|v| v.as_table()) {
-                let mut m = BTreeMap::new();
+                let mut m = IndexMap::new();
                 for (k, v) in t {
                     m.insert(k.clone(), value_to_string(v));
                 }
@@ -125,12 +141,18 @@ pub fn read_pty_file(dir: Option<&Path>) -> Result<PtyFile, String> {
             let mut env = None;
             if let Some(ev) = d.get("env") {
                 let t = ev.as_table().ok_or_else(|| {
-                    format!("Session \"{default_display}\": \"env\" must be a table of string values")
+                    format!(
+                        "Session \"{default_display}\" in {}: \"env\" must be a table of string values",
+                        file_path.display()
+                    )
                 })?;
-                let mut m = BTreeMap::new();
+                let mut m = IndexMap::new();
                 for (k, v) in t {
                     let s = v.as_str().ok_or_else(|| {
-                        format!("Session \"{default_display}\": env.{k} must be a string")
+                        format!(
+                            "Session \"{default_display}\" in {}: env.{k} must be a string",
+                            file_path.display()
+                        )
                     })?;
                     m.insert(k.clone(), s.to_string());
                 }
@@ -141,7 +163,10 @@ pub fn read_pty_file(dir: Option<&Path>) -> Result<PtyFile, String> {
             let mut cwd = None;
             if let Some(cv) = d.get("cwd") {
                 let s = cv.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
-                    format!("Session \"{default_display}\": \"cwd\" must be a non-empty string")
+                    format!(
+                        "Session \"{default_display}\" in {}: \"cwd\" must be a non-empty string",
+                        file_path.display()
+                    )
                 })?;
                 let resolved = resolve_against(&resolved_dir, s);
                 cwd = Some(resolved.to_string_lossy().into_owned());

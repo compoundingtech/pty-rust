@@ -1,6 +1,6 @@
 //! Port of the pty project's `tests/ptyfile.test.ts`.
 
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
 use pty_core::ptyfile::{command_with_env_exports, read_pty_file, PtySessionDef};
@@ -27,7 +27,7 @@ fn def(command: &str, env: Option<&[(&str, &str)]>) -> PtySessionDef {
             pairs
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<_, _>>()
+                .collect::<IndexMap<_, _>>()
         }),
     }
 }
