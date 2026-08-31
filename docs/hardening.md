@@ -45,6 +45,33 @@ a latent thread-killer, and the thread it kills is whichever one happened to
 have something to report. Start-up messages are the one exception, because
 the launching CLI is still reading the pipe while they are written.
 
+## The remote tunnel deadlocked on its own stdout
+
+**Found on 2026-08-31, while the remote work was being written. It never
+shipped, and it is here because the shape is the same as the one above.**
+
+`pty remote-serve --stdio` reads one request line from stdin, answers on
+stdout, and then splices the session socket to both. The first version read
+the socket on a second thread and wrote it to stdout from there.
+
+**That thread could never write.** The request line had been read through the
+stdin lock, and the main thread still held the stdout lock for the whole life
+of the tunnel — which is forever. The reader blocked on a lock that would not
+be released until it had finished.
+
+**Nothing said so.** `peek --remote` timed out and `send --remote` delivered
+nothing. Neither reported an error, because nothing errored: a thread was
+waiting, correctly, for something that was never going to happen.
+
+It now reads stdin on the thread and writes stdout on the main one, on the
+raw descriptors rather than the locked handles.
+
+**The lesson is the one above, from the other side.** Both failures were
+silence rather than an error, and both were found by looking at the RESULT —
+an oversized frame that was still accepted, a peek that returned nothing —
+rather than at an exit code. **A component that reports failure by not
+finishing needs a test that asserts on what it produced.**
+
 ## What is enforced
 
 - **Frame size.** A declared length above 32 MiB drops the connection, on
