@@ -1,5 +1,16 @@
 //! Port of tests/stats-cli.test.ts: `pty stats` text and `--json` shapes,
 //! all-sessions mode, the missing-session error, and exited sessions.
+//!
+//! A note for anyone reading a green run here as new. Before the daemon and
+//! the socket verbs landed, four of these tests reported a state nobody had
+//! measured. `pty stats` printed its JSON object whatever was asked of it,
+//! and two of the tests matched on the bare word "exited" — which appeared
+//! inside a registry summary the CLI fell back to when the daemon was gone,
+//! not in the reading block the test is about. They passed for the wrong
+//! reason. The daemon work then kept a preserved session's daemon alive, the
+//! fallback stopped being reached, and the two tests went red while the
+//! product got better. They were never really green. If a suite here matches
+//! on a bare word rather than a shape, treat a pass as unproven.
 
 use pty_conformance::*;
 

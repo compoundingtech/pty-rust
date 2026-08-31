@@ -331,7 +331,7 @@ Decided on 2026-08-29. Each row records the decision.
 | `remote-serve --socket <path>` | S | Dropped. `--stdio` stays. The Node docs mark the socket form transitional. |
 | Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
 | `gc`: permanent respawn, flapping classifier, abandoned reap | L | Dropped. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Kept: debris, orphan kill, sweep, `keep`, tag prune, dry-run, footer, `--print-launchd-plist`. `strategy=permanent` stays as a preserve flag. Their tuning flags `--idle-days`, `--fast-fail-window`, `--fast-fail-limit` (both `--flag N` and `--flag=N`) are accepted with their value and ignored, never rejected, so scripts written for Node keep working. |
-| `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite. |
+| `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite, so `recovery.metadataRevision` goes stale for a session a Rust binary writes to — accepted, decision 0005. |
 | `evidence snapshot` / `remove` | M | Deferred and documented as absent. Its user is not known. |
 | `--attach-stream-fd-v1` | M | Kept. An eval cell and relays use it. |
 | `PTY_SPAWNER_PID` watchdog | S | Kept. Small. |
@@ -339,6 +339,7 @@ Decided on 2026-08-29. Each row records the decision.
 | Rust-only `<name>.screen` file | S | Dropped once `lastLines` matches. |
 | Rust `run --rows/--cols` | S | Kept as an extension. Node persists rows/cols anyway. |
 | `up`/`down` and `pty.toml` | S | Kept. Already ported; the binding rule needs the tag pair. |
+| `queryStats` waiting out its 2 s timeout on a daemon that closes without STATUS, and `peek -f` hanging on a plain close | S | Not reproduced, on purpose. Both end promptly instead. Deliberate improvements, not gaps — accepted, decision 0006. |
 
 ## 13. In flight, not on `main`
 
@@ -358,12 +359,12 @@ Decided on 2026-08-29. Each row records the decision.
 | Binary name `pty`; daemon re-execs `current_exe()` | have | The binary path must outlive its sessions. |
 | Rust edition 2024, let-chains (≥ 1.88); README says 2021 | fix README | |
 | `libghostty-vt-sys` needs Zig 0.15.2 and fetches Ghostty source at build | have | A nix package needs a fixed-output fetch. |
-| `flake.nix` for this repo | missing | `st2`'s flake still pins the Node `pty`. |
-| Completion files vendored byte for byte | missing | |
+| `flake.nix` for this repo | have | Added on `parity`. `st2`'s flake still pins the Node `pty`. |
+| Completion files vendored byte for byte | have | Added on `parity`; `checks.completions` compares them. |
 | Version string | decided | `0.13.x-rust+<short-sha>`: one minor above the Node line, a `rust` pre-release tag, and the commit. |
 | Node test corpus: 120 files, 31k lines; 13 VRS requirements each mapped to test files | oracle | The plan decides which suites to port, which to run as black-box CLI tests against both binaries. |
 | Shared fixtures `tests/fixtures/parity/{screens,shapes}.json` | have | Node-owned, vendored here byte-identical. Extend per section 6. |
-| Rust tests today: 173 | have | |
+| Rust tests today: 173 at `e4d6cda` | have | 1166 on `parity` at the WP7b merge: 639 conformance plus 527 crate tests. |
 
 ## 15. Rough size of the whole
 
