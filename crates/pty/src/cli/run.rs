@@ -1,6 +1,7 @@
-//! `pty run` — interim port kept from the v0 binary so the surface builds
-//! and `run -d` works for tests. The Node-exact rewrite (cli.ts:767-982,
-//! `cmdRun` 1664-1769) replaces this module.
+//! `pty run`: create a session and, unless `-d`, attach to it.
+//!
+//! node: src/cli.ts:767-982 (dispatch and the display-name rules),
+//! 1664-1769 (`cmdRun`)
 
 use pty_core::client;
 use pty_core::registry::{self, EnvMap, TagMap};

@@ -7,10 +7,9 @@
 //! [`CliResult`]; an `Err` is printed to stderr and exits 1, the way Node's
 //! `main().catch` prints `err.message` (cli.ts:4132-4135).
 //!
-//! Verbs that talk to a session socket (`run`, `attach`, `exec`, `peek`,
-//! `send`, `stats`, `restart`, `kill`) are interim ports kept from the v0
-//! binary so the whole surface builds and `run -d` works for tests; they
-//! are being rewritten against Node's texts separately.
+//! `peek` is still an interim port kept from the v0 binary. Every other
+//! verb speaks Node's texts. `remote-serve` and the `--remote` branches
+//! report that fabric is not available until the remote work lands.
 
 pub mod argv;
 pub mod ask;
@@ -30,7 +29,7 @@ pub mod tag_multi;
 pub mod up;
 pub mod version;
 
-// Socket verbs (interim ports; see the module comment above).
+// Verbs that talk to a session socket.
 pub mod attach;
 pub mod exec;
 pub mod kill;
