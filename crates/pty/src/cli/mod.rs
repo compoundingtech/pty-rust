@@ -22,6 +22,7 @@ pub mod gc;
 pub mod help;
 pub mod list;
 pub mod metadata;
+pub mod remote_serve;
 pub mod rename;
 pub mod rm;
 pub mod tag;
@@ -280,10 +281,7 @@ pub fn dispatch(mut args: Vec<String>) -> i32 {
         "send" => send::run(rest),
         "events" => events::run(rest),
         "list" | "ls" => list::run(&args),
-        "remote-serve" => {
-            eprintln!("pty remote-serve: not implemented yet");
-            Ok(1)
-        }
+        "remote-serve" => remote_serve::run(rest),
         "stats" => stats::run(rest),
         "restart" => restart::run(rest),
         "kill" => kill::run(rest),

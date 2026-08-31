@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 
+use pty_core::client;
 use pty_core::duration::{format_duration, parse_duration};
 use pty_core::registry::{
     self, SessionInfo, SessionStatus, TagMap, extract_filter_tags, is_reserved_tag_key,
@@ -35,13 +36,87 @@ pub struct RemoteSession {
     pub display_name: Option<String>,
 }
 
-/// The remote host groups for `--remote [<peer>]`: a peer is dialed over
-/// fabric, bare `--remote` asks `pty-relay ls --json`. The remote lane
-/// supplies this; until then there are no host groups.
+/// The remote host groups for `--remote [<peer>]`: a named peer is dialed
+/// over fabric; bare `--remote` asks `pty-relay ls --json` for the peers to
+/// dial and is best-effort, so a relay that is absent yields no groups.
+///
+/// A dial that fails is a group carrying the error, not a failure of the
+/// command: `pty list --remote <peer>` still exits 0 and still lists the
+/// local sessions.
 ///
 /// node: src/cli.ts:2223-2247
-pub fn remote_list_hosts(_peer: Option<&str>) -> Vec<RemoteHost> {
-    Vec::new()
+pub fn remote_list_hosts(peer: Option<&str>) -> Vec<RemoteHost> {
+    match peer {
+        Some(peer) => vec![host_group(peer)],
+        None => relay_peers().iter().map(|p| host_group(p)).collect(),
+    }
+}
+
+/// One host group: dial the peer, ask it for its sessions, and record
+/// whatever went wrong instead of propagating it.
+fn host_group(peer: &str) -> RemoteHost {
+    let dialer = client::remote::RemoteDialer::default();
+    let sessions = dialer
+        .dial(peer)
+        .and_then(|socket_path| dialer.fetch_remote_list(&socket_path));
+    match sessions {
+        Ok(rows) => RemoteHost {
+            label: peer.to_string(),
+            sessions: rows.into_iter().map(remote_session).collect(),
+            error: None,
+        },
+        Err(e) => RemoteHost {
+            label: peer.to_string(),
+            sessions: Vec::new(),
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn remote_session(row: client::remote::RemoteSessionRow) -> RemoteSession {
+    RemoteSession {
+        name: row.name,
+        status: row.status,
+        command: row.command,
+        cwd: row.cwd,
+        tags: row.tags.map(|t| t.into_iter().collect()),
+        display_name: row.display_name,
+    }
+}
+
+/// `pty-relay ls --json` names the peers worth dialing. Node ignores every
+/// failure here, so a machine with no relay simply has no remote groups.
+///
+/// node: src/cli.ts:2223-2233
+fn relay_peers() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("pty-relay")
+        .args(["ls", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let rows = value
+        .get("peers")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array());
+    rows.map(|rows| {
+        rows.iter()
+            .filter_map(|r| {
+                r.as_str()
+                    .map(str::to_string)
+                    .or_else(|| r.get("name").and_then(Value::as_str).map(str::to_string))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Everything `cmdList` takes.
