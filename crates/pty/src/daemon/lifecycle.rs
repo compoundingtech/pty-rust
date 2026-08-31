@@ -408,7 +408,7 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<Msg>) {
                     Err(e) => {
                         // A peer declaring an oversize frame is dropped
                         // rather than buffered without bound.
-                        eprintln!("Rejected client packet: {e}");
+                        crate::daemon::daemon_warn!("Rejected client packet: {e}");
                         let _ = stream.shutdown(std::net::Shutdown::Both);
                         break;
                     }
@@ -697,7 +697,7 @@ impl Daemon {
         let owner = self.owner();
         std::thread::spawn(move || {
             std::thread::sleep(deadline);
-            eprintln!(
+            crate::daemon::daemon_warn!(
                 "pty daemon \"{name}\": graceful shutdown exceeded {}ms — forcing exit (child reaped)",
                 deadline.as_millis()
             );
@@ -782,7 +782,7 @@ impl Daemon {
             .and_then(|t| t.join().ok())
             .unwrap_or_default();
         if !survivors.is_empty() {
-            eprintln!(
+            crate::daemon::daemon_warn!(
                 "pty daemon \"{}\": {} child process(es) did not exit after exact TERM and KILL signals",
                 self.name,
                 survivors.len()
