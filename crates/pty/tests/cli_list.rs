@@ -232,14 +232,33 @@ fn json_tags_and_filters() {
     );
 }
 
-/// node: src/cli.ts:2223-2247, 2307-2311 — with no remote hosts the bare
-/// `--remote` form prints the plain local array.
+/// node: src/cli.ts:2223-2247, 2307-2311 — bare `--remote` asks pty-relay
+/// which peers to try, so with no relay there are no host groups and the
+/// output is the plain local array.
 #[test]
-fn remote_without_hosts_prints_the_local_array() {
+fn bare_remote_without_hosts_prints_the_local_array() {
     let rig = Rig::new();
     rig.write_meta("x", json!({}));
     let out = rig.ok(&["list", "--json", "--remote"]);
     assert!(out.json().is_array());
+}
+
+/// A NAMED peer is always a host group, even when it cannot be dialed: the
+/// group carries the reason and the output takes the `{local, remote}`
+/// shape. `crates/pty-conformance/tests/remote_fabric.rs` pins the same
+/// thing against the Node binary.
+///
+/// node: src/cli.ts:2223-2247
+#[test]
+fn a_named_peer_that_cannot_be_dialed_is_a_host_group_with_an_error() {
+    let rig = Rig::new();
+    rig.write_meta("x", json!({}));
     let out = rig.ok(&["list", "--json", "--remote", "somepeer"]);
-    assert!(out.json().is_array());
+    let v = out.json();
+    assert!(v["local"].is_array(), "{v}");
+    assert_eq!(v["remote"][0]["label"], "somepeer", "{v}");
+    assert!(
+        !v["remote"][0]["error"].as_str().unwrap_or_default().is_empty(),
+        "{v}"
+    );
 }
