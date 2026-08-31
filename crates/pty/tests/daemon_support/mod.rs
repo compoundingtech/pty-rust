@@ -23,9 +23,12 @@ use serde_json::{Value, json};
 /// inside a Nix build sandbox: the geometry cases time out waiting for a
 /// GEOMETRY frame and a write to the daemon gets a broken pipe. Measured on
 /// 2026-08-31 — 6 of 6 outside the sandbox across six runs in both profiles,
-/// 3 of 6 inside it. Rather than let a build fail for a reason that is about
-/// the sandbox, `flake.nix` sets `PTY_SKIP_SOCKET_TESTS` and these step
-/// aside there. They always run under a plain `cargo test`.
+/// 3 of 6 inside it.
+///
+/// `flake.nix` no longer runs this crate's tests at all, so nothing in this
+/// repository sets `PTY_SKIP_SOCKET_TESTS`. It stays as the escape hatch for
+/// anyone running the suite somewhere that cannot start a daemon reliably —
+/// a container, a constrained CI box. A plain `cargo test` runs everything.
 #[macro_export]
 macro_rules! skip_without_a_real_machine {
     () => {

@@ -122,32 +122,26 @@
               --fish completions/pty.fish
           '';
 
-          # What the sandbox can prove. openpty works there, so most of the
-          # suite runs: the socket tests build their registries under $TMPDIR,
-          # and a unix socket path is capped at 108 bytes, so the tests get a
-          # short one; the build directory's own name is already a third of
-          # that. A few tests read $HOME, and the sandbox HOME is not writable.
+          # What the sandbox can prove, and it is deliberately less than a
+          # machine can.
           #
-          # Two groups are left out, and the sandbox is the reason rather than
-          # the software.
+          # A build sandbox has no Node `pty` to compare against, and it is not
+          # a reliable place to start processes and wait on their output. Three
+          # separate suites failed there on 2026-08-31 while passing on a
+          # machine every time, in both build profiles: the daemon geometry
+          # cases timed out waiting for a frame, a write to a daemon got a
+          # broken pipe, and a terminal snapshot test raced its own shell loop.
+          # None of those was a defect in the software.
           #
-          # `pty-conformance` compares this binary against the Node `pty`,
-          # which is not in the sandbox at all. With no oracle to compare
-          # against, running it here would prove nothing.
+          # So the check phase runs `pty-core`, which is the registry, the
+          # protocol, the events log, the key and input parsers and the client
+          # operations — everything the port gets wrong quietly. The behaviour
+          # of the INSTALLED binary is proved by the checks below instead,
+          # which is a better test of a package anyway.
           #
-          # The `daemon_*` tests drive a real daemon over its socket and wait
-          # on frames. Some of them time out or get a broken pipe in the
-          # sandbox and pass on a machine every time, in both profiles, so
-          # `PTY_SKIP_SOCKET_TESTS` stands them down here. The guard lives in
-          # `crates/pty/tests/daemon_support/mod.rs` with the measurement.
-          #
-          # Both groups run on a machine: `cargo test --workspace`, and
-          # `scripts/conformance-both.sh` for the side-by-side against Node.
-          cargoTestFlags = [
-            "--workspace"
-            "--exclude"
-            "pty-conformance"
-          ];
+          # Everything runs on a machine with `cargo test --workspace`, and
+          # `scripts/conformance-both.sh` runs the side-by-side against Node.
+          cargoTestFlags = [ "-p" "pty-core" ];
 
           # The testkit's line-editing tests drive readline through `bash`;
           # stdenv's bash is built without it, so the interactive one goes first
@@ -157,7 +151,6 @@
           preCheck = ''
             export TMPDIR=$(mktemp -d /tmp/pty.XXXXXX)
             export HOME=$(mktemp -d)
-            export PTY_SKIP_SOCKET_TESTS=1
           '';
 
           meta = {
@@ -185,6 +178,30 @@
             cmp ${shell}.out ${self}/completions/pty.${shell} \
               || { echo "pty completions ${shell} differs from completions/pty.${shell}" >&2; exit 1; }
           '') completionShells}
+          touch $out
+        '';
+
+        # Git-style forwarding finds `pty-<cmd>` on PATH. This ran `which`
+        # once, and a sandbox has no `which`, so every extension read as an
+        # unknown command wherever that program is absent. The bug was silent
+        # and this is where it would have been caught, so it is pinned against
+        # the installed binary rather than in a unit test.
+        checks.extension-forwarding = pkgs.runCommand "pty-extension-forwarding-${version}" { } ''
+          mkdir -p ext
+          printf '#!/bin/sh\necho "forwarded: $*"\nexit 7\n' > ext/pty-hello
+          chmod +x ext/pty-hello
+          export PATH=$PWD/ext:$PATH
+          export PTY_ROOT=$(mktemp -d)
+          set +e
+          # Not `out`: that is the output path this derivation must produce.
+          got=$(${pty}/bin/pty hello world 2>&1)
+          code=$?
+          set -e
+          [ "$code" = 7 ] || { echo "expected exit 7 from the extension, got $code: $got" >&2; exit 1; }
+          case "$got" in
+            *"forwarded: world"*) ;;
+            *) echo "extension was not run: $got" >&2; exit 1 ;;
+          esac
           touch $out
         '';
 
