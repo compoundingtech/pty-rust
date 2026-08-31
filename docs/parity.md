@@ -341,6 +341,19 @@ Decided on 2026-08-29. Each row records the decision.
 | `up`/`down` and `pty.toml` | S | Kept. Already ported; the binding rule needs the tag pair. |
 | `queryStats` waiting out its 2 s timeout on a daemon that closes without STATUS, and `peek -f` hanging on a plain close | S | Not reproduced, on purpose. Both end promptly instead. Deliberate improvements, not gaps — accepted, decision 0006. |
 
+## 12b. Known red that is not a missing verb
+
+Two conformance failures on `parity` are not WP8 and not a regression.
+
+| Test | What it is |
+|---|---|
+| `scrollback_fidelity.rs::alt_screen_and_normal_scrollback_both_survive_reconnect` | On reconnect the replay carries the alternate screen but not the normal buffer under it, so leaving the alternate screen would not restore what was there. The replay serializer has to read the inactive screen out of libghostty. One test, not attempted. |
+| `fixtures_protocol.rs::a_client_that_never_reads_does_not_starve_the_others` | Flaky, about three runs in five. Measured 2026-08-31 at the same rate against the binary before and after that day's changes, so it is pre-existing. It makes every full run look non-deterministic and should be stabilised. |
+
+Everything else red is remote (WP8). See also docs/hardening.md for why a red
+test inside a red suite is worth separating from a red test that means a
+feature is missing.
+
 ## 13. In flight, not on `main`
 
 | Where | What | Effect on parity |

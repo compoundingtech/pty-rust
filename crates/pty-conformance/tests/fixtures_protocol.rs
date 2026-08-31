@@ -1,3 +1,14 @@
+//! Two notes before you read a failure here.
+//!
+//! `an_oversized_declared_length_drops_the_connection` was red for months and
+//! it was not reporting a missing feature — the daemon's frame-size limit was
+//! not being enforced at all. See docs/hardening.md.
+//!
+//! `a_client_that_never_reads_does_not_starve_the_others` is FLAKY, about
+//! three runs in five. Measured on 2026-08-31 against this binary and against
+//! the trunk before that day's changes: the same rate both ways, so it is
+//! pre-existing and nobody's regression. It wants stabilising.
+//!
 //! Loaders for the Rust-owned protocol fixtures in `fixtures/*.json`
 //! (issue #4 in the parity plan): bytes and escape sequences split across
 //! reads, raw (non-UTF-8) DATA, attach identity across a replacement, late
