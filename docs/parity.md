@@ -347,10 +347,11 @@ Two conformance failures on `parity` are not WP8 and not a regression.
 
 | Test | What it is |
 |---|---|
+| `rm_immediate_reuse.rs::rm_waits_out_the_old_generation_before_permitting_replacement` | Flaky under a full-workspace run, green four times in four on its own. Same shape as the starve test below. |
 | `scrollback_fidelity.rs::alt_screen_and_normal_scrollback_both_survive_reconnect` | On reconnect the replay carries the alternate screen but not the normal buffer under it, so leaving the alternate screen would not restore what was there. The replay serializer has to read the inactive screen out of libghostty. One test, not attempted. |
 | `fixtures_protocol.rs::a_client_that_never_reads_does_not_starve_the_others` | Flaky, about three runs in five. Measured 2026-08-31 at the same rate against the binary before and after that day's changes, so it is pre-existing. It makes every full run look non-deterministic and should be stabilised. |
 
-Everything else red is remote (WP8). See also docs/hardening.md for why a red
+See also docs/hardening.md for why a red
 test inside a red suite is worth separating from a red test that means a
 feature is missing.
 

@@ -7,9 +7,9 @@
 //! [`CliResult`]; an `Err` is printed to stderr and exits 1, the way Node's
 //! `main().catch` prints `err.message` (cli.ts:4132-4135).
 //!
-//! `peek` is still an interim port kept from the v0 binary. Every other
-//! verb speaks Node's texts. `remote-serve` and the `--remote` branches
-//! report that fabric is not available until the remote work lands.
+//! `peek` is still an interim port kept from the v0 binary; every other verb
+//! speaks Node's texts. The interactive picker is the one thing left that
+//! reports itself unimplemented.
 
 pub mod argv;
 pub mod ask;
