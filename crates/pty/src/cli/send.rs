@@ -114,7 +114,22 @@ pub fn run(args: &[String]) -> CliResult {
 
     // 11. Only now does the reference have to name a real session.
     if let Some(peer) = remote {
-        return Err(format!("pty send --remote {peer}: fabric not available").into());
+        // The reference names a session on the PEER, so it is never resolved
+        // here; the peer's own registry does that.
+        let socket = match client::remote::dial_and_route(&peer, &reference) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("pty send --remote {peer}: {e}");
+                return Ok(1);
+            }
+        };
+        return match client::send_over(socket, &reference, true, &items, opts) {
+            Ok(()) => Ok(0),
+            Err(e) => {
+                eprintln!("{e}");
+                Ok(1)
+            }
+        };
     }
     let name = resolve_ref(&reference)?;
     match client::send(&name, &items, opts) {

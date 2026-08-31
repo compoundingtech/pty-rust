@@ -8,6 +8,7 @@
 
 mod cli;
 mod daemon;
+mod remote;
 
 fn main() {
     set_process_title("pty");

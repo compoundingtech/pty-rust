@@ -102,7 +102,7 @@ pub fn run(args: &[String]) -> CliResult {
 
     if let Some(peer) = remote {
         // The name belongs to the peer, so it is never resolved here.
-        return Err(format!("pty attach --remote {peer}: fabric not available").into());
+        return attach_remote(&peer, &name, stream_fd);
     }
 
     let resolved = resolve_ref(&name)?;
@@ -202,6 +202,41 @@ fn handle_dead_session(
     }
     println!("Session \"{name}\" restarted.");
     Ok(do_attach(name, None))
+}
+
+/// `pty attach --remote <peer> <name>`: dial the peer, route to the session,
+/// and attach over the tunnel.
+///
+/// A transport failure is retried, because the peer may simply be away. A
+/// route the peer REFUSES is final: the session is gone and no amount of
+/// waiting brings it back.
+///
+/// node: src/cli.ts:1046-1048, `cmdAttachRemote`
+fn attach_remote(peer: &str, name: &str, stream_fd: Option<std::os::fd::RawFd>) -> CliResult {
+    let socket = match client::remote::dial_and_route(peer, name) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("pty attach --remote {peer}: {e}");
+            return Ok(1);
+        }
+    };
+    let peer = peer.to_string();
+    let target = name.to_string();
+    let mut params = client::AttachParams::new(name, socket);
+    params.remote = true;
+    params.stream_fd = stream_fd;
+    params.reconnect = Some(Box::new(move || {
+        match client::remote::dial_and_route(&peer, &target) {
+            Ok(s) => Ok(Some(s)),
+            Err(client::remote::RemoteError::Refused(refusal)) => Err(refusal),
+            // Anything else is the transport being unavailable for now.
+            Err(_) => Ok(None),
+        }
+    }));
+    if stream_fd.is_none() {
+        eprintln!("[attached to {name} — press Ctrl+\\ to detach]");
+    }
+    Ok(client::attach(params, &client::ClientIo::default()).exit_code())
 }
 
 /// Connect a terminal to a running session. `restart` reuses this for the

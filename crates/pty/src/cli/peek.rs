@@ -15,6 +15,7 @@ pub fn run(args: &[String]) -> CliResult {
     let mut wait: Vec<String> = Vec::new();
     let mut timeout = 5f64;
     let mut reference: Option<String> = None;
+    let mut remote: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -36,6 +37,16 @@ pub fn run(args: &[String]) -> CliResult {
                 }
                 i += 2;
             }
+            "--remote" => {
+                match args.get(i + 1).filter(|p| !p.starts_with('-')) {
+                    Some(peer) => remote = Some(peer.clone()),
+                    None => {
+                        eprintln!("pty peek --remote requires a <peer>.");
+                        return Ok(1);
+                    }
+                }
+                i += 2;
+            }
             "-t" | "--timeout" => {
                 timeout = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5.0);
                 i += 2;
@@ -50,6 +61,43 @@ pub fn run(args: &[String]) -> CliResult {
         eprintln!("Usage: pty peek [--plain] [--full] [-f] [--wait <text>] [-t <seconds>] <name>");
         return Ok(1);
     };
+    if let Some(peer) = remote {
+        // `--wait` polls the peer repeatedly, which the one-request route
+        // cannot do; Node says so rather than hanging.
+        if !wait.is_empty() {
+            eprintln!("pty peek --wait is not supported with --remote yet.");
+            return Ok(1);
+        }
+        // The reference belongs to the peer, so it stays unresolved here.
+        let socket = match client::remote::dial_and_route(&peer, &reference) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("pty peek --remote {peer}: {e}");
+                return Ok(1);
+            }
+        };
+        let params = client::PeekParams {
+            name: &reference,
+            plain,
+            full,
+            socket: Some(socket),
+        };
+        let io = client::ClientIo::default();
+        let outcome = if follow {
+            client::follow(params, &io)
+        } else {
+            client::peek(params, &io)
+        };
+        return match outcome {
+            Ok(client::PeekOutcome::Exited(code)) => Ok(code.max(0)),
+            Ok(_) => Ok(0),
+            Err(e) => {
+                eprintln!("{e}");
+                Ok(1)
+            }
+        };
+    }
+
     let name = resolve_ref(&reference)?;
     if follow {
         let params = client::PeekParams { name: &name, plain, full, socket: None };
