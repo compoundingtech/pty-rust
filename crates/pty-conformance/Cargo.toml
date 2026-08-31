@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 libc.workspace = true
+portable-pty.workspace = true
 pty-core.workspace = true
 pty-testkit.workspace = true
 regex.workspace = true

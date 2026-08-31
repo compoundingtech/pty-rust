@@ -326,6 +326,7 @@ name = "pty-conformance"
 version = "0.13.0-rust"
 dependencies = [
  "libc",
+ "portable-pty",
  "pty-core",
  "pty-testkit",
  "regex",
