@@ -55,6 +55,54 @@ fn is_modifier(m: &str) -> bool {
     matches!(m, "ctrl" | "alt" | "shift")
 }
 
+/// The named keys, sorted, as the help text lists them.
+fn named_keys() -> String {
+    let mut names = [
+        "return", "enter", "tab", "escape", "esc", "space", "backspace", "delete", "up", "down",
+        "right", "left", "home", "end", "pageup", "pagedown",
+    ];
+    names.sort_unstable();
+    names.join(", ")
+}
+
+/// The sentence every key-spec error ends with.
+///
+/// node: src/keys.ts:22-25 (`KEY_SPEC_HELP`)
+fn key_spec_help() -> String {
+    format!(
+        "Use ctrl+u, ctrl-u, ctrl_u, or C-u; supported modifiers are ctrl, alt, and shift; \
+         supported keys are a-z, {}.",
+        named_keys()
+    )
+}
+
+/// `+`, `_` and `-` all separate a modifier from what follows it.
+///
+/// node: src/keys.ts:21 (`MODIFIER_SEPARATORS`)
+fn is_separator(c: char) -> bool {
+    c == '+' || c == '_' || c == '-'
+}
+
+/// `C-u` is the readline and tmux spelling of `ctrl+u`. The one-letter alias
+/// is scoped to a leading `C-`, so `C+u` keeps no surprise meaning.
+///
+/// node: src/keys.ts:47-53 (`normalizeModifier`)
+fn normalize_modifier(m: &str, index: usize, spec: &str) -> String {
+    let leading_c_dash = {
+        let mut chars = spec.chars();
+        matches!(chars.next(), Some(c) if c.eq_ignore_ascii_case(&'c'))
+            && matches!(chars.next(), Some('-'))
+    };
+    if m == "c" && index == 0 && leading_c_dash {
+        return "ctrl".to_string();
+    }
+    m.to_string()
+}
+
+fn is_supported_base(base: &str) -> bool {
+    key_map(base).is_some() || (base.len() == 1 && base.as_bytes()[0].is_ascii_lowercase())
+}
+
 /// xterm modifier parameter: `1 + bitmask(shift=1, alt=2, ctrl=4)`.
 fn modifier_param(mods: &HashSet<String>) -> u32 {
     1 + if mods.contains("shift") { 1 } else { 0 }
@@ -66,15 +114,58 @@ fn modifier_param(mods: &HashSet<String>) -> u32 {
 /// would send. Returns `Err` for unknown modifiers or keys.
 pub fn resolve_key(spec: &str) -> Result<String, KeyError> {
     let lower = spec.to_lowercase();
-    let mut parts: Vec<&str> = lower.split('+').collect();
-    // `pop()` on the last element as the base key.
+    let has_separator = lower.chars().any(is_separator);
+    let raw_parts: Vec<&str> = if has_separator {
+        lower.split(is_separator).collect()
+    } else {
+        vec![lower.as_str()]
+    };
+    let raw_base = *raw_parts.last().unwrap_or(&"");
+    let raw_mods: Vec<String> = raw_parts[..raw_parts.len().saturating_sub(1)]
+        .iter()
+        .enumerate()
+        .map(|(i, m)| normalize_modifier(m, i, spec))
+        .collect();
+
+    // A separator-bearing name could be both a named key and a modifier
+    // chord. Refuse the collision rather than silently pick one.
+    //
+    // node: src/keys.ts:73-82
+    let is_valid_chord = !raw_base.is_empty()
+        && !raw_mods.is_empty()
+        && raw_mods.iter().all(|m| !m.is_empty() && is_modifier(m))
+        && is_supported_base(raw_base);
+    if has_separator && key_map(&lower).is_some() && is_valid_chord {
+        return Err(KeyError(format!(
+            "Ambiguous key spec \"{spec}\": it is both a named key and a modifier chord. {}",
+            key_spec_help()
+        )));
+    }
+    if let Some(mapped) = key_map(&lower)
+        && !is_valid_chord
+    {
+        return Ok(mapped.to_string());
+    }
+
+    let mut parts = raw_parts;
     let base = parts.pop().unwrap_or("").to_string();
-    let mods: HashSet<String> = parts.iter().map(|s| s.to_string()).collect();
+    if base.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return Err(KeyError(format!(
+            "Incomplete key spec \"{spec}\". {}",
+            key_spec_help()
+        )));
+    }
+    let mods: HashSet<String> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, m)| normalize_modifier(m, i, spec))
+        .collect();
 
     for m in &mods {
         if !is_modifier(m) {
             return Err(KeyError(format!(
-                "Unknown modifier: \"{m}\" in key spec \"{spec}\""
+                "Unknown modifier: \"{m}\" in key spec \"{spec}\". {}",
+                key_spec_help()
             )));
         }
     }
@@ -85,7 +176,8 @@ pub fn resolve_key(spec: &str) -> Result<String, KeyError> {
 
     if mapped.is_none() && !is_letter {
         return Err(KeyError(format!(
-            "Unknown key: \"{base}\" in key spec \"{spec}\""
+            "Unknown key: \"{base}\" in key spec \"{spec}\". {}",
+            key_spec_help()
         )));
     }
 
