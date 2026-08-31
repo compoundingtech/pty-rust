@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use pty_terminal::{AttachOptions, HandleEvent, Range, SessionRef, SpawnOptions, TerminalHandle};
@@ -117,7 +118,17 @@ struct Rig {
 impl Rig {
     fn new() -> Option<Rig> {
         let bin = pty_bin()?;
-        let root = std::env::temp_dir().join(format!("pty-handle-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
+        // A counter, not a clock: `Instant::now().elapsed()` is however long
+        // those two calls took, which is nanoseconds and often the same
+        // number twice. Every rig in this process was getting the same
+        // directory, so tests running in parallel shared a registry and
+        // fought over the session id they all use.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "pty-handle-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&root).ok()?;
         Some(Rig { bin, root })
     }
