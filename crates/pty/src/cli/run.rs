@@ -18,6 +18,8 @@ pub fn run(args: &[String]) -> CliResult {
     let mut background = false;
     let mut force = false;
     let mut ephemeral = false;
+    let mut attach_existing = false;
+    let mut no_display_name = false;
     let mut isolate_env = false;
     let mut tags = TagMap::new();
     let mut extra_env = EnvMap::new();
@@ -109,8 +111,12 @@ pub fn run(args: &[String]) -> CliResult {
                 isolate_env = true;
                 i += 1;
             }
-            "-a" | "--attach" | "--no-display-name" => {
-                // Accepted for CLI compatibility.
+            "-a" | "--attach" => {
+                attach_existing = true;
+                i += 1;
+            }
+            "--no-display-name" => {
+                no_display_name = true;
                 i += 1;
             }
             "--" => {
@@ -136,6 +142,28 @@ pub fn run(args: &[String]) -> CliResult {
         && !force
         && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false)
     {
+        // A plain nested `run` executes in place. `-a` is narrower: it asked
+        // to attach if the target is already running, and attaching would
+        // nest a client, so that case refuses instead.
+        if attach_existing
+            && let Some(reference) = id.as_ref().or(display_name.as_ref())
+        {
+            let existing = match &id {
+                Some(explicit) => registry::get_session_by_name(explicit),
+                None => registry::get_session(reference).ok().flatten(),
+            };
+            if existing.is_some_and(|s| s.status == registry::SessionStatus::Running)
+                && let Some(code) = super::ensure_not_nested(
+                    "run -a",
+                    false,
+                    Some(&format!(
+                        "  Target session \"{reference}\" is already running; attaching would nest a client inside the current session.\n  Pass --force to attach anyway, or detach first (Ctrl+\\) and re-run from outside."
+                    )),
+                )
+            {
+                return Ok(code);
+            }
+        }
         let nested = std::env::var("PTY_SESSION").unwrap_or_default();
         eprintln!("Already inside pty session \"{nested}\", running directly.");
         let (program, pargs) = command.split_first().unwrap();
@@ -158,21 +186,39 @@ pub fn run(args: &[String]) -> CliResult {
         return Ok(c.status().ok().and_then(|s| s.code()).unwrap_or(1));
     }
 
-    let name = id.unwrap_or_else(registry::generate_id);
+    let name = id.clone().unwrap_or_else(registry::generate_id);
     if let Err(e) = registry::validate_name(&name) {
         eprintln!("{e}");
         return Ok(1);
     }
-    if registry::session_exists(&name) && client::is_alive(&name) {
+    // Under `-a` a collision with an existing session is the expected path,
+    // so the uniqueness check is left to the create step below.
+    if !attach_existing && registry::session_exists(&name) && client::is_alive(&name) {
         eprintln!("Session id \"{name}\" is already in use.");
         return Ok(1);
     }
 
-    let cwd = cwd.unwrap_or_else(|| crate::daemon::default_cwd().to_string_lossy().into_owned());
+    // Display name precedence: --no-display-name wins, then --name, then a
+    // label built from the working directory and the command.
+    //
+    // node: src/cli.ts:955-974
+    let display_name = if no_display_name {
+        None
+    } else if let Some(explicit) = display_name {
+        if let Err(msg) = registry::validate_display_name(&explicit) {
+            eprintln!("Invalid displayName: {msg}");
+            return Ok(1);
+        }
+        Some(explicit)
+    } else {
+        Some(auto_display_name(&command))
+    };
 
     let (program, pargs) = command.split_first().unwrap();
     let mut params = SpawnParams::new(&name, program, pargs);
-    params.cwd = cwd;
+    params.cwd = cwd
+        .clone()
+        .unwrap_or_else(|| crate::daemon::default_cwd().to_string_lossy().into_owned());
     if let Some(r) = rows {
         params.rows = r;
     }
@@ -186,14 +232,178 @@ pub fn run(args: &[String]) -> CliResult {
     params.extra_env = extra_env;
     params.unset_env = unset_env;
 
-    match super::spawn_daemon(&params) {
-        Ok(()) => {
-            println!("{name}");
-            Ok(0)
-        }
-        Err(msg) => {
-            eprintln!("pty run: {msg}");
-            Ok(1)
+    create_or_attach(&name, params, cwd.is_some(), background, attach_existing)
+}
+
+/// A label built from the working directory and the command, the way Node
+/// builds one when `--name` is absent.
+///
+/// node: src/cli.ts:651-668 (`autoName`), 971-972 (the sanitize pass)
+fn auto_display_name(command: &[String]) -> String {
+    let dir_part = std::env::current_dir()
+        .ok()
+        .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let cmd_base = base_name(&command[0]);
+    let mut cmd_part = cmd_base.clone();
+    if let Some(first_arg) = command[1..]
+        .iter()
+        .find(|a| !a.starts_with('-') && a.chars().count() < 30)
+    {
+        let arg_base = strip_extension(&base_name(first_arg));
+        if !arg_base.is_empty()
+            && arg_base
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            cmd_part = format!("{cmd_base}-{arg_base}");
         }
     }
+    sanitize_label(&format!("{dir_part}-{cmd_part}"))
+}
+
+fn base_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Drop a trailing `.ext`, as `replace(/\.[^.]+$/, "")` does.
+fn strip_extension(name: &str) -> String {
+    match name.rfind('.') {
+        Some(at) if at > 0 && !name[at + 1..].contains('.') => name[..at].to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// Everything outside `[a-zA-Z0-9._-]` becomes `-`, runs of `-` collapse,
+/// and leading and trailing `-` go.
+fn sanitize_label(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// `cmdRun`: take the creation lock, decide between attaching to what is
+/// already there and creating a session, and carry a gone session's settings
+/// into its replacement.
+///
+/// node: src/cli.ts:1664-1769
+fn create_or_attach(
+    name: &str,
+    mut params: SpawnParams,
+    explicit_cwd: bool,
+    detach: bool,
+    attach_existing: bool,
+) -> CliResult {
+    // A caller that already holds the creation lock for us (the bundled
+    // library's CLI fallback) passes its pid. It is a one-hop control value,
+    // never session environment.
+    let delegated_owner: Option<i32> = std::env::var("PTY_CREATION_LOCK_OWNER_PID")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let inherited_creation_lock =
+        delegated_owner.is_some_and(|pid| registry::is_lock_owned_by_pid(name, pid));
+    // SAFETY: single-threaded at this point.
+    unsafe { std::env::remove_var("PTY_CREATION_LOCK_OWNER_PID") };
+
+    let mut session = registry::get_session_by_name(name);
+    let mut event_lock = None;
+    let mut creation_lock = None;
+    if !inherited_creation_lock {
+        let Some(guard) = registry::acquire_event_lock(name) else {
+            eprintln!("Session \"{name}\" event log is busy. Try again.");
+            return Ok(1);
+        };
+        event_lock = Some(guard);
+        let Some(guard) = registry::acquire_lock(name) else {
+            registry::release_event_lock(name);
+            eprintln!("Session \"{name}\" is being created by another process. Try again.");
+            return Ok(1);
+        };
+        creation_lock = Some(guard);
+        session = registry::get_session_by_name(name);
+    }
+
+    if session
+        .as_ref()
+        .is_some_and(|s| s.status == registry::SessionStatus::Running)
+    {
+        drop(creation_lock);
+        if event_lock.take().is_some() {
+            registry::release_event_lock(name);
+        }
+        if attach_existing {
+            println!("Session \"{name}\" already running, attaching.");
+            return Ok(super::attach::do_attach(name, None));
+        }
+        eprintln!(
+            "Session \"{name}\" is already running. Use \"pty attach {name}\" to connect."
+        );
+        return Ok(1);
+    }
+
+    // Recreating a session that has stopped keeps what the last incarnation
+    // was given, so `run -a` brings it back feeling the same. Anything the
+    // command line supplied wins.
+    let gone = session
+        .as_ref()
+        .filter(|s| s.is_gone())
+        .and_then(|s| s.metadata.clone());
+    if let Some(previous) = &gone {
+        if !explicit_cwd && !previous.cwd.is_empty() {
+            params.cwd = previous.cwd.clone();
+        }
+        if params.tags.is_empty()
+            && let Some(previous_tags) = &previous.tags
+        {
+            params.tags = previous_tags.clone();
+        }
+        if params.display_name.is_none() {
+            params.display_name = previous.display_name.clone();
+        }
+        if params.extra_env.is_empty()
+            && let Some(previous_env) = &previous.extra_env
+        {
+            params.extra_env = previous_env.clone();
+        }
+        if params.unset_env.is_empty()
+            && let Some(previous_unset) = &previous.unset_env
+        {
+            params.unset_env = previous_unset.clone();
+        }
+    }
+    if gone.is_some() && !inherited_creation_lock {
+        registry::cleanup_all_while_locked(name);
+    }
+    if event_lock.take().is_some() {
+        registry::release_event_lock(name);
+    }
+
+    params.creation_lock_owner_pid = Some(match delegated_owner {
+        Some(pid) if inherited_creation_lock => pid,
+        _ => std::process::id() as i32,
+    });
+    let spawned = super::spawn_daemon(&params);
+    drop(creation_lock);
+    if let Err(msg) = spawned {
+        eprintln!("pty run: {msg}");
+        return Ok(1);
+    }
+
+    println!("Session \"{name}\" created.");
+    if detach {
+        return Ok(0);
+    }
+    Ok(super::attach::do_attach(name, None))
 }

@@ -24,6 +24,23 @@ pub mod tree;
 use std::path::PathBuf;
 
 pub use config::DaemonConfig;
+
+/// Write a diagnostic line to stderr and carry on if nobody is listening.
+///
+/// The CLI that launches a daemon pipes its stderr and reads it only until
+/// the session is published, so that it can report a daemon that died on the
+/// way up. After the CLI exits, the read end is gone and every write returns
+/// `EPIPE`. `eprintln!` panics on that, which killed whichever daemon thread
+/// happened to be reporting something — including the reader thread that
+/// drops a client for sending an oversized frame. Node's daemon ignores the
+/// same error, so this does too.
+macro_rules! daemon_warn {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+pub(crate) use daemon_warn;
 #[allow(unused_imports)]
 pub use launch::{SpawnError, SpawnParams, SpawnedDaemon, set_process_title, spawn_daemon};
 
