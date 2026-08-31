@@ -13,7 +13,8 @@
 //! `pty_terminal::screenshot`. Both are re-exported here only as far as the
 //! `Session` API needs them.
 
+pub mod server;
 pub mod session;
 
 pub use pty_terminal::Screenshot;
-pub use session::{Session, SpawnOptions, build_spawn_env};
+pub use session::{ServerOptions, Session, SpawnOptions, build_spawn_env};

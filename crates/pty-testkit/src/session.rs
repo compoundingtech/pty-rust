@@ -66,18 +66,44 @@ pub fn build_spawn_env(
     env
 }
 
+/// How long the `_default` waits allow, matching the Node package.
+pub const DEFAULT_WAIT_MS: u64 = 10_000;
+
 /// A spawned terminal session driving a real process through a PTY, with a
 /// libghostty terminal tracking the screen state.
 pub struct Session {
     /// The libghostty terminal, owned by the actor (query answers, mode
     /// tracking, and the one serializer shared with the daemon).
     actor: TerminalActor,
-    master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     rx: Receiver<Vec<u8>>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    backing: Backing,
     rows: u16,
     cols: u16,
+}
+
+/// What is on the other end: a process this library started, or a session a
+/// `pty` daemon owns.
+enum Backing {
+    Pty {
+        master: Box<dyn MasterPty + Send>,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+    },
+    Server(Box<crate::server::ServerBacking>),
+}
+
+/// How [`Session::server`] creates or finds a session.
+#[derive(Debug, Clone, Default)]
+pub struct ServerOptions {
+    /// The session id. A random one when absent.
+    pub name: Option<String>,
+    pub rows: Option<u16>,
+    pub cols: Option<u16>,
+    pub cwd: Option<String>,
+    /// Passed through as `--env KEY=VALUE`.
+    pub env: Vec<(String, String)>,
+    /// The registry to use. A temporary one when absent, removed on close.
+    pub root: Option<std::path::PathBuf>,
 }
 
 impl Session {
@@ -155,13 +181,170 @@ impl Session {
 
         Ok(Session {
             actor,
-            master: pair.master,
             writer,
             rx,
-            child,
+            backing: Backing::Pty {
+                master: pair.master,
+                child,
+            },
             rows,
             cols,
         })
+    }
+
+    /// Create a session through the `pty` binary and drive it over its
+    /// socket. The screen arrives as frames rather than from a pty this
+    /// process owns, so this is what a real client sees.
+    ///
+    /// The binary is `PTY_BIN`, else `pty` on PATH.
+    pub fn server(command: &str, args: &[&str], opts: ServerOptions) -> std::io::Result<Session> {
+        let rows = opts.rows.unwrap_or(24);
+        let cols = opts.cols.unwrap_or(80);
+        let name = opts.name.clone().unwrap_or_else(crate::server::random_id);
+        let bin = crate::server::pty_bin();
+        let owns_root = opts.root.is_none();
+        let root = match opts.root.clone() {
+            Some(root) => root,
+            None => {
+                // Short: a session socket path has to fit 104 bytes.
+                let dir = std::env::temp_dir().join(format!("pt-{}", crate::server::random_id()));
+                std::fs::create_dir_all(&dir)?;
+                dir
+            }
+        };
+        crate::server::spawn_daemon(
+            &bin,
+            &root,
+            &name,
+            command,
+            args,
+            rows,
+            cols,
+            opts.cwd.as_deref(),
+            &opts.env,
+        )?;
+        Session::connect_at(&bin, root, name, rows, cols, true, owns_root)
+    }
+
+    /// Attach to a session that already exists, without owning it: closing
+    /// this handle leaves the session running.
+    pub fn connect(name: &str, rows: u16, cols: u16, root: std::path::PathBuf) -> std::io::Result<Session> {
+        Session::connect_at(
+            &crate::server::pty_bin(),
+            root,
+            name.to_string(),
+            rows,
+            cols,
+            false,
+            false,
+        )
+    }
+
+    /// A second client on the same session, at its own size. The daemon
+    /// gives every client the smallest requested geometry.
+    pub fn connect_to_existing(other: &Session, rows: u16, cols: u16) -> std::io::Result<Session> {
+        let Backing::Server(server) = &other.backing else {
+            return Err(std::io::Error::other(
+                "connect_to_existing needs a server-mode session",
+            ));
+        };
+        Session::connect_at(
+            &server.bin,
+            server.root.clone(),
+            server.name.clone(),
+            rows,
+            cols,
+            false,
+            false,
+        )
+    }
+
+    fn connect_at(
+        bin: &str,
+        root: std::path::PathBuf,
+        name: String,
+        rows: u16,
+        cols: u16,
+        owned: bool,
+        owns_root: bool,
+    ) -> std::io::Result<Session> {
+        let actor = TerminalActor::new(rows, cols, pty_terminal::actor::DEFAULT_SCROLLBACK);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (socket, state) = crate::server::connect(&root, &name, rows, cols, tx)?;
+        let writer = Box::new(crate::server::DataFramer(socket.try_clone()?));
+        Ok(Session {
+            actor,
+            writer,
+            rx,
+            backing: Backing::Server(Box::new(crate::server::ServerBacking {
+                name,
+                root,
+                bin: bin.to_string(),
+                socket,
+                state,
+                owned,
+                owns_root,
+            })),
+            rows,
+            cols,
+        })
+    }
+
+    /// The session's id. Empty for a spawned process, which has none.
+    pub fn name(&self) -> &str {
+        match &self.backing {
+            Backing::Server(server) => &server.name,
+            Backing::Pty { .. } => "",
+        }
+    }
+
+    /// The registry this session lives in, for a server-mode session.
+    pub fn root(&self) -> Option<&std::path::Path> {
+        match &self.backing {
+            Backing::Server(server) => Some(&server.root),
+            Backing::Pty { .. } => None,
+        }
+    }
+
+    /// The exit status, once the session has ended.
+    pub fn exit_code(&self) -> Option<i32> {
+        match &self.backing {
+            Backing::Server(server) => server
+                .state
+                .exited
+                .load(std::sync::atomic::Ordering::Acquire)
+                .then(|| server.state.exit_code.load(std::sync::atomic::Ordering::Relaxed)),
+            Backing::Pty { .. } => None,
+        }
+    }
+
+    /// Drop this client and open a new one, the way a client that lost its
+    /// connection would. The screen is rebuilt from the daemon's replay.
+    pub fn reconnect(&mut self) -> std::io::Result<()> {
+        let Backing::Server(server) = &mut self.backing else {
+            return Err(std::io::Error::other("reconnect needs a server-mode session"));
+        };
+        let (bin, root, name) = (server.bin.clone(), server.root.clone(), server.name.clone());
+        let (owned, owns_root) = (server.owned, server.owns_root);
+        let _ = server.socket.shutdown(std::net::Shutdown::Both);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let actor = TerminalActor::new(self.rows, self.cols, pty_terminal::actor::DEFAULT_SCROLLBACK);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (socket, state) = crate::server::connect(&root, &name, self.rows, self.cols, tx)?;
+        self.writer = Box::new(crate::server::DataFramer(socket.try_clone()?));
+        self.actor = actor;
+        self.rx = rx;
+        self.backing = Backing::Server(Box::new(crate::server::ServerBacking {
+            name,
+            root,
+            bin,
+            socket,
+            state,
+            owned,
+            owns_root,
+        }));
+        Ok(())
     }
 
     /// Drain all currently-available PTY output into the terminal, then flush
@@ -185,14 +368,21 @@ impl Session {
 
     // ── Properties ──
 
-    /// Current terminal height in rows.
+    /// Current terminal height in rows. In server mode this is the size the
+    /// daemon settled on, which may be smaller than the one requested.
     pub fn rows(&self) -> u16 {
-        self.rows
+        match &self.backing {
+            Backing::Server(server) => server.state.rows.load(std::sync::atomic::Ordering::Relaxed),
+            Backing::Pty { .. } => self.rows,
+        }
     }
 
-    /// Current terminal width in columns.
+    /// Current terminal width in columns. See [`Session::rows`].
     pub fn cols(&self) -> u16 {
-        self.cols
+        match &self.backing {
+            Backing::Server(server) => server.state.cols.load(std::sync::atomic::Ordering::Relaxed),
+            Backing::Pty { .. } => self.cols,
+        }
     }
 
     // ── Input ──
@@ -287,35 +477,62 @@ impl Session {
 
     // ── Resize ──
 
-    /// Resize both the PTY and the terminal emulator.
+    /// Resize the far end and the terminal emulator together.
+    ///
+    /// In server mode the daemon decides the size — every client asks and
+    /// the smallest wins — so `rows()` and `cols()` follow its answer rather
+    /// than what was requested here.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.rows = rows;
         self.cols = cols;
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        match &mut self.backing {
+            Backing::Pty { master, .. } => {
+                let _ = master.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+            Backing::Server(server) => server.resize(rows, cols),
+        }
         self.actor.resize(cols, rows);
     }
 
     // ── Lifecycle ──
 
-    /// True if the child process has exited.
+    /// True once the process on the far end has exited.
     pub fn has_exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        match &mut self.backing {
+            Backing::Pty { child, .. } => matches!(child.try_wait(), Ok(Some(_))),
+            Backing::Server(server) => server.state.exited.load(std::sync::atomic::Ordering::Acquire),
+        }
     }
 
-    /// Kill the child process and clean up.
+    /// Stop the session and clean up after it.
+    ///
+    /// A spawned process is killed. A session this handle created is killed
+    /// and removed through the `pty` binary, so the daemon records its exit
+    /// the way it would for any caller; a session this handle merely
+    /// connected to is left running.
     pub fn close(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match &mut self.backing {
+            Backing::Pty { child, .. } => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Backing::Server(server) => server.close(),
+        }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        match &mut self.backing {
+            Backing::Pty { child, .. } => {
+                let _ = child.kill();
+            }
+            Backing::Server(server) => server.close(),
+        }
     }
 }
