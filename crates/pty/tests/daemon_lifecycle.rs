@@ -428,7 +428,7 @@ fn kill_terminates_a_deep_tree_and_releases_the_name() {
     let (first_pid, first_ready) = (root.join("first.pid"), root.join("first.ready"));
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "--id", &name, "--", tree.to_str().unwrap(), "launcher",
+        &["run", "-d", "--id", &name, "--", tree.to_str().unwrap(), "launcher",
           first_pid.to_str().unwrap(), first_ready.to_str().unwrap()],
         &[],
     );
@@ -445,7 +445,7 @@ fn kill_terminates_a_deep_tree_and_releases_the_name() {
     let (second_pid, second_ready) = (root.join("second.pid"), root.join("second.ready"));
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "--id", &name, "--", tree.to_str().unwrap(), "launcher",
+        &["run", "-d", "--id", &name, "--", tree.to_str().unwrap(), "launcher",
           second_pid.to_str().unwrap(), second_ready.to_str().unwrap()],
         &[],
     );
@@ -467,7 +467,7 @@ fn run_waits_for_the_publication_of_the_replacement() {
     let _s = serial();
     let root = short_root();
     let name = unique_name("ready");
-    let (_o, e, code) = run_pty(&root, &["run", "--id", &name, "--", "sh", "-c", "exit 3"], PRESERVE);
+    let (_o, e, code) = run_pty(&root, &["run", "-d", "--id", &name, "--", "sh", "-c", "exit 3"], PRESERVE);
     assert_eq!(code, 0, "{e}");
     let m = read_meta(&root, &name).unwrap();
     let pid = m["daemonPid"].as_i64().unwrap() as i32;
@@ -475,7 +475,7 @@ fn run_waits_for_the_publication_of_the_replacement() {
     assert!(wait_dead(pid, T));
     let old_generation = m["generation"].clone();
 
-    let (_o, e, code) = run_pty(&root, &["run", "--id", &name, "--", "sleep", "30"], PRESERVE);
+    let (_o, e, code) = run_pty(&root, &["run", "-d", "--id", &name, "--", "sleep", "30"], PRESERVE);
     assert_eq!(code, 0, "{e}");
     let m = read_meta(&root, &name).unwrap();
     let new_pid = m["daemonPid"].as_i64().unwrap() as i32;
@@ -500,13 +500,13 @@ fn run_reports_an_immediately_exiting_daemon_with_its_stderr() {
     let name = unique_name("early");
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "--id", &name, "--cwd", "/no/such/dir/here", "--", "sleep", "30"],
+        &["run", "-d", "--id", &name, "--cwd", "/no/such/dir/here", "--", "sleep", "30"],
         &[],
     );
     assert_ne!(code, 0);
     assert!(e.contains("Daemon process exited immediately (code 1)."), "{e}");
     assert!(e.contains("Working directory does not exist: /no/such/dir/here"), "{e}");
-    let (_o, e, code) = run_pty(&root, &["run", "--id", &name, "--", "no-such-command-xyz"], &[]);
+    let (_o, e, code) = run_pty(&root, &["run", "-d", "--id", &name, "--", "no-such-command-xyz"], &[]);
     assert_ne!(code, 0);
     assert!(e.contains("Command not found: no-such-command-xyz"), "{e}");
 }
@@ -526,7 +526,7 @@ fn node_attach_stream_against_the_rust_daemon() {
     let name = unique_name("node");
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "--id", &name, "--", "sh", "-c", "echo LAUNCHER_READY; sleep 0.5; echo tail; exit 3"],
+        &["run", "-d", "--id", &name, "--", "sh", "-c", "echo LAUNCHER_READY; sleep 0.5; echo tail; exit 3"],
         &[],
     );
     assert_eq!(code, 0, "{e}");

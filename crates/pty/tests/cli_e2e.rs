@@ -36,6 +36,12 @@ fn unique_root() -> PathBuf {
     dir
 }
 
+/// The stable id out of `Session "<id>" created.` — what `pty run -d`
+/// prints now that it speaks Node's text.
+fn created_id(stdout: &str) -> String {
+    stdout.split('"').nth(1).unwrap_or_default().to_string()
+}
+
 /// Run a `pty` subcommand with the given registry root; return
 /// `(stdout, stderr, exit_code)`, all trimmed.
 fn run_pty(root: &PathBuf, args: &[&str]) -> (String, String, i32) {
@@ -82,8 +88,9 @@ fn run_ls_peek_send_kill_lifecycle() {
     // Spawn a persistent bash session.
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "--rows", "24", "--cols", "80", "--", "bash", "--norc", "--noprofile"],
+        &["run", "-d", "--rows", "24", "--cols", "80", "--", "bash", "--norc", "--noprofile"],
     );
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert!(!name.is_empty(), "run printed no session name");
 
@@ -194,8 +201,9 @@ fn restart_rename_rm() {
     // A session that prints its own pid so we can tell restarts apart.
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "--id", "svc", "--", "sh", "-c", "echo pid-$$; cat"],
+        &["run", "-d", "--id", "svc", "--", "sh", "-c", "echo pid-$$; cat"],
     );
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "svc");
 
@@ -225,7 +233,10 @@ fn restart_rename_rm() {
     assert!(peek.contains("pid-"), "rename lookup failed:\n{peek}");
 
     // restart respawns with a new pid.
-    let (_o, _e, code) = run_pty(&root, &["restart", "svc"]);
+    // `pty restart` attaches after the respawn. Run it as a session would,
+    // so it takes the documented "not attached" path instead of blocking.
+    let (_o, _e, code) =
+        run_pty_env(&root, &["restart", "-y", "svc"], &[("PTY_SESSION", "outer")]);
     assert_eq!(code, 0, "restart failed: {_e}");
     let pid2 = wait_pid(&pid1);
     assert_ne!(pid1, pid2, "restart should change the pid");
@@ -260,6 +271,7 @@ fn peek_follow_streams_live_output() {
         &root,
         &[
             "run",
+            "-d",
             "--id",
             "fol",
             "--",
@@ -268,6 +280,7 @@ fn peek_follow_streams_live_output() {
             "for i in 1 2 3; do echo streamed-$i; sleep 0.3; done; sleep 30",
         ],
     );
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "fol");
 
@@ -303,7 +316,7 @@ fn stats_json_matches_node_contract() {
     let root = unique_root();
     let (_n, _e, code) = run_pty(
         &root,
-        &["run", "--id", "sj", "--rows", "30", "--cols", "100", "--", "cat"],
+        &["run", "-d", "--id", "sj", "--rows", "30", "--cols", "100", "--", "cat"],
     );
     assert_eq!(code, 0);
     // wait until up
@@ -353,7 +366,7 @@ fn stats_json_matches_node_contract() {
 
     // Exited session (preserve mode) → the small gone shape.
     let (_n, _e, code) =
-        run_pty_env(&root, &["run", "--id", "sg", "--", "sh", "-c", "exit 6"], PRESERVE);
+        run_pty_env(&root, &["run", "-d", "--id", "sg", "--", "sh", "-c", "exit 6"], PRESERVE);
     assert_eq!(code, 0);
     let start = Instant::now();
     let mut gone = String::new();
@@ -397,7 +410,7 @@ fn ls_json_matches_node_shape() {
     // unset; status enum running|exited|vanished.
     let _serial = serial();
     let root = unique_root();
-    let (_n, _e, code) = run_pty(&root, &["run", "--id", "jr", "--", "cat"]);
+    let (_n, _e, code) = run_pty(&root, &["run", "-d", "--id", "jr", "--no-display-name", "--", "cat"]);
     assert_eq!(code, 0);
     // Wait until it's up.
     let start = Instant::now();
@@ -426,7 +439,7 @@ fn ls_json_matches_node_shape() {
 
     // Exited session (preserve mode so it stays visible as exited).
     let (_n, _e, code) =
-        run_pty_env(&root, &["run", "--id", "je", "--", "sh", "-c", "exit 5"], PRESERVE);
+        run_pty_env(&root, &["run", "-d", "--id", "je", "--no-display-name", "--", "sh", "-c", "exit 5"], PRESERVE);
     assert_eq!(code, 0);
     let start = Instant::now();
     let mut exited_json = String::new();
@@ -454,8 +467,9 @@ fn default_reap_removes_session_on_self_exit() {
     let root = unique_root();
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "--id", "rp", "--", "sh", "-c", "echo GONE; exit 3"],
+        &["run", "-d", "--id", "rp", "--", "sh", "-c", "echo GONE; exit 3"],
     );
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "rp");
     // Give the daemon time to run + reap.
@@ -476,7 +490,8 @@ fn external_kill_preserves_session() {
     // (status=exited) even under the default reap config — only self-exit reaps.
     let _serial = serial();
     let root = unique_root();
-    let (name, _e, code) = run_pty(&root, &["run", "--id", "ek", "--", "cat"]);
+    let (name, _e, code) = run_pty(&root, &["run", "-d", "--id", "ek", "--", "cat"]);
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "ek");
     // Wait until up, then kill.
@@ -504,9 +519,10 @@ fn post_exit_peek_returns_final_screen() {
     let root = unique_root();
     let (name, _e, code) = run_pty_env(
         &root,
-        &["run", "--id", "px", "--", "sh", "-c", "echo FINAL-OUTPUT-LINE; exit 7"],
+        &["run", "-d", "--id", "px", "--", "sh", "-c", "echo FINAL-OUTPUT-LINE; exit 7"],
         PRESERVE,
     );
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "px");
 
@@ -545,7 +561,7 @@ fn run_force_creates_nested_session() {
 
     // --force alone (no -d), nested, creates a real session.
     let out = Command::new(pty_bin())
-        .args(["run", "--force", "--id", "fc", "--", "cat"])
+        .args(["run", "-d", "--force", "--id", "fc", "--", "cat"])
         .env("PTY_ROOT", &root)
         .env("PTY_SESSION", "fake-parent")
         .output()
@@ -556,7 +572,7 @@ fn run_force_creates_nested_session() {
         "run --force failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fc");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Session \"fc\" created.");
     let ls = ok_pty(&root, &["ls"]);
     assert!(
         ls.contains("fc") && ls.contains("Active sessions:"),
@@ -565,13 +581,13 @@ fn run_force_creates_nested_session() {
 
     // --force -d also creates (belt-and-suspenders form used in the report).
     let out = Command::new(pty_bin())
-        .args(["run", "--force", "-d", "--id", "fd", "--", "cat"])
+        .args(["run", "-d", "--force", "-d", "--id", "fd", "--", "cat"])
         .env("PTY_ROOT", &root)
         .env("PTY_SESSION", "fake-parent")
         .output()
         .expect("spawn pty");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "fd");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Session \"fd\" created.");
     let ls = ok_pty(&root, &["ls"]);
     assert!(ls.contains("fd") && ls.contains("Active sessions:"), "ls:\n{ls}");
 
@@ -587,7 +603,8 @@ fn attach_double_tap_ctrl_backslash_sends_literal_not_detach() {
     let root_str = root.to_string_lossy().to_string();
 
     // `cat` echoes its input, so we can observe that we're still attached.
-    let (name, _e, code) = run_pty(&root, &["run", "--id", "dt", "--", "cat"]);
+    let (name, _e, code) = run_pty(&root, &["run", "-d", "--id", "dt", "--", "cat"]);
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
     assert_eq!(name, "dt");
 
@@ -660,7 +677,7 @@ fn nesting_prevention_runs_directly_inside_a_session() {
         .output()
         .expect("spawn pty");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nbg");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Session \"nbg\" created.");
     let ls = ok_pty(&root, &["ls"]);
     assert!(ls.contains("nbg") && ls.contains("Active sessions:"), "ls:\n{ls}");
 
@@ -677,8 +694,9 @@ fn attach_is_interactive_and_detaches() {
     // Spawn a session to attach to.
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "--rows", "24", "--cols", "80", "--", "bash", "--norc", "--noprofile"],
+        &["run", "-d", "--rows", "24", "--cols", "80", "--", "bash", "--norc", "--noprofile"],
     );
+    let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
 
     // Drive `pty attach` THROUGH the libghostty harness (real PTY stdin/stdout).

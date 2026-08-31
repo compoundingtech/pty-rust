@@ -229,7 +229,7 @@ fn shared_parity_fixtures_pass() {
 
         let root = unique_root(id);
         let mut run_args: Vec<&str> =
-            vec!["run", "--id", id, "--rows", &rows, "--cols", &cols, "--"];
+            vec!["run", "-d", "--id", id, "--rows", &rows, "--cols", &cols, "--"];
         run_args.push(command);
         for a in &args {
             run_args.push(a);
