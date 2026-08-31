@@ -8,6 +8,7 @@
 
 mod cli;
 mod daemon;
+mod interactive;
 mod remote;
 
 fn main() {

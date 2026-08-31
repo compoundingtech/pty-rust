@@ -18,6 +18,7 @@ libghostty-vt.workspace = true
 portable-pty.workspace = true
 pty-core.workspace = true
 pty-terminal.workspace = true
+pty-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook = "0.3.18"

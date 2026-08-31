@@ -185,10 +185,9 @@ pub fn interactive(opts: InteractiveOptions) -> CliResult {
     run_interactive(opts)
 }
 
-/// The picker entry point (replaced by the TUI crate's `interactive::run`).
-fn run_interactive(_opts: InteractiveOptions) -> CliResult {
-    eprintln!("pty interactive: not implemented yet");
-    Ok(1)
+/// The picker itself.
+fn run_interactive(opts: InteractiveOptions) -> CliResult {
+    Ok(crate::interactive::run(opts))
 }
 
 /// Node's `main()`: returns the process exit code.

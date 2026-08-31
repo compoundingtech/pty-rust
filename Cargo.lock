@@ -1091,6 +1091,7 @@ dependencies = [
  "pty-core",
  "pty-terminal",
  "pty-testkit",
+ "pty-tui",
  "regex",
  "serde",
  "serde_json",
