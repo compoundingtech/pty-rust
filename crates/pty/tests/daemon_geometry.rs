@@ -54,6 +54,7 @@ fn settle(conns: &mut [&mut Conn]) {
 /// node: tests/effective-geometry.test.ts:152-176
 #[test]
 fn geometry_precedes_output_for_existing_and_smaller_attaching_clients() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = width_daemon();
     let mut large = d.connect();
@@ -75,6 +76,7 @@ fn geometry_precedes_output_for_existing_and_smaller_attaching_clients() {
 /// node: tests/effective-geometry.test.ts:178-214
 #[test]
 fn geometry_precedes_resize_and_disconnect_output() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = width_daemon();
     let mut large = d.connect();
@@ -104,6 +106,7 @@ fn geometry_precedes_resize_and_disconnect_output() {
 /// node: tests/effective-geometry.test.ts:217-250
 #[test]
 fn readonly_viewers_get_geometry_but_never_select_size() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = width_daemon();
     let mut writable = d.connect();
@@ -146,6 +149,7 @@ fn stty_size(c: &mut Conn, expect: &str) {
 /// node: tests/integration.test.ts:1330-1352
 #[test]
 fn uses_the_smallest_connected_client_size() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = stty_daemon();
     let mut c1 = d.connect();
@@ -161,6 +165,7 @@ fn uses_the_smallest_connected_client_size() {
 /// node: tests/integration.test.ts:1354-1375
 #[test]
 fn per_axis_minimum() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = stty_daemon();
     let mut c1 = d.connect();
@@ -175,6 +180,7 @@ fn per_axis_minimum() {
 /// node: tests/integration.test.ts:1377-1475
 #[test]
 fn size_recovers_on_disconnect_detach_and_resize() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = stty_daemon();
     let mut c1 = d.connect();

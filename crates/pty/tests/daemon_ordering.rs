@@ -24,6 +24,7 @@ fn cat_daemon(settle: &[(&str, &str)]) -> Daemon {
 /// node: tests/integration.test.ts:423-471
 #[test]
 fn live_data_during_attach_sync_is_folded_into_screen() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon(WIDE_SETTLE);
     let mut live = d.connect();
@@ -45,6 +46,7 @@ fn live_data_during_attach_sync_is_folded_into_screen() {
 /// node: tests/integration.test.ts:473-529
 #[test]
 fn pre_cut_data_is_not_lost() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start_env(
@@ -70,6 +72,7 @@ fn pre_cut_data_is_not_lost() {
 /// node: tests/integration.test.ts:531-616
 #[test]
 fn post_cut_data_precedes_post_cut_exit_with_exactly_one_exit() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(
@@ -109,6 +112,7 @@ fn post_cut_data_precedes_post_cut_exit_with_exactly_one_exit() {
 /// node: src/server.ts:992-993, 1248-1250; tests/integration.test.ts:618-699
 #[test]
 fn attach_after_exit_is_geometry_screen_exit() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(
@@ -128,6 +132,7 @@ fn attach_after_exit_is_geometry_screen_exit() {
 /// node: tests/integration.test.ts:701-762
 #[test]
 fn exit_during_sync_yields_one_exit_after_screen() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     // The window must stay inside the 500 ms exit grace, or the daemon
@@ -158,6 +163,7 @@ fn exit_during_sync_yields_one_exit_after_screen() {
 /// node: tests/integration.test.ts:764-800
 #[test]
 fn second_attach_supersedes_pending_attach() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon(&[]);
     let mut live = d.connect();
@@ -177,6 +183,7 @@ fn second_attach_supersedes_pending_attach() {
 /// node: tests/integration.test.ts:802-852
 #[test]
 fn peek_cancels_pending_attach_sync_and_stays_live() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon(WIDE_SETTLE);
     let mut live = d.connect();
@@ -206,6 +213,7 @@ fn peek_cancels_pending_attach_sync_and_stays_live() {
 /// node: tests/integration.test.ts:1477-1543
 #[test]
 fn malformed_and_unknown_packets_are_ignored() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon(&[]);
     let mut c = d.connect();
@@ -226,6 +234,7 @@ fn malformed_and_unknown_packets_are_ignored() {
 /// node: src/server.ts:918-928
 #[test]
 fn oversize_packet_header_drops_the_connection() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon(&[]);
     let mut c = d.connect();

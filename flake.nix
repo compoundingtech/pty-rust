@@ -122,12 +122,32 @@
               --fish completions/pty.fish
           '';
 
-          # The whole workspace runs in the sandbox: openpty works there. The
-          # socket tests build their registries under $TMPDIR, and a unix socket
-          # path is capped at 108 bytes, so the tests get a short one; the build
-          # directory's own name is already a third of that. A few tests read
-          # $HOME, and the sandbox HOME is not writable.
-          cargoTestFlags = [ "--workspace" ];
+          # What the sandbox can prove. openpty works there, so most of the
+          # suite runs: the socket tests build their registries under $TMPDIR,
+          # and a unix socket path is capped at 108 bytes, so the tests get a
+          # short one; the build directory's own name is already a third of
+          # that. A few tests read $HOME, and the sandbox HOME is not writable.
+          #
+          # Two groups are left out, and the sandbox is the reason rather than
+          # the software.
+          #
+          # `pty-conformance` compares this binary against the Node `pty`,
+          # which is not in the sandbox at all. With no oracle to compare
+          # against, running it here would prove nothing.
+          #
+          # The `daemon_*` tests drive a real daemon over its socket and wait
+          # on frames. Some of them time out or get a broken pipe in the
+          # sandbox and pass on a machine every time, in both profiles, so
+          # `PTY_SKIP_SOCKET_TESTS` stands them down here. The guard lives in
+          # `crates/pty/tests/daemon_support/mod.rs` with the measurement.
+          #
+          # Both groups run on a machine: `cargo test --workspace`, and
+          # `scripts/conformance-both.sh` for the side-by-side against Node.
+          cargoTestFlags = [
+            "--workspace"
+            "--exclude"
+            "pty-conformance"
+          ];
 
           # The testkit's line-editing tests drive readline through `bash`;
           # stdenv's bash is built without it, so the interactive one goes first
@@ -137,6 +157,7 @@
           preCheck = ''
             export TMPDIR=$(mktemp -d /tmp/pty.XXXXXX)
             export HOME=$(mktemp -d)
+            export PTY_SKIP_SOCKET_TESTS=1
           '';
 
           meta = {

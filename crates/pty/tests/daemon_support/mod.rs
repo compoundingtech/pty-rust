@@ -17,6 +17,25 @@ use pty_core::protocol::{
 };
 use serde_json::{Value, json};
 
+/// Skip a test that drives a real daemon over its socket.
+///
+/// These pass on a machine, in debug and in release, and some of them fail
+/// inside a Nix build sandbox: the geometry cases time out waiting for a
+/// GEOMETRY frame and a write to the daemon gets a broken pipe. Measured on
+/// 2026-08-31 — 6 of 6 outside the sandbox across six runs in both profiles,
+/// 3 of 6 inside it. Rather than let a build fail for a reason that is about
+/// the sandbox, `flake.nix` sets `PTY_SKIP_SOCKET_TESTS` and these step
+/// aside there. They always run under a plain `cargo test`.
+#[macro_export]
+macro_rules! skip_without_a_real_machine {
+    () => {
+        if std::env::var_os("PTY_SKIP_SOCKET_TESTS").is_some() {
+            eprintln!("skipped: PTY_SKIP_SOCKET_TESTS is set (see daemon_support)");
+            return;
+        }
+    };
+}
+
 pub fn pty_bin() -> &'static str {
     env!("CARGO_BIN_EXE_pty")
 }

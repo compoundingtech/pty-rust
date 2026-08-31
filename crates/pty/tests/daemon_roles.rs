@@ -22,6 +22,7 @@ fn cat_daemon() -> Daemon {
 /// node: tests/integration.test.ts:854-899
 #[test]
 fn peek_then_attach_makes_the_socket_writable() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut c = d.connect();
@@ -48,6 +49,7 @@ fn peek_then_attach_makes_the_socket_writable() {
 /// node: tests/integration.test.ts:901-959
 #[test]
 fn attach_then_peek_makes_the_socket_readonly() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut c = d.connect();
@@ -77,6 +79,7 @@ fn attach_then_peek_makes_the_socket_readonly() {
 /// node: tests/integration.test.ts:961-1019
 #[test]
 fn malformed_attach_changes_no_role() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut peeker = d.connect();
@@ -112,6 +115,7 @@ fn winch_reporter(root: &std::path::Path) -> (std::path::PathBuf, std::path::Pat
 /// node: tests/integration.test.ts:1021-1043
 #[test]
 fn attach_at_the_current_size_sends_no_sigwinch() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let (reporter, marker) = winch_reporter(&root);
@@ -130,6 +134,7 @@ fn attach_at_the_current_size_sends_no_sigwinch() {
 /// node: tests/integration.test.ts:1045-1065
 #[test]
 fn attach_at_a_different_size_nudges_a_redraw() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let (reporter, marker) = winch_reporter(&root);
@@ -152,6 +157,7 @@ fn attach_at_a_different_size_nudges_a_redraw() {
 /// node: tests/integration.test.ts:1103-1132
 #[test]
 fn peeker_data_is_ignored() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut writer = d.connect();
@@ -169,6 +175,7 @@ fn peeker_data_is_ignored() {
 /// node: tests/integration.test.ts:1134-1159
 #[test]
 fn peeker_resize_is_ignored() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut writer = d.connect();
@@ -188,6 +195,7 @@ fn peeker_resize_is_ignored() {
 /// node: tests/integration.test.ts:1161-1184
 #[test]
 fn peeker_receives_live_data() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut writer = d.connect();
@@ -208,6 +216,7 @@ fn peeker_receives_live_data() {
 /// node: tests/integration.test.ts:1186-1214; tests/screen-replay-altscreen.test.ts:62-83
 #[test]
 fn peek_captures_alt_screen_content_and_attach_prefixes_the_mode() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(
@@ -242,6 +251,7 @@ fn peek_captures_alt_screen_content_and_attach_prefixes_the_mode() {
 /// node: tests/integration.test.ts:2009-2066, 2120-2173; tests/stats-cli.test.ts:127-151
 #[test]
 fn status_counts_and_connection_shapes() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(
@@ -293,6 +303,7 @@ fn status_counts_and_connection_shapes() {
 /// node: tests/integration.test.ts:2222-2238, 2240-2259
 #[test]
 fn status_after_exit_and_mode_flags() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(
@@ -318,6 +329,7 @@ fn status_after_exit_and_mode_flags() {
 /// node: tests/integration.test.ts:2068-2118
 #[test]
 fn command_socket_writes_without_negotiating_or_counting() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut watcher = d.connect();
@@ -344,6 +356,7 @@ fn command_socket_writes_without_negotiating_or_counting() {
 /// node: tests/integration.test.ts:2175-2220
 #[test]
 fn a_writable_that_switches_to_peek_relinquishes_its_constraints() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut big = d.connect();
@@ -376,6 +389,7 @@ fn a_writable_that_switches_to_peek_relinquishes_its_constraints() {
 /// node: tests/integration.test.ts:318-354
 #[test]
 fn detach_ends_the_socket_and_reattach_replays() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     let mut c = d.connect();
@@ -399,6 +413,7 @@ fn detach_ends_the_socket_and_reattach_replays() {
 /// node: src/server.ts:951-956; tests/metadata-events.test.ts:204-227
 #[test]
 fn attach_stamps_last_attach_at() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let d = cat_daemon();
     assert!(d.meta().unwrap().get("lastAttachAt").is_none());
@@ -420,6 +435,7 @@ fn attach_stamps_last_attach_at() {
 /// node: tests/peek-wait.test.ts:91-107; tests/integration.test.ts:1812-1862
 #[test]
 fn peek_full_returns_scrollback_and_plain_peek_has_no_escapes() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(

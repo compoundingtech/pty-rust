@@ -30,6 +30,7 @@ fn wait_exited(d: &Daemon) -> serde_json::Value {
 /// node: src/server.ts:630-682; tests/events.test.ts:525-543
 #[test]
 fn publication_order_and_shapes() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let name = unique_name("pub");
@@ -83,6 +84,7 @@ fn publication_order_and_shapes() {
 /// node: tests/exit-signal.test.ts:49-71
 #[test]
 fn a_sigkilled_child_is_recorded_as_137_with_signal_9() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start_env(
@@ -105,6 +107,7 @@ fn a_sigkilled_child_is_recorded_as_137_with_signal_9() {
 /// node: tests/exit-signal.test.ts:74-87; tests/integration.test.ts:1252-1269
 #[test]
 fn a_clean_exit_keeps_the_raw_code_and_last_lines() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start_env(
@@ -127,6 +130,7 @@ fn a_clean_exit_keeps_the_raw_code_and_last_lines() {
 /// node: tests/exit-event-race.test.ts:82-136
 #[test]
 fn exactly_one_session_exit_and_start_after_a_natural_exit() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let mut cfg = config(&unique_name("race"), "true", &[]);
@@ -146,6 +150,7 @@ fn exactly_one_session_exit_and_start_after_a_natural_exit() {
 /// node: tests/exit-event-race.test.ts:108-125
 #[test]
 fn sigterm_records_one_session_exit_and_preserves_the_session() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let mut d = Daemon::start(&root, config(&unique_name("race"), "/bin/sh", &["-c", "sleep 30"]));
@@ -164,6 +169,7 @@ fn sigterm_records_one_session_exit_and_preserves_the_session() {
 /// node: tests/exit-reap.test.ts:670-932
 #[test]
 fn reap_and_preserve_decisions() {
+    skip_without_a_real_machine!();
     let _s = serial();
     // Default: reaped on exit (no files left).
     let root = short_root();
@@ -213,6 +219,7 @@ fn reap_and_preserve_decisions() {
 /// node: tests/shutdown-backstop.test.ts:80-122
 #[test]
 fn shutdown_backstop_force_exits_and_reaps_a_frozen_child() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let frozen = script(&root, "frozen.sh", "#!/bin/bash\ntrap '' HUP TERM\nwhile :; do sleep 1; done\n");
@@ -246,6 +253,7 @@ fn shutdown_backstop_force_exits_and_reaps_a_frozen_child() {
 /// node: tests/spawner-pid-watchdog.test.ts:93-193
 #[test]
 fn spawner_pid_watchdog() {
+    skip_without_a_real_machine!();
     let _s = serial();
     // The spawner dies → the daemon shuts down within the 5 s poll.
     let mut spawner = std::process::Command::new("sleep")
@@ -297,6 +305,7 @@ fn spawner_pid_watchdog() {
 /// tests/exec.test.ts:91-98
 #[test]
 fn child_environment_policy() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let out = root.join("env.txt");
@@ -346,6 +355,7 @@ fn child_environment_policy() {
 /// node: src/server.ts:236-260, 524-528
 #[test]
 fn invalid_cwd_aborts_the_daemon_with_nodes_text() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let name = unique_name("cwd");
@@ -383,6 +393,7 @@ fn invalid_cwd_aborts_the_daemon_with_nodes_text() {
 /// node: tests/events.test.ts:414-523
 #[test]
 fn terminal_events_reach_the_log() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let d = Daemon::start(
@@ -412,6 +423,7 @@ fn terminal_events_reach_the_log() {
 /// node: bin/pty-kill-releases-socket-test:42-152
 #[test]
 fn kill_terminates_a_deep_tree_and_releases_the_name() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let tree = script(
@@ -464,6 +476,7 @@ fn kill_terminates_a_deep_tree_and_releases_the_name() {
 /// node: src/spawn.ts:225-236; tests/recovery.test.ts:335-370
 #[test]
 fn run_waits_for_the_publication_of_the_replacement() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let name = unique_name("ready");
@@ -495,6 +508,7 @@ fn run_waits_for_the_publication_of_the_replacement() {
 /// node: src/spawn.ts:217-223
 #[test]
 fn run_reports_an_immediately_exiting_daemon_with_its_stderr() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
     let name = unique_name("early");
@@ -517,6 +531,7 @@ fn run_reports_an_immediately_exiting_daemon_with_its_stderr() {
 /// node: tests/attach-stream.test.ts:126-181
 #[test]
 fn node_attach_stream_against_the_rust_daemon() {
+    skip_without_a_real_machine!();
     let _s = serial();
     let Some(node_pty) = node_pty() else {
         eprintln!("skipped: the Node pty is not on PATH");
