@@ -20,4 +20,5 @@ pub mod protocol;
 pub mod ptyfile;
 pub mod queries;
 pub mod registry;
+pub mod spawn;
 pub mod stats;

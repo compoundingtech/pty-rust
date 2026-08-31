@@ -245,13 +245,14 @@ fn attach_identity_reconnect_reaches_the_replacement() {
     assert!(h.plain(Range::Full).contains("first"));
     let first_attempt = h.attempt();
 
-    // The first daemon goes away: the handle sees EXIT and the socket close.
+    // The first daemon goes away. On an external kill the daemon destroys
+    // its client sockets before the child dies (server.ts:1364-1372), so
+    // the handle sees the socket close, not an EXIT.
     rig.kill("a");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while (!h.exited() || h.connected()) && Instant::now() < deadline {
+    while h.connected() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(h.exited(), "EXIT from the first daemon");
     assert!(!h.connected());
 
     // A replacement under the same id.

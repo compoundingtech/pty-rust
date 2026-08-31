@@ -43,10 +43,9 @@ pub mod stats;
 use std::fmt;
 use std::io::Write;
 use std::process::Stdio;
-use std::time::Duration;
 
 use pty_core::client;
-use pty_core::registry::{self, EnvMap, TagMap};
+use pty_core::registry::{self, TagMap};
 
 /// A failed command: `Display` is the exact text Node prints to stderr
 /// before exiting 1.
@@ -216,7 +215,7 @@ pub fn dispatch(mut args: Vec<String>) -> i32 {
     let rest = if args.len() > 1 { &args[1..] } else { &[][..] };
     let result = match command.as_str() {
         "interactive" | "i" => interactive(interactive_opts),
-        "__daemon" => cmd_daemon(rest),
+        "__daemon" => Ok(crate::daemon::daemon_main()),
         "run" => run::run(rest),
         "attach" | "a" => attach::run(rest),
         "exec" => exec::run(rest),
@@ -295,27 +294,9 @@ fn forward_or_unknown(command: &str, rest: &[String]) -> CliResult {
     Ok(1)
 }
 
-// ── Daemon adapter ──────────────────────────────────────────────────────
-//
-// The daemon lane replaces this with `daemon::launch::spawn_daemon`. Until
-// then the CLI launches `<current_exe> __daemon ...` itself; `SpawnParams`
-// already has the shape that API takes so callers do not change.
+// ── Daemon launch ───────────────────────────────────────────────────────
 
-/// Parameters for launching a session daemon.
-#[derive(Debug, Clone, Default)]
-pub struct SpawnParams {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub display_command: String,
-    pub cwd: String,
-    pub rows: u16,
-    pub cols: u16,
-    pub ephemeral: bool,
-    pub tags: TagMap,
-    pub display_name: Option<String>,
-    pub extra_env: EnvMap,
-}
+pub use crate::daemon::SpawnParams;
 
 impl SpawnParams {
     /// Parameters for `command` with the CLI's terminal size (or 24×80).
@@ -336,160 +317,14 @@ impl SpawnParams {
     }
 }
 
-/// Spawn a detached session daemon and wait for it to come up.
+/// Resolve the command, spawn the detached session daemon and wait for it
+/// to publish (`daemon::launch::spawn_daemon`).
+///
+/// node: src/spawn.ts:372-393, 164-243
 pub fn spawn_daemon(p: &SpawnParams) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
-    let mut dcmd = std::process::Command::new(exe);
-    dcmd.arg("__daemon")
-        .arg("--name")
-        .arg(&p.name)
-        .arg("--rows")
-        .arg(p.rows.to_string())
-        .arg("--cols")
-        .arg(p.cols.to_string())
-        .arg("--cwd")
-        .arg(&p.cwd)
-        .arg("--display-command")
-        .arg(&p.display_command);
-    if let Some(dn) = &p.display_name {
-        dcmd.arg("--display-name").arg(dn);
-    }
-    if p.ephemeral {
-        dcmd.arg("--ephemeral");
-    }
-    for (k, v) in &p.tags {
-        dcmd.arg("--tag").arg(format!("{k}={v}"));
-    }
-    for (k, v) in &p.extra_env {
-        dcmd.arg("--env").arg(format!("{k}={v}"));
-    }
-    dcmd.arg("--").arg(&p.command).args(&p.args);
-    dcmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Detach into its own session so it survives the parent shell.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        dcmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut child = dcmd
-        .spawn()
-        .map_err(|e| format!("failed to start daemon: {e}"))?;
-
-    let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(15) {
-        // Ready if the socket is connectable...
-        if client::is_alive(&p.name) {
-            return Ok(());
-        }
-        // ...or the session already ran and exited in PRESERVE mode (metadata
-        // records the exit)...
-        if let Some(meta) = registry::read_metadata(&p.name)
-            && meta.exit_code.is_some()
-        {
-            return Ok(());
-        }
-        // ...or the daemon process itself has already exited — a fast-exiting
-        // command may have run and been REAPED (leaving no trace) before we
-        // observed the socket. The daemon exiting means the session ran.
-        if let Ok(Some(_)) = child.try_wait() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(30));
-    }
-    Err("daemon did not come up in time".into())
-}
-
-/// Internal: `pty __daemon --name N --rows R --cols C --cwd D
-/// [--display-name X] [--display-command X] [--ephemeral] [--tag k=v]...
-/// [--env K=V]... -- <cmd> [args...]`
-fn cmd_daemon(args: &[String]) -> CliResult {
-    let mut name = String::new();
-    let mut rows = 24u16;
-    let mut cols = 80u16;
-    let mut cwd = String::from(".");
-    let mut display_name: Option<String> = None;
-    let mut display_command: Option<String> = None;
-    let mut ephemeral = false;
-    let mut tags: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let mut env: Vec<(String, String)> = Vec::new();
-    let mut command: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--ephemeral" => {
-                ephemeral = true;
-                i += 1;
-            }
-            "--tag" => {
-                if let Some((k, v)) = args.get(i + 1).and_then(|kv| kv.split_once('=')) {
-                    tags.insert(k.to_string(), v.to_string());
-                }
-                i += 2;
-            }
-            "--env" => {
-                if let Some((k, v)) = args.get(i + 1).and_then(|kv| kv.split_once('=')) {
-                    env.push((k.to_string(), v.to_string()));
-                }
-                i += 2;
-            }
-            "--name" => {
-                name = args.get(i + 1).cloned().unwrap_or_default();
-                i += 2;
-            }
-            "--rows" => {
-                rows = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(24);
-                i += 2;
-            }
-            "--cols" => {
-                cols = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(80);
-                i += 2;
-            }
-            "--cwd" => {
-                cwd = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
-                i += 2;
-            }
-            "--display-name" => {
-                display_name = args.get(i + 1).cloned();
-                i += 2;
-            }
-            "--display-command" => {
-                display_command = args.get(i + 1).cloned();
-                i += 2;
-            }
-            "--" => {
-                command = args[i + 1..].to_vec();
-                break;
-            }
-            _ => i += 1,
-        }
-    }
-    if name.is_empty() || command.is_empty() {
-        eprintln!("pty __daemon: missing --name or command");
-        return Ok(2);
-    }
-    let (program, cargs) = command.split_first().unwrap();
-    let cfg = crate::daemon::DaemonConfig {
-        name,
-        command: program.clone(),
-        args: cargs.to_vec(),
-        display_command: display_command.unwrap_or_else(|| command.join(" ")),
-        cwd,
-        rows,
-        cols,
-        env,
-        ephemeral,
-        tags,
-        display_name,
-    };
-    match crate::daemon::run(cfg) {
-        Ok(code) => Ok(code),
-        Err(e) => {
-            eprintln!("pty daemon error: {e}");
-            Ok(1)
-        }
-    }
+    let mut params = p.clone();
+    params.command = pty_core::spawn::resolve_command(&p.command)?;
+    crate::daemon::spawn_daemon(params)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
