@@ -41,7 +41,6 @@ pub mod stats;
 
 use std::fmt;
 use std::io::Write;
-use std::process::Stdio;
 
 use pty_core::client;
 use pty_core::registry::{self, TagMap};
@@ -334,22 +333,39 @@ fn print_stdout(text: &str) {
 ///
 /// node: src/cli.ts:1641-1660
 fn forward_or_unknown(command: &str, rest: &[String]) -> CliResult {
-    let ext = std::process::Command::new("which")
-        .arg(format!("pty-{command}"))
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| !p.is_empty());
-    if let Some(path) = ext {
+    if let Some(path) = find_on_path(&format!("pty-{command}")) {
         let status = std::process::Command::new(path).args(rest).status();
         return Ok(status.ok().and_then(|s| s.code()).unwrap_or(1));
     }
     eprintln!("Unknown command: {command}");
     help::print_usage();
     Ok(1)
+}
+
+/// The first executable named `name` on `$PATH`.
+///
+/// Node shells out to `which` here. This walks `$PATH` instead, because
+/// `which` is not everywhere: a Nix build sandbox has no `which` at all, and
+/// there the shell-out failed quietly and every `pty-<cmd>` extension read as
+/// an unknown command. An empty `$PATH` entry means the working directory,
+/// the way execvp treats it.
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = if dir.as_os_str().is_empty() {
+            std::path::PathBuf::from(name)
+        } else {
+            dir.join(name)
+        };
+        let Ok(meta) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 // ── Daemon launch ───────────────────────────────────────────────────────
