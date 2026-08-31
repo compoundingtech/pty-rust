@@ -3,11 +3,12 @@
 //! `cmdRun` 1664-1769) replaces this module.
 
 use pty_core::client;
-use pty_core::registry::{self, TagMap};
+use pty_core::registry::{self, EnvMap, TagMap};
 
 use super::{CliResult, SpawnParams};
 
-/// `pty run [--id X] [--name X] [--cwd D] [--tag k=v] [--rows R] [--cols C] -- <cmd...>`
+/// `pty run [--id X] [--name X] [--cwd D] [--tag k=v] [--env K=V]
+/// [--unset-env K] [--isolate-env] [--rows R] [--cols C] -- <cmd...>`
 pub fn run(args: &[String]) -> CliResult {
     let mut id: Option<String> = None;
     let mut display_name: Option<String> = None;
@@ -17,7 +18,10 @@ pub fn run(args: &[String]) -> CliResult {
     let mut background = false;
     let mut force = false;
     let mut ephemeral = false;
+    let mut isolate_env = false;
     let mut tags = TagMap::new();
+    let mut extra_env = EnvMap::new();
+    let mut unset_env: Vec<String> = Vec::new();
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -69,7 +73,43 @@ pub fn run(args: &[String]) -> CliResult {
                 }
                 i += 2;
             }
-            "-a" | "--attach" | "--isolate-env" | "--no-display-name" => {
+            // An assignment whose `=` is missing or leading is rejected;
+            // `KEY=` with an empty value is accepted. A repeated key keeps
+            // its first position and takes the last value.
+            //
+            // node: src/cli.ts:811-814
+            "--env" => {
+                let tok = args.get(i + 1).cloned().unwrap_or_default();
+                match tok.find('=') {
+                    Some(eq) if eq > 0 => {
+                        extra_env.insert(tok[..eq].to_string(), tok[eq + 1..].to_string());
+                    }
+                    _ => {
+                        eprintln!("Invalid env format: \"{tok}\". Use --env KEY=VALUE");
+                        return Ok(1);
+                    }
+                }
+                i += 2;
+            }
+            // De-duplicated, order preserved.
+            //
+            // node: src/cli.ts:820-823
+            "--unset-env" => {
+                let tok = args.get(i + 1).cloned().unwrap_or_default();
+                if tok.is_empty() || tok.contains('=') {
+                    eprintln!("Invalid env key: \"{tok}\". Use --unset-env KEY");
+                    return Ok(1);
+                }
+                if !unset_env.contains(&tok) {
+                    unset_env.push(tok);
+                }
+                i += 2;
+            }
+            "--isolate-env" => {
+                isolate_env = true;
+                i += 1;
+            }
+            "-a" | "--attach" | "--no-display-name" => {
                 // Accepted for CLI compatibility.
                 i += 1;
             }
@@ -101,6 +141,17 @@ pub fn run(args: &[String]) -> CliResult {
         let (program, pargs) = command.split_first().unwrap();
         let mut c = std::process::Command::new(program);
         c.args(pargs);
+        // The child inherits this process's environment, minus the
+        // `--unset-env` keys, plus the `--env` overlays. An assignment beats
+        // a removal of the same key, whatever order the flags came in.
+        //
+        // node: src/cli.ts:907-917
+        for key in &unset_env {
+            c.env_remove(key);
+        }
+        for (key, value) in &extra_env {
+            c.env(key, value);
+        }
         if let Some(dir) = &cwd {
             c.current_dir(dir);
         }
@@ -131,6 +182,9 @@ pub fn run(args: &[String]) -> CliResult {
     params.ephemeral = ephemeral;
     params.tags = tags;
     params.display_name = display_name;
+    params.isolate_env = isolate_env;
+    params.extra_env = extra_env;
+    params.unset_env = unset_env;
 
     match super::spawn_daemon(&params) {
         Ok(()) => {
