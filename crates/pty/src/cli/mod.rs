@@ -97,6 +97,65 @@ pub fn require_ref(args: &[String], usage: &str) -> Result<String, CliError> {
     }
 }
 
+/// The variables a restarted session must not inherit from whoever asked
+/// for the restart.
+///
+/// node: src/cli.ts:3869
+pub const RESTART_SCRUBBED_ENV: [&str; 2] = ["ST_AGENT", "ST_ROOT"];
+
+/// Refuse a command that would nest a client inside the current session.
+/// Returns `Some(1)` when it refused, having printed the reason and the
+/// hint; `None` means carry on.
+///
+/// node: src/cli.ts:626-637 (`ensureNotNested`)
+pub fn ensure_not_nested(cmd: &str, force: bool, hint: Option<&str>) -> Option<i32> {
+    if force {
+        return None;
+    }
+    let nested = std::env::var("PTY_SESSION").unwrap_or_default();
+    if nested.is_empty() {
+        return None;
+    }
+    eprintln!("pty {cmd}: already inside pty session \"{nested}\".");
+    match hint {
+        Some(h) => eprintln!("{h}"),
+        None => eprintln!("  Pass --force to override."),
+    }
+    Some(1)
+}
+
+/// Carry a session's launch-time settings into its replacement. Older
+/// records simply have fewer of them.
+///
+/// node: src/cli.ts:3874-3884 (`persistedLaunchOptions`)
+pub fn apply_persisted_launch_options(params: &mut SpawnParams, meta: &registry::SessionMetadata) {
+    if let Some(rows) = meta.rows {
+        params.rows = rows;
+    }
+    if let Some(cols) = meta.cols {
+        params.cols = cols;
+    }
+    if let Some(ephemeral) = meta.ephemeral {
+        params.ephemeral = ephemeral;
+    }
+    if meta.isolate_env == Some(true) {
+        params.isolate_env = true;
+    }
+    if let Some(extra) = &meta.extra_env
+        && !extra.is_empty()
+    {
+        params.extra_env = extra.clone();
+    }
+    if let Some(unset) = &meta.unset_env
+        && !unset.is_empty()
+    {
+        params.unset_env = unset.clone();
+    }
+    if let Some(env) = &meta.env {
+        params.env = Some(env.clone());
+    }
+}
+
 /// Options the interactive picker is opened with.
 #[derive(Debug, Clone, Default)]
 pub struct InteractiveOptions {

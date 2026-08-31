@@ -18,6 +18,7 @@ pub fn run(args: &[String]) -> CliResult {
     let mut background = false;
     let mut force = false;
     let mut ephemeral = false;
+    let mut attach_existing = false;
     let mut isolate_env = false;
     let mut tags = TagMap::new();
     let mut extra_env = EnvMap::new();
@@ -109,7 +110,11 @@ pub fn run(args: &[String]) -> CliResult {
                 isolate_env = true;
                 i += 1;
             }
-            "-a" | "--attach" | "--no-display-name" => {
+            "-a" | "--attach" => {
+                attach_existing = true;
+                i += 1;
+            }
+            "--no-display-name" => {
                 // Accepted for CLI compatibility.
                 i += 1;
             }
@@ -136,6 +141,28 @@ pub fn run(args: &[String]) -> CliResult {
         && !force
         && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false)
     {
+        // A plain nested `run` executes in place. `-a` is narrower: it asked
+        // to attach if the target is already running, and attaching would
+        // nest a client, so that case refuses instead.
+        if attach_existing
+            && let Some(reference) = id.as_ref().or(display_name.as_ref())
+        {
+            let existing = match &id {
+                Some(explicit) => registry::get_session_by_name(explicit),
+                None => registry::get_session(reference).ok().flatten(),
+            };
+            if existing.is_some_and(|s| s.status == registry::SessionStatus::Running)
+                && let Some(code) = super::ensure_not_nested(
+                    "run -a",
+                    false,
+                    Some(&format!(
+                        "  Target session \"{reference}\" is already running; attaching would nest a client inside the current session.\n  Pass --force to attach anyway, or detach first (Ctrl+\\) and re-run from outside."
+                    )),
+                )
+            {
+                return Ok(code);
+            }
+        }
         let nested = std::env::var("PTY_SESSION").unwrap_or_default();
         eprintln!("Already inside pty session \"{nested}\", running directly.");
         let (program, pargs) = command.split_first().unwrap();
