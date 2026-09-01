@@ -48,7 +48,7 @@ every surface in this table working.
 
 | Consumer | CLI verbs used | Reads `$PTY_ROOT` directly | Speaks the socket | Env |
 |---|---|---|---|---|
-| `st2` (supervisor) | `run -d --force --id --name/--no-display-name --cwd --tag --unset-env --env`, `list --json`, `kill`, `rm`, `metadata patch --id`, `peek`, `peek --full --plain`, `send --seq/--with-delay`, `stats --json`, `--root`, `--help` | `<id>.pid` | no | sets `PTY_ROOT`; `ST2_PTY_BIN` picks the binary for one task |
+| `st2` (supervisor) | `run -d --force --id --name/--no-display-name --cwd --tag --unset-env --env`, `list --json`, `kill`, `rm`, `metadata patch --id`, `peek`, `peek --full --plain`, `send --seq/--with-delay`, `stats --json`, `--root`, `--help` | `<id>.pid` | no | sets `PTY_ROOT`; the binary comes from `PATH` and nothing else |
 | `pty-relay` | `list`, `peek`, `send`, `tag --json`, `events --json` (over ssh), `run`, `attach` | `<name>.sock` path | yes (session bridge) | `PTY_SESSION_DIR` |
 | `deskset` (`pty-wire`, `pty-cli` crates) | `run -d --id --tag`, `kill`, `rm`, `restart`, `rename`, `tag`, `list --json`, `stats --json`, `events --all --json` | `<name>.sock`, `<name>.json` | yes (attach, peek, status) | `PTY_ROOT` |
 | `ding`, `smalltalk` | `peek --plain`, `send --seq/--paste/--with-delay`, `list` | `<session>.pid`; writes `<session>.ding-health` into the root | no | `PTY_SESSION_DIR` |
@@ -341,6 +341,22 @@ Decided on 2026-08-29. Each row records the decision.
 | `up`/`down` and `pty.toml` | S | Kept. Already ported; the binding rule needs the tag pair. |
 | `queryStats` waiting out its 2 s timeout on a daemon that closes without STATUS, and `peek -f` hanging on a plain close | S | Not reproduced, on purpose. Both end promptly instead. Deliberate improvements, not gaps — accepted, decision 0006. |
 
+## 12a. How st2 chooses the `pty` binary
+
+**From `PATH`, and nothing else.** `PtyCli.bin` is the literal `"pty"` in both
+of st2's non-test constructors (`src/run.rs:378` and `:435` on `origin/main`,
+read 2026-09-01). There is no environment variable that selects it.
+
+**`ST2_PTY_BIN` is real but unshipped**, so it is easy to believe in and wrong
+to rely on. It exists only on st2's `pty-rust` branch, added by `b63abfb`, and
+that branch is not merged: `origin/main` has zero occurrences. Nothing running
+today reads it, so no agent can opt one task onto a different build.
+
+**That matters for the cutover.** Every staged rollout in `docs/parity-plan.md`
+that begins "`ST2_PTY_BIN` on one agent" needs that st2 branch shipped first,
+or it needs a different mechanism. Putting the Rust `pty` on `PATH` is the only
+selection st2 supports as it stands.
+
 ## 12b. Known red that is not a missing verb
 
 Two conformance failures on `parity` are not WP8 and not a regression.
@@ -354,6 +370,14 @@ Two conformance failures on `parity` are not WP8 and not a regression.
 See also docs/hardening.md for why a red
 test inside a red suite is worth separating from a red test that means a
 feature is missing.
+
+**One surface of the suite is known to be unexamined.** About eighteen
+conformance tests assert that output *contains* a short common word —
+`exited`, `removed`, `killed`, `busy`, `null`. Three tests of exactly that
+shape turned out to be passing for the wrong reason during the 2026-08-31
+build, each matching its word in output that had nothing to do with what it
+was checking. The remaining candidates were listed and **not** chased. Treat a
+pass from one of them as unproven until somebody has.
 
 ## 13. In flight, not on `main`
 

@@ -343,6 +343,13 @@ README rewritten for the workspace, stating the deferred commands. Done:
 `nix build` on the first host yields a binary printing `0.13.0-rust+<sha>`.
 
 ### WP-CUT — Cutover
+
+**Correction, 2026-09-01: the `ST2_PTY_BIN` steps below cannot be run as
+written.** That variable exists only on st2's unmerged `pty-rust` branch
+(`b63abfb`); `origin/main` has none, so nothing running reads it and no agent
+can be pointed at one build. Either ship that st2 branch first, or select the
+binary the only way st2 supports — by what is on `PATH`. The rest of the
+staging, the checks and the rollbacks stand. See docs/parity.md §12a.
 Consumer runs (all green before step 3): `st2` `cargo test` with the Rust
 `pty` on PATH plus `st2 eval` on `pty-send-peek`, `pty-attach-only`,
 `pty-attach-machine-stream`; `pty-relay` `integration/*.test.ts`; `ding`

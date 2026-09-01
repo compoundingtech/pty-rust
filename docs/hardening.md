@@ -72,6 +72,38 @@ an oversized frame that was still accepted, a peek that returned nothing —
 rather than at an exit code. **A component that reports failure by not
 finishing needs a test that asserts on what it produced.**
 
+## When a green test turns red after a fix, suspect the test first
+
+**Three tests in this repository were passing for reasons unrelated to what
+they checked, and all three were found on 2026-08-31 the same way: something
+was made MORE correct and they went red.**
+
+- Two `stats` tests matched the word `exited` inside a registry summary the
+  CLI fell back to when the daemon was gone. Fixing the daemon lifecycle kept
+  the daemon alive, the fallback stopped being reached, and the tests failed.
+- `send --remote` to a missing session passed because `send` resolved a
+  **remote** name against the **local** registry and reported "not found".
+  Making it dial the peer removed the wrong answer that happened to match.
+- The terminal-handle tests built their temp directory from
+  `Instant::now().elapsed()`, which is not a clock reading. They shared one
+  registry and raced for the same session id, and whoever arrived second
+  quietly won. Making `run` take the creation lock turned the race into a
+  refusal, which is correct, and they failed.
+
+**Each looked like a regression and none was.** The improvement did not break
+the test; it removed the accident the test had been relying on.
+
+**So the rule is not "go hunting".** A deliberate hunt for a fourth on
+2026-08-31 found none, while three arrived unbidden from ordinary work. The
+rule is the inversion of the natural instinct:
+
+> When a test that was green turns red after a fix, check whether the test was
+> ever testing what it claims, before you assume the fix is wrong.
+
+**A test that asserts on a short common word, shares mutable state, or derives
+uniqueness from a clock is a candidate.** `docs/parity.md` §12b lists the
+substring candidates in the conformance suite that nobody has yet examined.
+
 ## What is enforced
 
 - **Frame size.** A declared length above 32 MiB drops the connection, on
