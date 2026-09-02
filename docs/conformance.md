@@ -9,7 +9,7 @@ Run: `PTY_TEST_BIN=$(which pty) cargo test -p pty-conformance` (Node) and `cargo
 ## Summary
 
 - Node suites: 120
-- Rust conformance tests: 646 (627 port a Node test, 19 cover the Rust-owned fixtures)
+- Rust conformance tests: 647 (627 port a Node test, 20 cover the Rust-owned fixtures)
 - Gated (`_node`/`_rust` pairs pointing at a decision record): 6 — the parity debt
 - cli: 55 suites, 55 with Rust tests, 0 to do
 - not-portable: 49
