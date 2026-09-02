@@ -100,12 +100,14 @@ pty attach --force API      # attach from inside another session
 pty run --force -- <cmd>    # create one from inside another session
 ```
 
-**The refusal prints to standard output and exits 0.** So a script that
-captures output and checks the exit code cannot tell it from success: it sees
-an empty result and a zero. That behaviour matches the Node tool and is not
-about to change quietly, but anything automating `pty` from inside a session
-should pass `--force` rather than discover this. It cost somebody an afternoon
-of looking for a terminal problem that was not there.
+**The refusal goes to standard error and exits 1**, in this tool and in the
+Node one. A script that captures only standard output sees an empty result
+and can mistake that for success, which is what happens if you forget
+`--force`; the exit code tells you the truth.
+
+`run` and `restart` are different and deliberately so: from inside a session
+`run` runs the command directly and `restart` restarts without attaching.
+Both did what was asked, so both exit 0.
 
 ### Commands not in this build
 
