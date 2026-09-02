@@ -43,6 +43,10 @@ pub mod event_type {
     pub const SESSION_EXIT: &str = "session_exit";
     pub const SESSION_EXEC: &str = "session_exec";
     pub const SESSION_RESPAWN: &str = "session_respawn";
+    /// Written by a daemon that could not kill everything it started.
+    /// **This tool writes it and the Node tool does not** (decision 0008); a
+    /// Node reader renders it through the same fallback it uses for `user.*`.
+    pub const SESSION_DESCENDANTS_SURVIVED: &str = "session_descendants_survived";
     pub const SESSION_ABANDONED: &str = "session_abandoned";
     pub const SESSION_FLAPPING: &str = "session_flapping";
     pub const DISPLAY_NAME_CHANGE: &str = "display_name_change";
@@ -67,6 +71,8 @@ pub mod event_type {
         DISPLAY_NAME_CHANGE,
         TAGS_CHANGE,
         METADATA_CHANGE,
+        // Written here and not by the Node tool (decision 0008).
+        SESSION_DESCENDANTS_SURVIVED,
     ];
 }
 
@@ -233,6 +239,22 @@ impl Event {
             e = e.with("signal", sig);
         }
         e
+    }
+
+    /// `session_descendants_survived {data:{pids}}` — processes still alive
+    /// after the daemon signalled them with TERM and then KILL.
+    ///
+    /// **The daemon has always known this and had nowhere to put it.** It
+    /// warned on its own standard error, which has no reader for almost all
+    /// of a daemon's life, so the one moment it had something worth saying
+    /// was the one moment nobody was listening. `pty kill` reports on the
+    /// daemon and cannot see a surviving child, so without this the fact
+    /// existed and reached no one.
+    pub fn session_descendants_survived(session: &str, pids: &[i32]) -> Self {
+        Event::new(session, event_type::SESSION_DESCENDANTS_SURVIVED).with(
+            "data",
+            serde_json::json!({ "pids": pids }),
+        )
     }
 
     pub fn session_exec(session: &str, previous_command: &str, command: &str) -> Self {

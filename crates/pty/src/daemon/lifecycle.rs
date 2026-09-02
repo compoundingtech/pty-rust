@@ -887,11 +887,20 @@ impl Daemon {
             .and_then(|t| t.join().ok())
             .unwrap_or_default();
         if !survivors.is_empty() {
+            let pids: Vec<i32> = survivors.iter().map(|s| s.pid).collect();
             crate::daemon::daemon_warn!(
-                "pty daemon \"{}\": {} child process(es) did not exit after exact TERM and KILL signals",
+                "pty daemon \"{}\": {} child process(es) did not exit after exact TERM and KILL signals: {pids:?}",
                 self.name,
                 survivors.len()
             );
+            // And somewhere a person can find it. The warning above goes to
+            // this daemon's standard error, which has had no reader since
+            // the command that launched it stopped listening — so the one
+            // moment it has something worth saying is the one moment nobody
+            // is there. `pty kill` reports on the daemon and cannot see a
+            // surviving child, so without this line the fact reaches no one.
+            self.events
+                .append(Event::session_descendants_survived(&self.name, &pids));
         }
         if self.exited {
             self.save_exit_metadata_until_settled(EXIT_METADATA_SETTLE);

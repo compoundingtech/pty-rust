@@ -178,3 +178,24 @@ fn metadata_event_bodies() {
         "metadata -> {\"displayName\":\"Worker\",\"tags\":{\"role\":\"worker\"}} (was {\"displayName\":null,\"tags\":{\"role\":null}})"
     );
 }
+
+/// The event a daemon writes when it could not kill everything it started.
+///
+/// **The shape is tested here and the trigger is not**, which is worth saying
+/// rather than leaving somebody to assume otherwise. Reaching it needs a
+/// descendant that outlives both a TERM and a KILL, and a process that
+/// survives SIGKILL cannot be manufactured in a test — a stopped process
+/// still dies, and anything that genuinely resists is a wedged machine rather
+/// than a fixture.
+///
+/// What this pins is what a reader gets: the type, and the pids under `data`,
+/// which is the field the Node tool's renderer falls back to for a type it
+/// does not know.
+#[test]
+fn survivors_are_reported_as_pids_under_data() {
+    let e = Event::session_descendants_survived("s", &[4321, 8765]);
+    assert_eq!(e.r#type, "session_descendants_survived");
+    assert_eq!(e.session, "s");
+    let json = serde_json::to_value(&e).expect("serialize");
+    assert_eq!(json["data"]["pids"], serde_json::json!([4321, 8765]));
+}
