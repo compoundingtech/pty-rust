@@ -110,6 +110,14 @@ impl SessionConnection {
             closed: false,
         };
         let deadline = timeout.map(|t| Instant::now() + t);
+        // Events that arrive before the SCREEN belong to the caller, so they
+        // are kept. They must NOT go into `conn.pending` yet: `read_more`
+        // drains that queue before it touches the socket, so a queued event
+        // would be handed straight back to this loop, queued again, and the
+        // loop would spin at full CPU without ever reading. With no timeout
+        // it never ends. One DATA frame ahead of the first SCREEN is enough,
+        // and a remote peer can send one.
+        let mut before_screen: VecDeque<SessionEvent> = VecDeque::new();
         loop {
             let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
             if remaining.is_some_and(|r| r.is_zero()) {
@@ -119,6 +127,12 @@ impl SessionConnection {
             match conn.read_more(remaining)? {
                 Some(SessionEvent::Screen(s)) => {
                     conn.screen = s;
+                    // Put them back in front of anything that arrived in the
+                    // same read as the SCREEN, so the caller sees one stream
+                    // in arrival order.
+                    for ev in before_screen.into_iter().rev() {
+                        conn.pending.push_front(ev);
+                    }
                     return Ok(conn);
                 }
                 Some(SessionEvent::Closed) => {
@@ -127,7 +141,7 @@ impl SessionConnection {
                 // GEOMETRY already applied; anything else is queued for the
                 // caller.
                 Some(SessionEvent::Geometry { .. }) | None => {}
-                Some(other) => conn.pending.push_back(other),
+                Some(other) => before_screen.push_back(other),
             }
         }
     }

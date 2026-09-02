@@ -17,6 +17,82 @@ use pty_core::protocol::{
 
 const T: Duration = Duration::from_secs(5);
 
+/// A DATA frame ahead of the first SCREEN used to spin `connect` at full
+/// CPU forever. The event was queued on the connection, and the next read
+/// drained that queue before it touched the socket, so the loop handed
+/// itself the same event and queued it again. With no timeout it never
+/// ended. The events must be kept, in order, and handed over after the
+/// screen arrives.
+#[test]
+fn output_before_the_first_screen_is_kept_without_spinning() {
+    let d = FakeDaemon::bind("early");
+    let listener = d.listener.try_clone().unwrap();
+    let h = std::thread::spawn(move || {
+        use std::io::Write;
+        let (mut s, _) = listener.accept().unwrap();
+        let mut reader = PacketReader::new();
+        read_until(&mut s, &mut reader, MessageType::Attach, T);
+        s.write_all(&concat(&[encode_data(b"first"), encode_data(b"second")]))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        s.write_all(&encode_screen(b"$ ")).unwrap();
+        let _ = read_until(&mut s, &mut reader, MessageType::Detach, T);
+    });
+
+    // `connect` has no deadline of its own, so a spin would hang the test
+    // run rather than fail it. Run it on a thread and give the answer a
+    // budget here.
+    let name = d.name.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(SessionConnection::connect(&name, 24, 80).map(|mut c| {
+            let screen = c.screen().to_vec();
+            let a = c.next_event(Some(T)).unwrap();
+            let b = c.next_event(Some(T)).unwrap();
+            (screen, a, b)
+        }));
+    });
+    let (screen, a, b) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("connect must not spin on output that arrives before the screen")
+        .expect("connect");
+    assert_eq!(screen, b"$ ");
+    assert_eq!(a, Some(SessionEvent::Data(b"first".to_vec())));
+    assert_eq!(b, Some(SessionEvent::Data(b"second".to_vec())));
+    h.join().unwrap();
+}
+
+/// The same frames with a deadline: the deadline is what ends it, and it
+/// ends near the deadline rather than after a long spin.
+#[test]
+fn output_before_a_screen_that_never_comes_ends_at_the_deadline() {
+    let d = FakeDaemon::bind("early-to");
+    let listener = d.listener.try_clone().unwrap();
+    let h = std::thread::spawn(move || {
+        use std::io::Write;
+        let (mut s, _) = listener.accept().unwrap();
+        let mut reader = PacketReader::new();
+        read_until(&mut s, &mut reader, MessageType::Attach, T);
+        s.write_all(&encode_data(b"only data")).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+    });
+    let started = std::time::Instant::now();
+    let err = SessionConnection::connect_with_timeout(
+        &d.name,
+        24,
+        80,
+        Some(Duration::from_millis(200)),
+    )
+    .expect_err("no screen ever arrives");
+    assert!(matches!(err, ClientError::ClosedBeforeScreen(_)), "{err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "gave up after {:?}",
+        started.elapsed()
+    );
+    h.join().unwrap();
+}
+
 /// node: tests/connection.test.ts:102-202
 #[test]
 fn connect_attaches_resolves_on_screen_and_tracks_geometry() {
