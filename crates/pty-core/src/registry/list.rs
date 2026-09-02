@@ -201,10 +201,78 @@ pub fn has_process_exited_for_reap(pid: i32) -> bool {
         .output()
     {
         Ok(out) => {
-            let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            state.is_empty() || state.starts_with('Z')
+            let state = String::from_utf8_lossy(&out.stdout);
+            reaped_from_ps_state(&state, || pid_alive(pid))
         }
         Err(_) => !pid_alive(pid),
+    }
+}
+
+/// Read a `ps -o stat=` field. `still_alive` is asked only when the field is
+/// empty, and it is a FRESH answer rather than the one taken before `ps` ran.
+///
+/// **An empty field is two answers and only one of them means the process is
+/// gone.** `ps` prints nothing for a pid that has left, and some builds of
+/// `ps` print nothing for a state they do not report. The caller has already
+/// established that the pid was alive, so silence here is not evidence of
+/// death; asking the kernel again is.
+///
+/// The Node tool reads an empty field as gone (`src/sessions.ts`,
+/// `hasProcessExitedForReap`). That is the same code shape and it is wrong in
+/// the same way. It went unnoticed because a Mac's own `ps` answers properly;
+/// the one in a nix build sandbox prints a blank state for a live process,
+/// and this branch then called it reapable. Measured 2026-09-02.
+///
+/// **The asymmetry decides it.** Saying "not yet" about a process that has
+/// gone costs one more poll. Saying "gone" about a process that is running
+/// reaps a live session.
+///
+/// Split out from its caller so the decision can be tested on any platform.
+/// The caller only reaches it off Linux, which has `/proc`.
+pub(crate) fn reaped_from_ps_state(state: &str, still_alive: impl FnOnce() -> bool) -> bool {
+    let state = state.trim();
+    if state.starts_with('Z') {
+        return true;
+    }
+    state.is_empty() && !still_alive()
+}
+
+#[cfg(test)]
+mod ps_state_tests {
+    use super::reaped_from_ps_state;
+
+    #[test]
+    fn a_zombie_is_reapable() {
+        assert!(reaped_from_ps_state("Z", || panic!("must not ask")));
+        assert!(reaped_from_ps_state("Z+  ", || panic!("must not ask")));
+    }
+
+    #[test]
+    fn a_running_state_is_not_reapable() {
+        for state in ["S", "S+", "Ss", "R", "I", "U", "T"] {
+            assert!(
+                !reaped_from_ps_state(state, || panic!("must not ask")),
+                "{state} was called reapable"
+            );
+        }
+    }
+
+    /// The one this function exists for: a `ps` that says nothing about a
+    /// process that is still there.
+    #[test]
+    fn a_blank_state_asks_the_kernel_rather_than_assuming_death() {
+        assert!(
+            !reaped_from_ps_state("", || true),
+            "a blank state from a live process was called reapable"
+        );
+        assert!(
+            !reaped_from_ps_state("   \n", || true),
+            "a whitespace state from a live process was called reapable"
+        );
+        assert!(
+            reaped_from_ps_state("", || false),
+            "a blank state from a process that has really gone must reap"
+        );
     }
 }
 

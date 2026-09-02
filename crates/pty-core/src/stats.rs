@@ -125,11 +125,24 @@ pub struct GoneStats {
     pub tags: Option<std::collections::BTreeMap<String, String>>,
 }
 
-/// Read a process's resident set size + average CPU% from `/proc`.
-/// Returns `None` if the process/procfs can't be read.
+/// A process's resident set size and average CPU, from `/proc` where there is
+/// one and from `ps` where there is not. `None` when neither can answer.
+///
+/// **Without the `ps` half this returned `None` on every machine that is not
+/// Linux**, so `pty stats` showed no CPU and no memory line at all on a Mac,
+/// and `--json` carried `"resources": null`. It failed quietly, which is why
+/// it surfaced as five unrelated-looking test failures rather than one gap.
+/// The Node tool uses `ps -o rss=,pcpu=` on every platform
+/// (`src/server.ts`, `queryProcessResources`).
+///
+/// `/proc` is kept where it exists because it costs no subprocess, and
+/// `stats` is asked for every session in a listing.
 pub fn read_resources(pid: i32) -> Option<Resources> {
     if pid <= 0 {
         return None;
+    }
+    if !cfg!(target_os = "linux") {
+        return read_resources_from_ps(pid);
     }
     let page_kb = {
         // SAFETY: sysconf is a simple query.
@@ -141,6 +154,36 @@ pub fn read_resources(pid: i32) -> Option<Resources> {
     let rss_kb = resident_pages * page_kb;
 
     let cpu_percent = read_cpu_percent(pid).unwrap_or(0.0);
+    Some(Resources {
+        rss_kb,
+        cpu_percent,
+    })
+}
+
+/// The same two numbers from `ps`, which every unix has and which is what the
+/// Node tool uses everywhere.
+///
+/// `rss=` is in kilobytes and `pcpu=` is the average over the process's
+/// lifetime, which is what the `/proc` path above computes by hand — so the
+/// two agree about what they mean.
+///
+/// node: src/server.ts `queryProcessResources`
+fn read_resources_from_ps(pid: i32) -> Option<Resources> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=,pcpu=", "-p", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_ps_resources(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Split out from its caller so it can be tested where there is no `ps` that
+/// answers this way.
+fn parse_ps_resources(output: &str) -> Option<Resources> {
+    let mut fields = output.split_whitespace();
+    let rss_kb: u64 = fields.next()?.parse().ok()?;
+    let cpu_percent: f64 = fields.next()?.parse().ok()?;
     Some(Resources {
         rss_kb,
         cpu_percent,
@@ -171,4 +214,52 @@ fn read_cpu_percent(pid: i32) -> Option<f64> {
     }
     let cpu_secs = (utime + stime) / clk_tck;
     Some((cpu_secs / proc_uptime) * 100.0)
+}
+
+#[cfg(test)]
+mod ps_resources_tests {
+    use super::parse_ps_resources;
+
+    #[test]
+    fn reads_the_two_fields_ps_prints() {
+        // What `ps -o rss=,pcpu= -p <pid>` gives, padded as it pads.
+        let r = parse_ps_resources("  13824   2.4\n").expect("parsed");
+        assert_eq!(r.rss_kb, 13824);
+        assert!((r.cpu_percent - 2.4).abs() < f64::EPSILON, "{}", r.cpu_percent);
+    }
+
+    #[test]
+    fn a_process_that_is_gone_prints_nothing_and_is_not_a_reading() {
+        assert!(parse_ps_resources("").is_none());
+        assert!(parse_ps_resources("   \n").is_none());
+    }
+
+    /// The `ps` path only RUNS off Linux, but it can be exercised anywhere
+    /// `ps` accepts those fields, which Linux does. So the branch a Mac
+    /// depends on is proved on every machine that runs this suite, rather
+    /// than only on the one that needs it.
+    #[test]
+    fn ps_reports_real_numbers_for_this_very_process() {
+        let me = std::process::id() as i32;
+        let Some(r) = super::read_resources_from_ps(me) else {
+            // A machine whose `ps` does not take these fields is not a
+            // failure of this code; say so rather than pass silently.
+            eprintln!("skipped: `ps -o rss=,pcpu=` gave nothing on this machine");
+            return;
+        };
+        assert!(r.rss_kb > 0, "a running process reported {} KB", r.rss_kb);
+        assert!(
+            r.cpu_percent >= 0.0 && r.cpu_percent <= 100.0 * 64.0,
+            "implausible cpu {}",
+            r.cpu_percent
+        );
+    }
+
+    /// A `ps` that answers with only one of the two is not a reading either.
+    #[test]
+    fn a_half_answer_is_not_a_reading() {
+        assert!(parse_ps_resources("13824").is_none());
+        assert!(parse_ps_resources("notanumber 2.4").is_none());
+        assert!(parse_ps_resources("13824 notanumber").is_none());
+    }
 }

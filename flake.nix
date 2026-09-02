@@ -293,6 +293,15 @@
           ++ darwinBuildInputs
           ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.darwin.ps ];
 
+          # `nix develop` appends `nix-shell.XXXXXX` to `TMPDIR`, and on a
+          # Mac that pushes a session's socket path past the 104-byte kernel
+          # limit: 172 tests failed for that reason alone on 2026-09-02, in
+          # this very shell. The rigs now say why, but the shell should not
+          # walk anyone into it in the first place.
+          shellHook = ''
+            export TMPDIR=''${PTY_DEV_TMPDIR:-/tmp}
+          '';
+
           # The same pre-fetched Ghostty as the package, so a `cargo build` in
           # this shell fetches nothing.
           env = {
