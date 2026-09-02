@@ -28,6 +28,7 @@ use pty_core::registry::{
 use pty_terminal::{TerminalActor, serialize};
 
 use super::clients::{Client, Out, REDRAW_SETTLE};
+use super::daemon_warn;
 use super::config::DaemonConfig;
 use super::env::{build_child_env, describe_invalid_cwd, invalid_cwd_error};
 use super::tree::{
@@ -368,12 +369,53 @@ fn spawn_child_waiter(pid: i32, tx: Sender<Msg>) {
     });
 }
 
+/// Will this `accept` failure pass on its own?
+///
+/// A signal, a peer that hung up before we reached it, or a machine with no
+/// descriptors to spare: all of these end. Anything else says the listener
+/// itself is broken and waiting will not mend it.
+pub(crate) fn accept_failure_passes(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        Interrupted | ConnectionAborted | WouldBlock | TimedOut
+    ) || e.raw_os_error() == Some(libc::EMFILE)
+        || e.raw_os_error() == Some(libc::ENFILE)
+}
+
+/// Accept forever, and do not go deaf on a passing failure.
+///
+/// Leaving this loop is the worst thing it can do. The daemon keeps running,
+/// the child keeps running, and the registry keeps saying the session is
+/// running, but nothing can ever attach, peek or ask for stats again. A
+/// descriptor shortage would do it, and a descriptor shortage ends. So a
+/// failure that can pass is reported and retried, and only a listener that
+/// cannot work at all shuts the session down, where somebody can see it.
 fn spawn_acceptor(listener: UnixListener, tx: Sender<Msg>) {
     std::thread::spawn(move || {
         let ids = Arc::new(AtomicU64::new(1));
+        let mut consecutive = 0u32;
         for stream in listener.incoming() {
-            let Ok(stream) = stream else {
-                break;
+            let stream = match stream {
+                Ok(stream) => {
+                    consecutive = 0;
+                    stream
+                }
+                Err(e) => {
+                    if !accept_failure_passes(&e) {
+                        daemon_warn!("pty daemon: the listener failed: {e}");
+                        let _ = tx.send(Msg::ExternalKill);
+                        break;
+                    }
+                    consecutive += 1;
+                    if consecutive == 1 || consecutive % 100 == 0 {
+                        daemon_warn!("pty daemon: accept failed ({consecutive}): {e}");
+                    }
+                    // Long enough that a descriptor shortage is not made
+                    // worse by spinning on it.
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
             };
             let id = ids.fetch_add(1, Ordering::Relaxed);
             spawn_client(id, stream, tx.clone());
@@ -881,5 +923,51 @@ mod tests {
         let g = new_generation();
         assert_eq!(g.len(), 32);
         assert!(g.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+}
+
+#[cfg(test)]
+mod accept_failure_tests {
+    use super::accept_failure_passes;
+    use std::io::{Error, ErrorKind};
+
+    /// The old loop left on ANY error, which took the daemon deaf while it
+    /// went on reporting itself as running. These are the failures that end
+    /// on their own, so leaving on them is the wrong answer.
+    ///
+    /// This covers the decision, not the loop. Nothing here proves the
+    /// acceptor keeps serving after a real descriptor shortage; that needs a
+    /// daemon under a lowered descriptor limit and is not written.
+    #[test]
+    fn failures_that_pass_are_not_fatal() {
+        for kind in [
+            ErrorKind::Interrupted,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::WouldBlock,
+            ErrorKind::TimedOut,
+        ] {
+            assert!(
+                accept_failure_passes(&Error::new(kind, "x")),
+                "{kind:?} should not end the acceptor"
+            );
+        }
+        for errno in [libc::EMFILE, libc::ENFILE] {
+            assert!(
+                accept_failure_passes(&Error::from_raw_os_error(errno)),
+                "errno {errno} should not end the acceptor"
+            );
+        }
+    }
+
+    /// A listener that cannot work is a different answer, and the daemon
+    /// shuts down rather than sitting deaf while the registry says running.
+    #[test]
+    fn a_broken_listener_is_fatal() {
+        for errno in [libc::EBADF, libc::EINVAL, libc::ENOTSOCK] {
+            assert!(
+                !accept_failure_passes(&Error::from_raw_os_error(errno)),
+                "errno {errno} should end the acceptor"
+            );
+        }
     }
 }
