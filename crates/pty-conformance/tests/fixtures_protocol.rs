@@ -407,8 +407,17 @@ fn a_client_that_never_reads_does_not_starve_the_others() {
     let doc = fixture("slow-reader.json");
     let id = doc["id"].as_str().unwrap();
     let total = doc["outputBytes"].as_u64().unwrap() as usize;
-    let within = Duration::from_millis(doc["deliveryWithinMs"].as_u64().unwrap());
-    let total_within = Duration::from_millis(doc["totalWithinMs"].as_u64().unwrap());
+    // The fixture's budgets describe the shipped binary. A debug build's VT
+    // parser is far slower, so the budgets are widened for it rather than
+    // reporting a product defect that release does not have. What the test
+    // checks either way is that the reading client is not starved by the one
+    // that never reads.
+    let within = throughput_budget(Duration::from_millis(
+        doc["deliveryWithinMs"].as_u64().unwrap(),
+    ));
+    let total_within = throughput_budget(Duration::from_millis(
+        doc["totalWithinMs"].as_u64().unwrap(),
+    ));
     let rig = Rig::new();
     let script = format!("sleep 0.5; head -c {total} /dev/zero | tr '\\0' x; exec cat");
     rig.daemon(id, &["sh", "-c", &script], DaemonOpts::no_display_name());

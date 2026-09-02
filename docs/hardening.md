@@ -104,6 +104,28 @@ rule is the inversion of the natural instinct:
 uniqueness from a clock is a candidate.** `docs/parity.md` §12b lists the
 substring candidates in the conformance suite that nobody has yet examined.
 
+## The conformance suite does not build the binary it tests
+
+**`cargo test -p pty-conformance` runs whatever is sitting at
+`target/debug/pty`.** The harness resolves that path (or `PTY_TEST_BIN`) at
+run time, and cargo has no reason to rebuild a binary that no test target
+depends on. So a source change you have not built is simply not in the run.
+
+**It bites hardest when you are proving a guard.** On 2026-09-02 a new test
+for the `pty peek` metadata race was checked by putting the defect back and
+expecting red. It stayed green through two runs. The defect was in the
+source and the test was running the fixed binary from before the edit. **The
+verdict was about a file nobody had compiled.**
+
+Both readings of that green are wrong in the same direction: it says the test
+is weak, or it says the defect is gone. **Run `cargo build -p pty` first, and
+the same green means something.** With the binary rebuilt, the test caught the
+defect in 12 of 300 runs.
+
+**This is the empty-corpus failure wearing a build system.** Nothing errors,
+nothing warns, and the run that measured nothing prints what a clean run
+prints.
+
 ## What is enforced
 
 - **Frame size.** A declared length above 32 MiB drops the connection, on

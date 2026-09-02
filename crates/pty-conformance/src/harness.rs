@@ -131,6 +131,37 @@ pub fn deadline() -> Duration {
     }
 }
 
+/// Is the binary under test the workspace's own unoptimized build?
+///
+/// `cargo test` defaults to the debug profile, and the debug binary is what
+/// [`pty_bin`] then picks. That matters only for the few fixtures that state
+/// a THROUGHPUT bound: the VT parser is the hot path and it is not optimized
+/// in a debug build.
+///
+/// Measured 2026-09-02, one megabyte of child output through a session with
+/// no clients attached: debug Rust 9.4 s, release Rust 0.22 s, Node 0.25 s.
+/// So a debug build misses a bound the shipped binary beats, and a fixture
+/// budget written for the shipped binary reads as a product defect.
+///
+/// False when `PTY_TEST_BIN` names a binary, because then the profile is the
+/// caller's business.
+pub fn unoptimized_binary_under_test() -> bool {
+    cfg!(debug_assertions) && std::env::var("PTY_TEST_BIN").map(|v| v.is_empty()).unwrap_or(true)
+}
+
+/// A fixture's throughput budget, widened for an unoptimized build.
+///
+/// The factor is smaller than the 43x above, on purpose. A debug build needs
+/// most of a 10 s budget for one megabyte, so eight times leaves room without
+/// letting a real starvation sit undetected for minutes.
+pub fn throughput_budget(base: Duration) -> Duration {
+    if unoptimized_binary_under_test() {
+        base * 8
+    } else {
+        base
+    }
+}
+
 /// Poll `cond` every 10 ms until it returns true or the default deadline
 /// passes. Panics with `what` on timeout.
 pub fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
