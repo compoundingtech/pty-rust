@@ -126,6 +126,54 @@ defect in 12 of 300 runs.
 nothing warns, and the run that measured nothing prints what a clean run
 prints.
 
+## Stealing a stale lock is not exclusive, and this file used to say it was
+
+**Measured 2026-09-02. Eight threads racing for one stale lock, four hundred
+rounds: 386 rounds had more than one winner.** Exclusion held in 14.
+
+The steal is three steps and nothing binds them together:
+
+    open(O_CREAT|O_EXCL)   -> fails, a lock file is there
+    read the holder pid    -> the holder is dead, so this lock is stale
+    unlink, then create    -> take it
+
+Two processes both reach step three believing the same thing:
+
+1. A unlinks the stale file and creates its own. **A now holds the lock.**
+2. B, whose decision came from the file A has already replaced, unlinks —
+   **and what it unlinks is A's live lock** — and then creates its own.
+3. Both hold an armed guard. Either one's drop unlinks the other's file, and
+   a third process can then walk in while both still believe they own it.
+
+**The unlink is the fault. A loser must never be able to remove a winner's
+file**, and here the loser cannot tell that the file it is removing is not the
+one it inspected.
+
+**The Node tool has the identical sequence and the identical defect**
+(`src/sessions.ts`, `acquireFileLock`). So this is not a difference between the
+two implementations and a mixed registry is no worse than either alone. Its
+comment there makes the same claim this file did: *"only one wins the wx open;
+the loser returns false instead of stomping on the winner's lock."* The loser
+stomps first and creates second.
+
+**Two tests carry the old belief in their names and neither establishes it.**
+`security_fixes.rs::concurrent_stealers_cannot_both_win` races two spawned
+processes, and process start-up jitter is what makes it pass;
+`registry_locks.rs::only_one_of_two_sequential_steals_wins` is honest about
+being sequential. Reproduce the real behaviour with a barrier: N threads that
+all wait, then all call `acquire_lock` on one stale lock, counted over many
+rounds. It does not need process spawning and it does not need luck.
+
+**A correct steal needs one exclusive create that only one process can win**,
+which means a second lock file to funnel the steal through, and that changes a
+protocol both implementations share. **It is not fixed here, on purpose. The
+decision is not one implementation's to take alone.**
+
+**When it bites:** a daemon crashes and leaves its lock behind, then two
+creators for the same id arrive together. Then two daemons can own one name,
+with socket rebinding and last-writer-wins metadata, or two event writers can
+interleave a truncation with an append.
+
 ## What is enforced
 
 - **Frame size.** A declared length above 32 MiB drops the connection, on
@@ -136,7 +184,7 @@ prints.
   is created, with the path and the limit in the message.
 - **Creation locks.** `<id>.lock` held by a live process turns a second
   creator away. A lock whose holder is dead, or whose contents are garbage,
-  is stolen — and two concurrent stealers cannot both win.
+  is stolen. **Two concurrent stealers CAN both win. See below.**
 - **Session names.** Validated before a spawn, so automation fails with a
   message rather than deep inside a syscall.
 - **Generation tokens.** `pty exec` rewrites a session's command only while

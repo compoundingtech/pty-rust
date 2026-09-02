@@ -118,6 +118,11 @@ fn garbage_lock_content_is_treated_as_stale() {
 
 /// node: tests/security-fixes.test.ts:77
 #[test]
+/// **This does not establish what its name claims, and the name is kept only
+/// because it mirrors the Node test.** Two spawned processes race, and
+/// start-up jitter is what separates them. Eight threads released by a
+/// barrier produce more than one winner in 386 rounds out of 400. See
+/// docs/hardening.md, "Stealing a stale lock is not exclusive".
 fn concurrent_stealers_cannot_both_win() {
     let rig = Rig::new();
     let lock = rig.root().join("race4.lock");
