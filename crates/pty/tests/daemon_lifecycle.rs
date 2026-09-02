@@ -123,8 +123,14 @@ fn a_clean_exit_keeps_the_raw_code_and_last_lines() {
     assert_eq!(exits.len(), 1);
     assert_eq!(exits[0]["exitCode"], 5);
     assert!(exits[0].get("signal").is_none());
+    // The exit write appends these four, in this order. `lastOutputAtMs` is
+    // last because the child printed and exited inside the one-second
+    // debounce, so the exit write carried the stamp rather than a timer.
     let keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(&keys[keys.len() - 3..], ["exitCode", "exitedAt", "lastLines"]);
+    assert_eq!(
+        &keys[keys.len() - 4..],
+        ["exitCode", "exitedAt", "lastLines", "lastOutputAtMs"]
+    );
 }
 
 /// node: tests/exit-event-race.test.ts:82-136
