@@ -128,21 +128,30 @@ pub fn run(args: &[String]) -> CliResult {
         Ok(_) => Ok(0),
         // Socket gone: node prints the `lastLines` an exited session saved,
         // or says there is no saved output. Both exit 0.
-        Err(client::ClientError::NotReachable { .. })
-            if registry::read_metadata(&name).is_some() =>
-        {
-            let meta = registry::read_metadata(&name).unwrap();
-            match meta.last_lines.as_deref() {
-                Some(lines) if !lines.is_empty() => {
-                    println!("{}", lines.join("\n"));
+        //
+        // Read the record ONCE. A guard that reads it and a body that reads
+        // it again are two separate reads, and a `pty rm` between them left
+        // the second one with nothing to unwrap. That panicked.
+        Err(e @ client::ClientError::NotReachable { .. }) => match registry::read_metadata(&name) {
+            Some(meta) => {
+                match meta.last_lines.as_deref() {
+                    Some(lines) if !lines.is_empty() => {
+                        println!("{}", lines.join("\n"));
+                    }
+                    _ => {
+                        let status = if meta.exited_at.is_some() { "exited" } else { "vanished" };
+                        eprintln!("Session \"{name}\" has {status} with no saved output.");
+                    }
                 }
-                _ => {
-                    let status = if meta.exited_at.is_some() { "exited" } else { "vanished" };
-                    eprintln!("Session \"{name}\" has {status} with no saved output.");
-                }
+                Ok(0)
             }
-            Ok(0)
-        }
+            // The record went away under us. That is the same answer as a
+            // session that was never there.
+            None => {
+                eprintln!("{e}");
+                Ok(1)
+            }
+        },
         Err(e) => {
             eprintln!("{e}");
             Ok(1)
