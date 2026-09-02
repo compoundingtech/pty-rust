@@ -224,10 +224,34 @@ impl Daemon {
     }
 
     /// node: src/server.ts:1040-1043
+    /// A client asked to leave: close its socket and take it off the books
+    /// at once.
+    ///
+    /// **Removing it here rather than when its socket close comes back is a
+    /// deliberate difference from the Node tool**, which deletes the client
+    /// in its `close` handler (`src/server.ts`). Both designs leave a window
+    /// between a client observing its own socket close and the daemon
+    /// recording it, and in that window `pty stats` counts a client that has
+    /// already gone.
+    ///
+    /// The window is invisible on Linux — 0 stale readings in 60 attempts,
+    /// for both implementations, measured 2026-09-02 — and wide enough on
+    /// Apple silicon to fail a test that detaches and immediately reattaches.
+    /// That fits the close-detection difference in docs/parity.md §12c: the
+    /// reader thread there learns of a departure from an ordinary end of
+    /// stream rather than a reset.
+    ///
+    /// There is nothing to wait for. The client has said it is leaving, and
+    /// the size negotiation should stop counting it immediately for the same
+    /// reason. `on_closed` still runs later and finds nothing to remove.
+    ///
+    /// The writer thread keeps its own end of the channel, so the `End` it
+    /// was just sent still reaches it.
     fn on_detach(&mut self, id: u64) {
         if let Some(c) = self.clients.get(&id) {
             let _ = c.tx.send(Out::End);
         }
+        self.on_closed(id);
     }
 
     /// node: src/server.ts:1045-1049
