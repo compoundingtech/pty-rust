@@ -138,6 +138,13 @@ pub struct TerminalActor {
     events: Vec<TerminalEvent>,
     last_title: Option<String>,
     scrollback: usize,
+    /// The normal screen, serialized at the moment the child switched to the
+    /// alternate one. libghostty gives no reader for the screen that is not
+    /// active, and a replay has to carry both: a client that reconnects while
+    /// a full-screen program runs must still have the normal buffer to fall
+    /// back to when that program exits. Node gets it for free because
+    /// xterm's serialize addon holds both buffers.
+    normal_replay: Option<String>,
 }
 
 impl TerminalActor {
@@ -177,12 +184,19 @@ impl TerminalActor {
             events: Vec::new(),
             last_title: None,
             scrollback,
+            normal_replay: None,
         }
     }
 
     /// Node's defaults: 24 x 80, 10 000 lines of scrollback.
     pub fn with_defaults() -> TerminalActor {
         TerminalActor::new(24, 80, DEFAULT_SCROLLBACK)
+    }
+
+    /// The normal screen as it was when the child entered the alternate
+    /// one, or `None` when the normal screen is the active one.
+    pub fn normal_replay(&self) -> Option<&str> {
+        self.normal_replay.as_deref()
     }
 
     /// The underlying terminal, for reads this API does not cover.
@@ -210,8 +224,23 @@ impl TerminalActor {
                     } else if c.is_kitty_pop() {
                         self.modes.kitty_stack.pop();
                     } else if let Some((params, set)) = c.dec_modes() {
+                        let was_alt = self.modes.alt_screen;
                         for &p in params {
                             self.modes.apply_dec(p, set, &mut self.events);
+                        }
+                        match (was_alt, self.modes.alt_screen) {
+                            // Everything written so far belongs to the normal
+                            // screen. Put it in the terminal first, then take
+                            // the copy, because the switch itself is still in
+                            // `feed` and has not been applied.
+                            (false, true) => {
+                                self.flush_feed(&mut feed);
+                                self.normal_replay =
+                                    Some(crate::serialize::vt(&self.term, true));
+                            }
+                            // Back on the normal screen: it serializes itself.
+                            (true, false) => self.normal_replay = None,
+                            _ => {}
                         }
                     }
                     feed.extend_from_slice(&c.raw);

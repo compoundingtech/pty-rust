@@ -65,11 +65,46 @@ fn peek_never_prefixes_1049h() {
     a.write(b"\x1b[?1049h\x1b[Halt-marker");
     for opts in [SerializeOpts::PEEK, SerializeOpts::PEEK_FULL] {
         let screen = a.serialize(opts);
+        let normal = a.normal_replay().unwrap_or("");
         let body = pty_terminal::serialize::vt(a.terminal(), opts.scrollback);
-        assert_eq!(screen, body, "no prefix was added");
+        // The normal screen comes first and the alternate one after it, but
+        // no mode prefix is added on top.
+        assert_eq!(screen, format!("{normal}{body}"), "a prefix was added");
         assert!(screen.contains("alt-marker"));
     }
     assert_eq!(pty_terminal::serialize::mode_prefix(&a.modes(), false), "");
+}
+
+/// A replay taken while the child is on the alternate screen carries the
+/// NORMAL screen too, ahead of the switch. Node gets this from xterm's
+/// serialize addon, which walks both buffers.
+///
+/// Measured against the Node binary 0.12.0 on 2026-09-02: its ATTACH replay
+/// for a session that printed lines and then entered the alternate screen
+/// reads `ESC[?1049h`, the normal lines, `ESC[?1049h`, then the alternate
+/// lines. Without the normal half a client that reconnects has a blank
+/// normal screen the moment the full-screen program exits.
+#[test]
+fn a_replay_from_the_alt_screen_carries_the_normal_screen_first() {
+    let mut a = actor();
+    a.write(b"normal-line\r\n");
+    a.write(b"\x1b[?1049h\x1b[Halt-marker");
+
+    let screen = a.serialize(SerializeOpts::ATTACH);
+    assert!(screen.contains("normal-line"), "{screen:?}");
+    assert!(screen.contains("alt-marker"), "{screen:?}");
+    // The last switch into the alternate screen separates the two halves.
+    let switch = screen.rfind("\x1b[?1049h").expect("alt-screen switch");
+    assert!(
+        !screen[switch..].contains("normal-line"),
+        "the normal screen was replayed after the switch: {screen:?}"
+    );
+    assert!(screen[switch..].contains("alt-marker"), "{screen:?}");
+
+    // Leaving the alternate screen makes the live normal screen the answer
+    // again, so the copy is dropped.
+    a.write(b"\x1b[?1049l");
+    assert_eq!(a.normal_replay(), None);
 }
 
 // ── modes that must reach a late attacher (tests/integration.test.ts:1617-1671) ──

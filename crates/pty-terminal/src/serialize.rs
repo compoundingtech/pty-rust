@@ -79,9 +79,22 @@ pub fn mode_prefix(modes: &Modes, include_alt_screen: bool) -> String {
     prefix
 }
 
-/// The replay payload: [`mode_prefix`] + [`vt`].
+/// The replay payload: [`mode_prefix`] + the normal screen (when the child
+/// is on the alternate one) + [`vt`].
+///
+/// A replay taken while a full-screen program runs carries BOTH screens, in
+/// Node's order: the normal buffer, then `ESC[?1049h`, then the alternate
+/// buffer. `vt` supplies the switch and the alternate half; the normal half
+/// is the copy the actor took when the child left it. Without it a client
+/// that reconnects gets a blank normal screen the moment the program exits.
+///
+/// node: src/server.ts:962 and 1017 (`serialize.serialize()`, whose addon
+/// walks both buffers).
 pub fn serialize_for_replay(actor: &TerminalActor, opts: SerializeOpts) -> String {
     let mut out = mode_prefix(&actor.modes(), opts.include_alt_screen_prefix);
+    if let Some(normal) = actor.normal_replay() {
+        out.push_str(normal);
+    }
     out.push_str(&vt(actor.terminal(), opts.scrollback));
     out
 }
