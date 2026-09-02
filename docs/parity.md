@@ -432,12 +432,12 @@ Everything else that was absent there is now done: the child is told its
 working directory as the caller wrote it, memory and CPU come from `ps` where
 there is no `/proc`, and the build works.
 
-**Two more failures on that machine are open and neither is understood.** A
-multi-byte character split across two DATA frames comes back as a replacement
-character, and a detached client is still counted as attached after its socket
-has closed. Both reproduce there and neither reproduces here; the frame split
-was checked on Linux and it really does split, so a pass here is not an
-accident of chunking.
+**Nothing else is open there.** The whole suite is green on Apple silicon:
+1308 tests, one load-sensitive binary, no real failures. Two things that looked
+like macOS defects were not: a character split across DATA frames was a test
+that let its child speak before a client was listening, and a detached client
+counted twice was a daemon race both implementations share and only a slower
+machine can see (decision 0007).
 
 ## 13. In flight, not on `main`
 

@@ -89,6 +89,24 @@ for example in tests.
 `pty version` prints `0.13.<n>-rust+<short-sha>`: one minor above the Node line,
 a `rust` pre-release tag, and the commit it was built from.
 
+### If you are already inside a session
+
+**`run` and `attach` refuse to nest, and `--force` is how you say you meant
+it.** A session inside a session is usually a mistake — a detach key press then
+reaches the wrong one — so both commands stop and explain instead.
+
+```sh
+pty attach --force API      # attach from inside another session
+pty run --force -- <cmd>    # create one from inside another session
+```
+
+**The refusal prints to standard output and exits 0.** So a script that
+captures output and checks the exit code cannot tell it from success: it sees
+an empty result and a zero. That behaviour matches the Node tool and is not
+about to change quietly, but anything automating `pty` from inside a session
+should pass `--force` rather than discover this. It cost somebody an afternoon
+of looking for a terminal problem that was not there.
+
 ### Commands not in this build
 
 Three Node commands are deferred (see [docs/parity.md §12](docs/parity.md#12-candidates-to-leave-off)

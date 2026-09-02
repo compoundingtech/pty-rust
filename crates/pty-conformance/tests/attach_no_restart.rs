@@ -81,7 +81,17 @@ fn exited_session_is_refused_before_delayed_input_can_restart_it() {
     spawn_retained_once(&rig, id, &marker);
 
     let mut t = rig.pty_tty_raw(&[], &[], &["attach", "--no-restart", id], 30, 100);
-    std::thread::sleep(Duration::from_millis(250));
+    // Wait for the refusal, then type. A sleep here is a guess about how long
+    // the command takes to decide, and this binary lost that guess twice on a
+    // slower machine — a different test inside it each time, which is what a
+    // load-sensitive wait looks like rather than a flaky assertion. The point
+    // of the test is that input arriving AFTER the refusal cannot resurrect
+    // anything, so waiting for the refusal is the thing it meant to do.
+    assert!(
+        t.wait_for_text("is not running", deadline()),
+        "no refusal before the input was sent: {}",
+        t.output_str()
+    );
     t.write(b"future-relay-input\r");
     let code = t.wait_exit(Duration::from_secs(10)).expect("attach exits");
     let output = t.output_str();
@@ -116,7 +126,17 @@ fn vanished_session_is_refused_without_evaluating_its_command() {
     );
 
     let mut t = rig.pty_tty_raw(&[], &[], &["attach", "--no-restart", id], 30, 100);
-    std::thread::sleep(Duration::from_millis(250));
+    // Wait for the refusal, then type. A sleep here is a guess about how long
+    // the command takes to decide, and this binary lost that guess twice on a
+    // slower machine — a different test inside it each time, which is what a
+    // load-sensitive wait looks like rather than a flaky assertion. The point
+    // of the test is that input arriving AFTER the refusal cannot resurrect
+    // anything, so waiting for the refusal is the thing it meant to do.
+    assert!(
+        t.wait_for_text("is not running", deadline()),
+        "no refusal before the input was sent: {}",
+        t.output_str()
+    );
     t.write(b"future-relay-input\r");
     let code = t.wait_exit(Duration::from_secs(10)).expect("attach exits");
     let output = t.output_str();
