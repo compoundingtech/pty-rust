@@ -187,6 +187,35 @@ completion scripts are vendored byte for byte from the Node repository
 (`crates/pty/tests/fixtures/help/`, `completions/`) and the tests hold the
 binary to them.
 
+### Reading a single failure from a full run
+
+**One test failing in a whole-workspace run is not yet a defect. Re-run it
+alone before treating it as one.**
+
+```sh
+cargo test -p <crate> --test <binary> -- --exact --test-threads=1 <name>
+```
+
+The suite runs 139 binaries in parallel, and each one drives real processes
+through real terminals. On a machine slow enough, one or two of them lose a
+race per run — **and which ones varies across the whole suite**, so a name you
+have never seen before is the normal case rather than a new regression.
+
+**Measured on 2026-09-02, and the two machines differ sharply.** Seventeen
+whole-workspace runs on one Linux host: fifteen completely clean, and the two
+that were not each named a real defect that was then fixed. No run there lost
+a race. Four runs on an Apple silicon laptop: one or two lost races every
+time, never the same ones, all green when run alone.
+
+**So do not chase these by name.** A failure worth fixing has a cause you can
+state — the two in this repository's history that looked like this both did: a
+sleep standing in for a handshake, in a test that then failed reliably once
+the timing was turned up. **A name that passes alone and has no such cause is
+a scheduling accident**, and hunting them one at a time is unbounded work.
+
+Whether a slower machine is the whole explanation is not established; there is
+one laptop and nothing to compare it against.
+
 ### Checking the macOS build without a Mac
 
 `pty-core` deliberately has no Zig dependency, so it can be type-checked for
