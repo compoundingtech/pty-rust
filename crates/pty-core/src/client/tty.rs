@@ -7,6 +7,68 @@ use std::os::unix::io::RawFd;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+/// A pipe with `FD_CLOEXEC` on both ends, and `O_NONBLOCK` too when asked.
+///
+/// Every platform we build for has `pipe2` except Apple's, which has no such
+/// system call at all — it is missing from the kernel, not from a packaging
+/// of `libc`. So there are two implementations and the difference matters:
+/// `pipe2` sets the flags as it creates the descriptors, and the fallback
+/// sets them afterwards with `fcntl`. In the gap between the two calls a
+/// `fork` on another thread inherits descriptors that are not yet
+/// close-on-exec. That is the whole reason `pipe2` exists, and it is why the
+/// atomic form is used wherever it is offered rather than using the fallback
+/// everywhere for the sake of one code path.
+///
+/// The exposure here is small: the pipes this makes are created early and on
+/// one thread. It is not nothing, so it is written down rather than smoothed
+/// over.
+pub fn cloexec_pipe(nonblocking: bool) -> io::Result<[RawFd; 2]> {
+    let mut fds = [0 as RawFd; 2];
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    {
+        let mut flags = libc::O_CLOEXEC;
+        if nonblocking {
+            flags |= libc::O_NONBLOCK;
+        }
+        // SAFETY: `pipe2` writes two descriptors into a two-element array.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), flags) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        // SAFETY: `pipe` writes two descriptors into a two-element array.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for fd in fds {
+            // Read the flags before adding to them. A fresh pipe carries
+            // none of these, but a helper that clears what it did not set is
+            // the kind of thing somebody reuses and regrets.
+            let set = |get: libc::c_int, set: libc::c_int, bit: libc::c_int| -> bool {
+                // SAFETY: `fd` is a descriptor this function just created.
+                let current = unsafe { libc::fcntl(fd, get) };
+                current >= 0 && unsafe { libc::fcntl(fd, set, current | bit) } == 0
+            };
+            let ok = set(libc::F_GETFD, libc::F_SETFD, libc::FD_CLOEXEC)
+                && (!nonblocking || set(libc::F_GETFL, libc::F_SETFL, libc::O_NONBLOCK));
+            if !ok {
+                let err = io::Error::last_os_error();
+                // SAFETY: both descriptors are ours and still open.
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(fds)
+}
+
 /// Is `fd` a terminal?
 pub fn is_tty(fd: RawFd) -> bool {
     unsafe { libc::isatty(fd) == 1 }
@@ -182,10 +244,7 @@ impl SigwinchPipe {
     /// Install the handler.
     pub fn install() -> io::Result<SigwinchPipe> {
         let guard = SIGWINCH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let mut fds = [0 as RawFd; 2];
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let fds = cloexec_pipe(true)?;
         SIGWINCH_FD.store(fds[1], Ordering::SeqCst);
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };

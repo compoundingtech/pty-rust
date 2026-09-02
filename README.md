@@ -168,3 +168,19 @@ pointed at the Node `pty` to check the reference itself. Help texts and
 completion scripts are vendored byte for byte from the Node repository
 (`crates/pty/tests/fixtures/help/`, `completions/`) and the tests hold the
 binary to them.
+
+### Checking the macOS build without a Mac
+
+`pty-core` deliberately has no Zig dependency, so it can be type-checked for
+Apple silicon from any machine:
+
+```sh
+rustup target add aarch64-apple-darwin
+cargo check -p pty-core --target aarch64-apple-darwin
+```
+
+**This is worth running before you touch anything platform-specific.** It
+caught a call to `pipe2`, which Linux has and macOS does not, and it produced
+the same error a Mac did. Building the whole workspace still needs a Mac and a
+working Zig, because `pty-terminal` compiles libghostty. This check covers the
+crate where the portable code lives, which is where such a mistake goes.

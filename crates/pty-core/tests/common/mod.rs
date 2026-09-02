@@ -189,8 +189,9 @@ pub struct Pipe {
 }
 
 pub fn pipe() -> Pipe {
-    let mut fds = [0i32; 2];
-    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    // Not `libc::pipe2` directly: Apple has no such call, and this helper
+    // is the one place that difference is handled.
+    let fds = pty_core::client::tty::cloexec_pipe(false).expect("pipe");
     unsafe {
         Pipe {
             r: OwnedFd::from_raw_fd(fds[0]),

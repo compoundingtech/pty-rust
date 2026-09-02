@@ -41,9 +41,8 @@ impl StreamCli {
     /// pipe. With `read_stream`, a thread drains the pipe into
     /// [`StreamCli::stream`]; otherwise the read end stays in `stream_fd`.
     fn spawn(rig: &Rig, args: &[&str], read_stream: bool) -> StreamCli {
-        let mut fds = [0i32; 2];
-        // SAFETY: plain pipe2 into a two-element array.
-        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // Not `libc::pipe2` directly: Apple has no such call.
+        let fds = pty_core::client::tty::cloexec_pipe(false).expect("pipe");
         let (r, w) = (fds[0], fds[1]);
         let mut all: Vec<&str> = vec!["attach", "--attach-stream-fd-v1", "3"];
         all.extend_from_slice(args);
