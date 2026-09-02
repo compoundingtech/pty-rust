@@ -322,15 +322,32 @@ fn create_or_attach(
     let mut event_lock = None;
     let mut creation_lock = None;
     if !inherited_creation_lock {
-        let Some(guard) = registry::acquire_event_lock(name) else {
-            eprintln!("Session \"{name}\" event log is busy. Try again.");
-            return Ok(1);
+        let guard = match registry::lock_or_refusal(&registry::event_lock_path(name)) {
+            Ok(guard) => guard,
+            Err(registry::LockRefusal::Busy) => {
+                eprintln!("Session \"{name}\" event log is busy. Try again.");
+                return Ok(1);
+            }
+            // Nothing here is worth a "try again": the lock file could not
+            // be created and the next attempt meets the same wall.
+            Err(registry::LockRefusal::Unavailable(cause)) => {
+                eprintln!("{cause}");
+                return Ok(1);
+            }
         };
         event_lock = Some(guard);
-        let Some(guard) = registry::acquire_lock(name) else {
-            registry::release_event_lock(name);
-            eprintln!("Session \"{name}\" is being created by another process. Try again.");
-            return Ok(1);
+        let guard = match registry::lock_or_refusal(&registry::lock_path(name)) {
+            Ok(guard) => guard,
+            Err(registry::LockRefusal::Busy) => {
+                registry::release_event_lock(name);
+                eprintln!("Session \"{name}\" is being created by another process. Try again.");
+                return Ok(1);
+            }
+            Err(registry::LockRefusal::Unavailable(cause)) => {
+                registry::release_event_lock(name);
+                eprintln!("{cause}");
+                return Ok(1);
+            }
         };
         creation_lock = Some(guard);
         session = registry::get_session_by_name(name);

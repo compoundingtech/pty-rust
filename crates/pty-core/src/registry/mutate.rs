@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::lock::{acquire_event_lock, acquire_lock, event_busy_message, metadata_busy_message};
+use super::lock::{acquire_lock, metadata_busy_message, take_event_lock};
 use super::metadata::{
     SessionMetadata, TagMap, apply_metadata_diff, read_metadata_map, write_metadata_map,
 };
@@ -258,9 +258,7 @@ pub fn apply_metadata_patch_by_id(
     event: MetadataPatchEvent,
 ) -> Result<MetadataPatchResult, String> {
     patch.validate()?;
-    let Some(_event_lock) = acquire_event_lock(id) else {
-        return Err(event_busy_message(id));
-    };
+    let _event_lock = take_event_lock(id)?;
 
     #[derive(Default)]
     struct PatchState {

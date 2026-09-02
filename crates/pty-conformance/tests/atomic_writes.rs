@@ -278,3 +278,45 @@ fn reader_never_sees_a_half_written_event_log_during_truncation() {
     assert!(lines.len() <= 1000, "retention did not cap the log: {} lines", lines.len());
     assert!(lines.last().unwrap().contains("\"i\":59"));
 }
+
+/// A lock that cannot be CREATED is a different answer from a lock somebody
+/// holds, and the two used to print the same line.
+///
+/// `acquire_file_lock` folded every I/O error into "no lock", so a registry
+/// this process may not write reported `event log is busy. Retry the
+/// operation.` — untrue, and an instruction that can never work. Node throws
+/// the underlying error out of `acquireFileLock` instead: it returns false
+/// only on `EEXIST`.
+///
+/// node: src/sessions.ts:2293-2336
+#[test]
+fn a_registry_that_cannot_be_written_says_so_instead_of_busy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new();
+    rig.daemon("at6", &["cat"], DaemonOpts::no_display_name());
+    let root = rig.root().to_path_buf();
+    let before = std::fs::metadata(&root).unwrap().permissions().mode();
+
+    // Take away the write bit on the registry directory. Every lock file
+    // lives directly in it, so no lock can be created at all.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let tag = rig.pty(&["tag", "at6", "a=1"]);
+    let emit = rig.pty(&["emit", "at6", "user.blocked"]);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(before)).unwrap();
+
+    for (what, out) in [("tag", &tag), ("emit", &emit)] {
+        let said = out.stderr();
+        assert_ne!(out.status, 0, "pty {what} succeeded: {}", out.summary());
+        assert!(
+            !said.to_lowercase().contains("busy"),
+            "pty {what} called a permission error busy: {}",
+            out.summary()
+        );
+        assert!(
+            said.to_lowercase().contains("permission denied") || said.contains("EACCES"),
+            "pty {what} did not name the cause: {}",
+            out.summary()
+        );
+    }
+}

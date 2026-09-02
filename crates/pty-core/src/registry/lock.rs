@@ -111,8 +111,58 @@ pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGua
 }
 
 /// [`try_acquire_file_lock`] with I/O errors folded into `None`.
+///
+/// Use it only where "not taken" is the whole answer. Anything that reports
+/// to a caller wants [`lock_or_refusal`] instead: folding an I/O error into
+/// `None` turns a read-only registry into "the event log is busy, retry",
+/// which is untrue and sends the caller round a loop that cannot end.
 pub fn acquire_file_lock(lock_path: &Path) -> Option<LockGuard> {
     try_acquire_file_lock(lock_path).ok().flatten()
+}
+
+/// Why a lock was not taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockRefusal {
+    /// A live process holds it. Retrying can work.
+    Busy,
+    /// The lock file could not be created at all: a read-only registry, a
+    /// full disk, a directory this process may not write. Retrying cannot
+    /// work, so the message must not ask for a retry. Node throws the same
+    /// error out of `acquireFileLock` rather than reporting "busy".
+    Unavailable(String),
+}
+
+/// Take `lock_path` and say why when it refuses.
+///
+/// node: src/sessions.ts:2293-2336 (`acquireFileLock` returns false only on
+/// `EEXIST` and rethrows every other error).
+pub fn lock_or_refusal(lock_path: &Path) -> Result<LockGuard, LockRefusal> {
+    match try_acquire_file_lock(lock_path) {
+        Ok(Some(guard)) => Ok(guard),
+        Ok(None) => Err(LockRefusal::Busy),
+        Err(e) => Err(LockRefusal::Unavailable(format!(
+            "{}: {e}",
+            lock_path.display()
+        ))),
+    }
+}
+
+/// Take `<name>.events.lock`, with Node's busy text when a live holder has
+/// it and the real cause when the file cannot be created.
+pub fn take_event_lock(name: &str) -> Result<LockGuard, String> {
+    lock_or_refusal(&event_lock_path(name)).map_err(|r| match r {
+        LockRefusal::Busy => event_busy_message(name),
+        LockRefusal::Unavailable(cause) => cause,
+    })
+}
+
+/// Take `<name>.lock`, with Node's busy text when a live holder has it and
+/// the real cause when the file cannot be created.
+pub fn take_metadata_lock(name: &str) -> Result<LockGuard, String> {
+    lock_or_refusal(&lock_path(name)).map_err(|r| match r {
+        LockRefusal::Busy => metadata_busy_message(name),
+        LockRefusal::Unavailable(cause) => cause,
+    })
 }
 
 /// Release a lock by path (unlink; missing is fine).
@@ -169,9 +219,15 @@ pub const EVENT_LOCK_WAIT: Duration = Duration::from_millis(5_000);
 /// node: src/events.ts:237-249
 pub fn wait_for_event_lock(name: &str, wait: Duration) -> Result<LockGuard, String> {
     let deadline = Instant::now() + wait;
+    let path = event_lock_path(name);
     loop {
-        if let Some(guard) = acquire_event_lock(name) {
-            return Ok(guard);
+        match lock_or_refusal(&path) {
+            Ok(guard) => return Ok(guard),
+            // The lock file cannot be made at all. Waiting five seconds to
+            // say so would be five seconds spent on an answer that will not
+            // change.
+            Err(LockRefusal::Unavailable(cause)) => return Err(cause),
+            Err(LockRefusal::Busy) => {}
         }
         let now = Instant::now();
         if now >= deadline {
@@ -188,6 +244,9 @@ pub enum LockBusy {
     Events,
     /// `<name>.lock` is held by a live process.
     Metadata,
+    /// Neither lock file could be created. Carries the cause, because
+    /// "busy, retry" would be untrue.
+    Unavailable(String),
 }
 
 impl LockBusy {
@@ -196,6 +255,7 @@ impl LockBusy {
         match self {
             LockBusy::Events => event_busy_message(name),
             LockBusy::Metadata => metadata_busy_message(name),
+            LockBusy::Unavailable(cause) => cause.clone(),
         }
     }
 }
@@ -205,8 +265,14 @@ impl LockBusy {
 ///
 /// node: src/sessions.ts:2188-2202
 pub fn with_both_locks<T>(name: &str, f: impl FnOnce() -> T) -> Result<T, LockBusy> {
-    let events = acquire_event_lock(name).ok_or(LockBusy::Events)?;
-    let metadata = acquire_lock(name).ok_or(LockBusy::Metadata)?;
+    let events = lock_or_refusal(&event_lock_path(name)).map_err(|r| match r {
+        LockRefusal::Busy => LockBusy::Events,
+        LockRefusal::Unavailable(cause) => LockBusy::Unavailable(cause),
+    })?;
+    let metadata = lock_or_refusal(&lock_path(name)).map_err(|r| match r {
+        LockRefusal::Busy => LockBusy::Metadata,
+        LockRefusal::Unavailable(cause) => LockBusy::Unavailable(cause),
+    })?;
     let out = f();
     drop(metadata);
     drop(events);

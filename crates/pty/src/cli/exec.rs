@@ -11,7 +11,8 @@
 
 use pty_core::events::Event;
 use pty_core::registry::{
-    self, MutateOptions, MutateStatus, acquire_event_lock, release_event_lock,
+    self, LockRefusal, MutateOptions, MutateStatus, event_lock_path, lock_or_refusal,
+    release_event_lock,
 };
 
 use super::{CliError, CliResult};
@@ -64,12 +65,14 @@ pub fn run(args: &[String]) -> CliResult {
         .collect::<Vec<_>>()
         .join(" ");
 
-    let Some(_event_lock) = acquire_event_lock(&session) else {
-        return Err(format!(
-            "pty exec: session \"{session}\" event log is busy; retry the operation."
-        )
-        .into());
-    };
+    let _event_lock = lock_or_refusal(&event_lock_path(&session)).map_err(|r| match r {
+        LockRefusal::Busy => {
+            format!("pty exec: session \"{session}\" event log is busy; retry the operation.")
+        }
+        // The lock file could not be made. Asking for a retry would be a
+        // lie: nothing about a read-only root changes on the next attempt.
+        LockRefusal::Unavailable(cause) => format!("pty exec: {cause}"),
+    })?;
 
     // Node throws out of the mutate callback for a pty.toml session. The
     // callback here reports it instead and writes nothing.

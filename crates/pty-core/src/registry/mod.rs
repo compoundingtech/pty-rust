@@ -32,9 +32,10 @@ pub use list::{
     socket_reachable, wait_for_process_exit,
 };
 pub use lock::{
-    EVENT_LOCK_WAIT, LockBusy, LockGuard, acquire_event_lock, acquire_file_lock, acquire_lock,
-    event_busy_message, is_lock_owned_by_pid, metadata_busy_message, release_event_lock,
-    release_file_lock, release_lock, try_acquire_file_lock, wait_for_event_lock, with_both_locks,
+    EVENT_LOCK_WAIT, LockBusy, LockGuard, LockRefusal, acquire_event_lock, acquire_file_lock,
+    acquire_lock, event_busy_message, is_lock_owned_by_pid, lock_or_refusal,
+    metadata_busy_message, release_event_lock, release_file_lock, release_lock, take_event_lock,
+    take_metadata_lock, try_acquire_file_lock, wait_for_event_lock, with_both_locks,
 };
 pub use metadata::{
     EnvMap, SESSION_EXIT_LAST_LINES_LIMIT, SessionMetadata, TagMap, apply_metadata_diff,

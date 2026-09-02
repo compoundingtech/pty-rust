@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 use crate::registry::atomic::atomic_write;
 use crate::registry::lock::{
-    EVENT_LOCK_WAIT, LockGuard, acquire_event_lock, event_busy_message, wait_for_event_lock,
+    EVENT_LOCK_WAIT, LockGuard, take_event_lock, wait_for_event_lock,
 };
 use crate::registry::metadata::TagMap;
 use crate::registry::mutate::MetadataChangeSnapshot;
@@ -405,9 +405,7 @@ pub fn append_event_locked(name: &str, event: &Event) -> std::io::Result<()> {
 ///
 /// node: src/events.ts:286-295
 pub fn append_event_sync(name: &str, event: &Event) -> Result<(), String> {
-    let Some(_lock) = acquire_event_lock(name) else {
-        return Err(event_busy_message(name));
-    };
+    let _lock = take_event_lock(name)?;
     append_event_locked(name, event).map_err(|e| e.to_string())
 }
 
@@ -443,9 +441,7 @@ pub fn emit_user_event(
 /// node: src/events.ts:392-402
 pub fn clear_events(name: &str) -> Result<(), String> {
     ensure_session_dir().map_err(|e| e.to_string())?;
-    let Some(_lock) = acquire_event_lock(name) else {
-        return Err(event_busy_message(name));
-    };
+    let _lock = take_event_lock(name)?;
     let _ = std::fs::write(events_path(name), b"");
     Ok(())
 }
@@ -454,9 +450,7 @@ pub fn clear_events(name: &str) -> Result<(), String> {
 ///
 /// node: src/events.ts:404-413
 pub fn remove_events(name: &str) -> Result<(), String> {
-    let Some(_lock) = acquire_event_lock(name) else {
-        return Err(event_busy_message(name));
-    };
+    let _lock = take_event_lock(name)?;
     let _ = std::fs::remove_file(events_path(name));
     Ok(())
 }
