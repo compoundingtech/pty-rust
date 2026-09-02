@@ -82,6 +82,16 @@ pub struct SessionMetadata {
     /// Stamped by the daemon on every non-readonly ATTACH.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attach_at: Option<String>,
+    /// Unix milliseconds for the newest child output the daemon has seen.
+    /// Absent until a session produces output, and absent on a record an
+    /// older daemon wrote — never zero, and never a claim that the session
+    /// is idle. The daemon already parses every byte, so the stamp costs
+    /// nothing to take; it is persisted at most once a second while output
+    /// flows.
+    ///
+    /// node: src/sessions.ts (`lastOutputAtMs`), docs/vrs/requirements.md R14
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at_ms: Option<i64>,
     /// Every field this version does not model, round-tripped verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -176,7 +186,7 @@ impl SessionMetadata {
         if let Some(env) = &self.env {
             m.insert("env".into(), string_map_value(env));
         }
-        for key in ["exitCode", "exitedAt", "lastLines", "lastAttachAt"] {
+        for key in ["exitCode", "exitedAt", "lastLines", "lastAttachAt", "lastOutputAtMs"] {
             if let Some(v) = self.to_map().get(key) {
                 m.insert(key.into(), v.clone());
             }

@@ -90,8 +90,21 @@ pub(crate) struct Daemon {
     exit_drain_deadline: Option<Instant>,
     exit_shutdown_at: Option<Instant>,
     exit_meta_retry: Option<(Instant, Instant)>,
+    /// Unix milliseconds for the newest child output, in memory. `None`
+    /// until the child prints something.
+    last_output_at_ms: Option<i64>,
+    /// When the pending activity write is due. A trailing-edge debounce: the
+    /// first chunk after a quiet period schedules one write a second out, and
+    /// every chunk inside that window folds into it, so a chatty session
+    /// costs one metadata write per second rather than one per chunk.
+    activity_persist_at: Option<Instant>,
     listener_fd: i32,
 }
+
+/// How long the activity write waits after the first chunk of a burst.
+///
+/// node: src/server.ts `scheduleActivityPersist` (1 s), docs/vrs R14.
+const ACTIVITY_PERSIST_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// 32 hex characters, Node's `randomBytes(16).toString("hex")`.
 fn new_generation() -> String {
@@ -310,6 +323,8 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         exit_drain_deadline: None,
         exit_shutdown_at: None,
         exit_meta_retry: None,
+        last_output_at_ms: None,
+        activity_persist_at: None,
         listener_fd,
     };
     Ok(daemon.serve())
@@ -496,6 +511,7 @@ impl Daemon {
                 self.exit_drain_deadline,
                 self.exit_shutdown_at,
                 self.exit_meta_retry.map(|(next, _)| next),
+                self.activity_persist_at,
             ]
             .into_iter()
             .flatten()
@@ -565,6 +581,7 @@ impl Daemon {
     ///
     /// node: src/server.ts:559-569
     fn on_pty_data(&mut self, bytes: &[u8]) {
+        self.stamp_output_activity();
         let cleaned = self.actor.write(bytes);
         let replies = self.actor.take_pty_replies();
         self.write_pty(&replies);
@@ -574,8 +591,47 @@ impl Daemon {
         }
     }
 
+    /// Record that the child has just printed, and make sure a write is
+    /// pending. Both halves are O(1); the write itself happens later.
+    fn stamp_output_activity(&mut self) {
+        self.last_output_at_ms = Some(registry::now_epoch_ms());
+        if self.activity_persist_at.is_none() {
+            self.activity_persist_at = Some(Instant::now() + ACTIVITY_PERSIST_DEBOUNCE);
+        }
+    }
+
+    /// Write the newest output stamp, if it is not the one already on disk.
+    ///
+    /// Best effort on purpose: a lost stamp reads as slightly older activity,
+    /// and it must never take the daemon down or block the output path.
+    fn persist_output_activity(&mut self) {
+        self.activity_persist_at = None;
+        if self.exited {
+            return;
+        }
+        let Some(stamped) = self.last_output_at_ms else {
+            return;
+        };
+        registry::mutate_metadata_under_lock(
+            &self.name,
+            move |m| {
+                if m.last_output_at_ms == Some(stamped) {
+                    return false;
+                }
+                m.last_output_at_ms = Some(stamped);
+                true
+            },
+            &MutateOptions::default(),
+        );
+    }
+
     fn service_timers(&mut self, now: Instant) {
         self.service_cuts(now);
+        if let Some(at) = self.activity_persist_at
+            && at <= now
+        {
+            self.persist_output_activity();
+        }
         if let Some(d) = self.exit_drain_deadline
             && d <= now
         {
@@ -641,12 +697,19 @@ impl Daemon {
     fn save_exit_metadata(&self) -> MutateStatus {
         let code = self.exit_code;
         let last_lines = self.last_lines();
+        // Carry the newest output stamp even when its own write was still
+        // waiting out the debounce, so the last thing the child printed is
+        // never lost to the exit.
+        let last_output = self.last_output_at_ms;
         registry::mutate_metadata_under_lock(
             &self.name,
             move |m| {
                 m.exit_code = Some(code);
                 m.exited_at = Some(registry::now_iso8601());
                 m.last_lines = Some(last_lines);
+                if last_output.is_some() {
+                    m.last_output_at_ms = last_output;
+                }
                 true
             },
             &MutateOptions {
