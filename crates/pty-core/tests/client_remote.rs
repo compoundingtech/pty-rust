@@ -126,13 +126,25 @@ fn route_refusal_and_bad_response() {
 /// node: remote.ts:221-224, :259-262
 #[test]
 fn handshake_timeout_and_close_before_ack() {
+    // The two numbers are far apart on purpose. One budget covers BOTH the
+    // dial, which spawns a process, and the handshake that follows it. When
+    // the budget was 200 ms against a server that slept 500 ms, a slow spawn
+    // spent the whole budget before the handshake began and the error came
+    // back as a dial timeout rather than a handshake one — the right failure
+    // reported by the wrong name. `Silber.mandat-macos` hit it on Apple
+    // silicon on 2026-09-02, one run in three at default parallelism. It
+    // never failed here in twenty runs, including under load, which is what
+    // a race that is tight everywhere and lucky on one machine looks like.
+    //
+    // A second is more than any spawn needs and five is far more than the
+    // handshake is allowed, so neither end is close to the other now.
     let (ctl, _h) = control_server("route-hang", |_, s| {
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_secs(5));
         drop(s);
     });
     let bin = peer("hang", &ctl);
     let mut d = dialer(&bin);
-    d.timeout = Duration::from_millis(200);
+    d.timeout = Duration::from_secs(1);
     let err = d.dial_and_route("hang", "demo").unwrap_err();
     assert_eq!(err.to_string(), "route handshake timed out");
 

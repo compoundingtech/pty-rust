@@ -388,6 +388,30 @@ output that had nothing to do with what it was checking, and each was found by
 accident rather than on purpose. Treat a pass from one of them as unproven
 until somebody has read it.
 
+## 12c. What differs because the kernel differs
+
+Checked on 2026-09-02, on Linux here and on Apple silicon by another machine.
+
+**Closing a socket that still holds unread data reaches the peer as a reset on
+Linux and as an ordinary end of stream on macOS.** Linux hands over the bytes
+already in flight and then fails the next read with `ECONNRESET`, errno 104.
+Apple silicon ends the stream instead.
+
+**Both pty implementations decide the same way and so both inherit it.** The
+Node client branches on `err.code === "ECONNRESET"` and this one on the same
+errno, and neither can report a reset its kernel never delivered.
+
+**What it means for somebody watching a session:** where the reset does not
+arrive, a daemon that drops a client with input still unread looks exactly
+like one that closed politely, so `pty attach` ends quietly with the last
+known code rather than saying the session is gone. Every other way of losing a
+daemon — it exits, it is killed, its socket disappears — is reported the same
+on both.
+
+`client_attach.rs::reset_maps_to_not_found_or_not_running` asks the kernel
+which of the two it is doing and pins the answer, rather than assuming the one
+it was written on.
+
 ## 13. In flight, not on `main`
 
 Checked again on 2026-09-02.

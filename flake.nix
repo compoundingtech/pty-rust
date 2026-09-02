@@ -98,6 +98,29 @@
           nativeBuildInputs = [
             pkgs.installShellFiles
             pkgs.zig_0_15
+          ]
+          # Darwin only, and each one removes a named failure. Measured on
+          # Apple silicon on 2026-09-02, added one at a time:
+          #
+          #   nothing          `DarwinSdkNotFound`
+          #   + the first two  `libtool: FileNotFound`
+          #   + all three      builds
+          #
+          # `DarwinSdkNotFound` is not Zig failing against a recent macOS. It
+          # is Ghostty's own `build.zig` asking for a NATIVE libc installation
+          # inside a sandbox that has none (`SharedDeps.zig` `findNative`, by
+          # way of its bench target). No build flag avoids it: `build.zig`
+          # constructs the bench target unconditionally and only gates
+          # installing it. So the SDK has to be present rather than skipped.
+          #
+          # `apple-sdk_15` is what was proved to work. **`apple-sdk_26` is
+          # untested**, and the native failure this replaced tracked an SDK
+          # version of 26.x, so the 15 may be load-bearing rather than
+          # incidental. Do not raise it without building on a Mac.
+          ++ lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.apple-sdk_15
+            pkgs.xcbuild
+            pkgs.cctools
           ];
 
           # zig's setup hook would otherwise replace cargo's build, check, and

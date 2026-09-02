@@ -172,6 +172,48 @@ fn close_without_exit_finishes_silently_with_code_0() {
     h.join().unwrap();
 }
 
+/// Does closing a socket that still holds unread data reach the peer as a
+/// reset, or as an ordinary end of stream?
+///
+/// **The two kernels we run on disagree, so the test below asks rather than
+/// assumes.** Linux hands the peer the bytes that were already in flight and
+/// then fails its next read with `ECONNRESET`. Measured 2026-09-02: errno 104
+/// after the data. On Apple silicon the same sequence ends in a plain end of
+/// stream, which `Silber.mandat-macos` found on 2026-09-02 by this test
+/// failing there five times out of five, natively and under nix.
+///
+/// **This is not a difference between the two pty implementations.** The Node
+/// client decides the same way, on `err.code === "ECONNRESET"`
+/// (`src/client.ts`), so it reaches the same two answers on the same two
+/// kernels. Neither client can report a reset that its kernel never
+/// delivered.
+///
+/// **The consequence is worth knowing where the reset does not arrive:** a
+/// daemon that drops a client with input still unread is indistinguishable
+/// from one that closed politely, so `pty attach` ends quietly with the last
+/// known code instead of saying the session is gone. Every other way of
+/// losing a daemon — it exits, it is killed, its socket disappears — is
+/// reported the same way on both.
+fn close_with_unread_data_reaches_the_peer_as_a_reset() -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let (mut kept, mut dropped) = UnixStream::pair().expect("socket pair");
+    kept.write_all(b"a").expect("write");
+    dropped.write_all(b"b").expect("write");
+    // `kept` never reads what `dropped` sent, so the close below happens with
+    // data still pending, which is the condition that provokes a reset.
+    std::thread::sleep(Duration::from_millis(50));
+    drop(dropped);
+    let mut buf = [0u8; 64];
+    loop {
+        match kept.read(&mut buf) {
+            Ok(0) => return false,
+            Ok(_) => continue,
+            Err(_) => return true,
+        }
+    }
+}
+
 /// node: client.ts:672-681 — a reset maps to the not-found text.
 #[test]
 fn reset_maps_to_not_found_or_not_running() {
@@ -186,8 +228,16 @@ fn reset_maps_to_not_found_or_not_running() {
     run.stdout.wait_for(T, |b| b.ends_with(b"x"));
     run.type_stdin(b"typed");
     let (outcome, _, err) = run.finish();
-    assert_eq!(outcome, AttachOutcome::Exited(1));
-    assert_eq!(err, "Session \"demo\" not found or not running.\n");
+    if close_with_unread_data_reaches_the_peer_as_a_reset() {
+        assert_eq!(outcome, AttachOutcome::Exited(1));
+        assert_eq!(err, "Session \"demo\" not found or not running.\n");
+    } else {
+        // This kernel gave the client an ordinary end of stream, so there was
+        // no reset to report. Pinned rather than skipped, so that a change in
+        // either the kernel or the client is still caught here.
+        assert_eq!(outcome, AttachOutcome::Exited(0), "stderr: {err:?}");
+        assert!(err.is_empty(), "{err:?}");
+    }
     h.join().unwrap();
 }
 
