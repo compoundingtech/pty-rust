@@ -359,25 +359,34 @@ selection st2 supports as it stands.
 
 ## 12b. Known red that is not a missing verb
 
-Two conformance failures on `parity` are not WP8 and not a regression.
+**The whole workspace suite is green as of 2026-09-02: 1293 tests, none
+failing.** The three entries this section used to list are gone, and two of
+them were not what they were labelled.
 
-| Test | What it is |
+| Test | What it turned out to be |
 |---|---|
-| `rm_immediate_reuse.rs::rm_waits_out_the_old_generation_before_permitting_replacement` | Flaky under a full-workspace run, green four times in four on its own. Same shape as the starve test below. |
-| `scrollback_fidelity.rs::alt_screen_and_normal_scrollback_both_survive_reconnect` | On reconnect the replay carries the alternate screen but not the normal buffer under it, so leaving the alternate screen would not restore what was there. The replay serializer has to read the inactive screen out of libghostty. One test, not attempted. |
-| `fixtures_protocol.rs::a_client_that_never_reads_does_not_starve_the_others` | Flaky, about three runs in five. Measured 2026-08-31 at the same rate against the binary before and after that day's changes, so it is pre-existing. It makes every full run look non-deterministic and should be stabilised. |
+| `scrollback_fidelity.rs::alt_screen_and_normal_scrollback_both_survive_reconnect` | A real gap, now fixed. The replay carried only the alternate screen, so a client that reconnected while a full-screen program ran saw a blank screen the moment that program exited. libghostty offers no reader for the screen that is not in use, so the daemon now copies the normal screen at the moment the child switches away from it. |
+| `fixtures_protocol.rs::a_client_that_never_reads_does_not_starve_the_others` | **Not flaky, and this file said it was, twice.** It is a throughput bound that only an optimized build meets. One megabyte of child output through a session with nobody attached: 9.4 s unoptimized, 0.22 s optimized, 0.25 s with the Node tool. The shipped binary is faster than Node; the test build is about forty times slower than either. The budget is now widened when the binary under test is the workspace's own test build. |
+| `rm_immediate_reuse.rs::rm_waits_out_the_old_generation_before_permitting_replacement` | Has not failed since. Left as it was. |
 
-See also docs/hardening.md for why a red
-test inside a red suite is worth separating from a red test that means a
-feature is missing.
+**"Flaky" was the wrong word for the middle one and it cost four days.** A test
+that fails at random under load and a test that states a bound the profile
+cannot meet look identical from the outside, and only one of them is a
+scheduling accident. Calling it flaky ends the investigation. See
+docs/hardening.md for the same lesson from the other side: a red test inside a
+red suite is invisible, and a suite that runs a binary it never built is a
+green that measured nothing.
 
-**One surface of the suite is known to be unexamined.** About eighteen
-conformance tests assert that output *contains* a short common word —
-`exited`, `removed`, `killed`, `busy`, `null`. Three tests of exactly that
-shape turned out to be passing for the wrong reason during the 2026-08-31
-build, each matching its word in output that had nothing to do with what it
-was checking. The remaining candidates were listed and **not** chased. Treat a
-pass from one of them as unproven until somebody has.
+**One surface of the suite is known to be unexamined.** 105 of the 467
+substring assertions in the suite check that output *contains* a short common
+word. Most are safe, because the word is a marker the test itself printed into
+the session and nothing else could have produced it. The rest are the shape
+that failed before: `exited`, `removed`, `killed`, `busy`, `not found`,
+`restarted`, `vanished`, `null`. Three tests of exactly that shape were passing
+for the wrong reason during the 2026-08-31 build, each matching its word in
+output that had nothing to do with what it was checking, and each was found by
+accident rather than on purpose. Treat a pass from one of them as unproven
+until somebody has read it.
 
 ## 13. In flight, not on `main`
 
@@ -402,7 +411,7 @@ pass from one of them as unproven until somebody has.
 | Version string | decided | `0.13.x-rust+<short-sha>`: one minor above the Node line, a `rust` pre-release tag, and the commit. |
 | Node test corpus: 120 files, 31k lines; 13 VRS requirements each mapped to test files | oracle | The plan decides which suites to port, which to run as black-box CLI tests against both binaries. |
 | Shared fixtures `tests/fixtures/parity/{screens,shapes}.json` | have | Node-owned, vendored here byte-identical. Extend per section 6. |
-| Rust tests today: 173 at `e4d6cda` | have | 1166 on `parity` at the WP7b merge: 639 conformance plus 527 crate tests. |
+| Rust tests today: 173 at `e4d6cda` | have | 1293 on `parity` at 2026-09-02, all passing. |
 
 ## 15. Rough size of the whole
 
