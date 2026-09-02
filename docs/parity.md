@@ -390,14 +390,23 @@ until somebody has read it.
 
 ## 13. In flight, not on `main`
 
-| Where | What | Effect on parity |
+Checked again on 2026-09-02.
+
+| Where | What | Where it stands |
 |---|---|---|
-| Node PR #168 (open, 2026-08-26) and this repo's PR #5 | Persist the last output timestamp as activity evidence | If #168 merges, drop-in needs it. Track. |
-| Node PRs #131, #133 (drafts) | Generation-bound activity status; revision-guarded send | Watch. |
-| Node PR #60 (draft, held since July) | Lean core: delete `up`/`down`, gc respawn, flapping | Superseded by `st2`. Informs section 12. |
-| Node issue #167 | `--isolate-env` drops `TERM_PROGRAM`, `GHOSTTY_*` | Port the current allow-list; fix in both if wanted. |
-| Node issue #107 | No `--version`, three version numbers | Decide the Rust version string. |
-| Node issue #163 | Exit non-zero when `PTY_ROOT` and `PTY_SESSION_DIR` disagree | Port the current warning. |
+| Node PR #168 | Persist `lastOutputAtMs`, the time the child last printed | **Merged 2026-08-29, the day this plan was approved, and nobody noticed.** Now ported: the daemon stamps it, persists it at most once a second, and carries it into the exit record. See `crates/pty-conformance/tests/output_activity.rs`. |
+| Node PRs #131, #133 | Generation-bound activity status; revision-guarded send | Both still drafts. Watch. |
+| Node PR #60 | Lean core: delete `up`/`down`, gc respawn, flapping | Still held. Superseded by `st2`. Informs section 12. |
+| Node issue #167 | `--isolate-env` drops `TERM_PROGRAM` and `GHOSTTY_*`, so a full-screen program cannot tell what terminal it is in | Open. This port carries the same allow-list, so it has the same problem. Fixing it means changing both. |
+| Node issue #163 | The `PTY_ROOT` / `PTY_SESSION_DIR` disagreement warns on stderr, and the callers that need the warning throw stderr away | Open. This port carries the same warning. |
+| Node issue #107 | No `--version`, and three numbers claim to be the version | Open there. Settled here: `0.13.x-rust+<short-sha>`, and `--version` prints it. |
+
+**The lesson from #168 is about the tracking, not the field.** This table said
+"track" and nothing tracked it. A row that names a thing to watch, with nobody
+named to watch it and no check that looks, is a note rather than a mechanism.
+The port was two days behind the tool it copies and the map still said the
+change was in flight. Ask what would have caught it, not who should have
+looked.
 
 ## 14. Build, packaging, and verification
 
