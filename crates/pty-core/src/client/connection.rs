@@ -484,17 +484,26 @@ mod async_connection {
                 pending: VecDeque::new(),
                 closed: false,
             };
+            // Held aside, not queued on the connection: `next_event` drains
+            // that queue before it reads the socket, so a queued event comes
+            // straight back here and the loop spins at full CPU without ever
+            // reading. This path has no timeout at all, so it spins forever.
+            // The synchronous `attach_over` had the same defect.
+            let mut before_screen: VecDeque<SessionEvent> = VecDeque::new();
             loop {
                 match conn.next_event().await? {
                     SessionEvent::Screen(s) => {
                         conn.screen = s;
+                        for ev in before_screen.into_iter().rev() {
+                            conn.pending.push_front(ev);
+                        }
                         return Ok(conn);
                     }
                     SessionEvent::Closed => {
                         return Err(ClientError::ClosedBeforeScreen(name.to_string()));
                     }
                     SessionEvent::Geometry { .. } => {}
-                    other => conn.pending.push_back(other),
+                    other => before_screen.push_back(other),
                 }
             }
         }

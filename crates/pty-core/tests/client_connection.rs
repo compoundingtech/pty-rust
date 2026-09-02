@@ -230,4 +230,60 @@ mod tokio_flavour {
             .await
             .unwrap();
     }
+
+    /// The async attach had the same early-frame spin as the synchronous
+    /// one, and no timeout of its own to end it. This path is reachable
+    /// from any peer that sends output before the first SCREEN.
+    ///
+    /// The budget is an ordinary channel on an ordinary thread, and that is
+    /// deliberate. A spin that never awaits anything pending never returns
+    /// to the scheduler, so NOTHING inside the runtime can interrupt it:
+    /// `tokio::time::timeout` around it is never polled, and moving the
+    /// work to `tokio::spawn` on a two-worker runtime does not help either.
+    /// Both were tried against the defect and both hung the test run
+    /// instead of reporting. Only a real thread outside the runtime can
+    /// call time on it.
+    #[test]
+    fn output_before_the_first_screen_is_kept_without_spinning() {
+        let d = FakeDaemon::bind("aearly");
+        let listener = d.listener.try_clone().unwrap();
+        let h = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut s, _) = listener.accept().unwrap();
+            let mut reader = PacketReader::new();
+            read_until(&mut s, &mut reader, MessageType::Attach, T);
+            s.write_all(&concat(&[encode_data(b"first"), encode_data(b"second")]))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            s.write_all(&encode_screen(b"$ ")).unwrap();
+            let _ = read_until(&mut s, &mut reader, MessageType::Detach, T);
+        });
+
+        let name = d.name.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(async move {
+                let mut c = AsyncConnection::connect(&name, 24, 80).await?;
+                let screen = c.screen().to_vec();
+                let a = c.next_event().await?;
+                let b = c.next_event().await?;
+                c.disconnect().await;
+                Ok::<_, ClientError>((screen, a, b))
+            });
+            let _ = tx.send(out);
+        });
+
+        let (screen, a, b) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the async connect must not spin on output that arrives before the screen")
+            .expect("connect");
+        assert_eq!(screen, b"$ ");
+        assert_eq!(a, SessionEvent::Data(b"first".to_vec()));
+        assert_eq!(b, SessionEvent::Data(b"second".to_vec()));
+        h.join().unwrap();
+    }
 }
