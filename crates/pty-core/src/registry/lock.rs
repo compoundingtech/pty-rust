@@ -104,8 +104,14 @@ pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGua
     }
     match std::fs::remove_file(lock_path) {
         Ok(()) => {}
+        // Somebody else got there first, which is fine: fall through and
+        // race them for the create.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Ok(None),
+        // Anything else is a registry this process cannot write. Returning
+        // "not acquired" here would report it as a busy lock and ask for a
+        // retry that can never work, which is the whole point of returning
+        // a result from this function.
+        Err(e) => return Err(e),
     }
     Ok(try_create(lock_path)?.then(|| guard(lock_path)))
 }
