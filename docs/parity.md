@@ -328,7 +328,7 @@ Decided on 2026-08-29. Each row records the decision.
 |---|---|---|
 | `pty test` (vitest wrapper) | — | Dropped. It belongs to the Node repository. |
 | `pty-kill-releases-socket-test` second binary | S | Dropped. The case becomes a Rust test. |
-| `remote-serve --socket <path>` | S | Dropped. `--stdio` stays. The Node docs mark the socket form transitional. |
+| `remote-serve --socket <path>` | S | Dropped. `--stdio` stays. The Node docs mark the socket form transitional. **`pty remote-serve --help` still describes `--socket`**, because the help texts are vendored from the Node tool byte for byte so the help test can compare them. Passing `--socket` prints a usage line naming only `--stdio` and exits 1. Checked 2026-09-02. |
 | Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
 | `gc`: permanent respawn, flapping classifier, abandoned reap | L | Dropped. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Kept: debris, orphan kill, sweep, `keep`, tag prune, dry-run, footer, `--print-launchd-plist`. `strategy=permanent` stays as a preserve flag. Their tuning flags `--idle-days`, `--fast-fail-window`, `--fast-fail-limit` (both `--flag N` and `--flag=N`) are accepted with their value and ignored, never rejected, so scripts written for Node keep working. |
 | `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite, so `recovery.metadataRevision` goes stale for a session a Rust binary writes to — accepted, decision 0005. |
