@@ -12,7 +12,6 @@
 use pty_core::events::Event;
 use pty_core::registry::{
     self, LockRefusal, MutateOptions, MutateStatus, event_lock_path, lock_or_refusal,
-    release_event_lock,
 };
 
 use super::{CliError, CliResult};
@@ -65,7 +64,7 @@ pub fn run(args: &[String]) -> CliResult {
         .collect::<Vec<_>>()
         .join(" ");
 
-    let _event_lock = lock_or_refusal(&event_lock_path(&session)).map_err(|r| match r {
+    let event_lock = lock_or_refusal(&event_lock_path(&session)).map_err(|r| match r {
         LockRefusal::Busy => {
             format!("pty exec: session \"{session}\" event log is busy; retry the operation.")
         }
@@ -111,7 +110,11 @@ pub fn run(args: &[String]) -> CliResult {
             );
         },
     );
-    release_event_lock(&session);
+    // Release through the guard, not through the path. Unlinking the path
+    // while the guard is still armed means this function's return unlinks
+    // whatever is there THEN, which may be a lock somebody else has since
+    // taken, and the command below can hold this scope open for a long time.
+    event_lock.release();
 
     if let Some(path) = managed_by {
         return Err(format!(

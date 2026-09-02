@@ -339,12 +339,15 @@ fn create_or_attach(
         let guard = match registry::lock_or_refusal(&registry::lock_path(name)) {
             Ok(guard) => guard,
             Err(registry::LockRefusal::Busy) => {
-                registry::release_event_lock(name);
+                // Release through the guard: unlinking the path while the
+                // guard is still armed would leave the return to unlink
+                // whatever is there then.
+                event_lock.take().map(registry::LockGuard::release);
                 eprintln!("Session \"{name}\" is being created by another process. Try again.");
                 return Ok(1);
             }
             Err(registry::LockRefusal::Unavailable(cause)) => {
-                registry::release_event_lock(name);
+                event_lock.take().map(registry::LockGuard::release);
                 eprintln!("{cause}");
                 return Ok(1);
             }
@@ -358,9 +361,7 @@ fn create_or_attach(
         .is_some_and(|s| s.status == registry::SessionStatus::Running)
     {
         drop(creation_lock);
-        if event_lock.take().is_some() {
-            registry::release_event_lock(name);
-        }
+        event_lock.take().map(registry::LockGuard::release);
         if attach_existing {
             println!("Session \"{name}\" already running, attaching.");
             return Ok(super::attach::do_attach(name, None));
@@ -404,9 +405,7 @@ fn create_or_attach(
     if gone.is_some() && !inherited_creation_lock {
         registry::cleanup_all_while_locked(name);
     }
-    if event_lock.take().is_some() {
-        registry::release_event_lock(name);
-    }
+    event_lock.take().map(registry::LockGuard::release);
 
     params.creation_lock_owner_pid = Some(match delegated_owner {
         Some(pid) if inherited_creation_lock => pid,
