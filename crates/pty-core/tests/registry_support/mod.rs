@@ -146,3 +146,57 @@ pub fn wait_for(ms: u64, mut pred: impl FnMut() -> bool) -> bool {
     }
     pred()
 }
+
+/// Can `ps` here answer the fields this port asks it for?
+///
+/// Off Linux the port reads a process start token, a process state and a
+/// memory/CPU pair out of `ps`. A machine without one, or with a build that
+/// refuses a field, cannot exercise those paths — and a test that fails for
+/// that reason blames the code for its environment.
+///
+/// **So say which it is.** A build sandbox has no `ps` at all, and
+/// nixpkgs' darwin `ps` is entitlement-limited: it refuses `rss` and returns
+/// a blank state for a live process, while answering `lstart` correctly. A
+/// test that passed under it would have measured nothing. Measured
+/// 2026-09-02.
+///
+/// Returns `None` when `ps` can answer, and the reason to print when it
+/// cannot.
+pub fn ps_cannot_answer(fields: &str) -> Option<String> {
+    let me = std::process::id().to_string();
+    match std::process::Command::new("ps")
+        .args(["-o", fields, "-p", &me])
+        .output()
+    {
+        Err(e) => Some(format!("no `ps` on this machine ({e})")),
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // One field per requested key, for this very process, which is
+            // alive by construction.
+            let wanted = fields.split(',').filter(|f| !f.is_empty()).count();
+            let got = stdout.split_whitespace().count();
+            if !out.status.success() || got < wanted {
+                return Some(format!(
+                    "`ps -o {fields}` gave {got} of {wanted} fields for a live process\n                         stdout: {stdout:?}\n    stderr: {stderr:?}"
+                ));
+            }
+            None
+        }
+    }
+}
+
+/// `ps_cannot_answer`, as a test guard: prints the reason and says whether to
+/// stop. Only meaningful off Linux, which reads `/proc` instead.
+pub fn skip_without_ps(fields: &str) -> bool {
+    if cfg!(target_os = "linux") {
+        return false;
+    }
+    match ps_cannot_answer(fields) {
+        Some(why) => {
+            eprintln!("skipped: {why}");
+            true
+        }
+        None => false,
+    }
+}

@@ -130,8 +130,21 @@ pub fn config_for(params: &SpawnParams) -> DaemonConfig {
     }
 }
 
-/// Name this process for `ps`/`top`/`/proc/<pid>/comm` (Linux caps it at
-/// 15 characters; macOS has no equivalent, so this is a no-op there).
+/// Name this process for `ps`, `top` and `/proc/<pid>/comm`.
+///
+/// Linux caps the name at 15 characters and takes it through
+/// `prctl(PR_SET_NAME)`. **macOS has its own way and this used to say it did
+/// not**, so the daemon showed up there as the full path of the binary while
+/// the Node tool showed `pty-daemon`. Node gets that from libuv, which names
+/// the main thread with the one-argument `pthread_setname_np` that Apple's
+/// libc provides; this does the same.
+///
+/// Measured on 2026-09-02 before the macOS branch existed: `ps -o comm=`
+/// gave `pty-daemon` for the Node daemon and the binary's whole path for
+/// this one.
+///
+/// Everywhere else it is still a no-op, which is honest rather than lazy: a
+/// platform we have not named a process on is one we have not tested.
 pub fn set_process_title(title: &str) {
     #[cfg(target_os = "linux")]
     {
@@ -143,7 +156,18 @@ pub fn set_process_title(title: &str) {
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // Apple's is one argument and names the CALLING thread, so it must
+        // run on the main one to name the process.
+        if let Ok(c) = std::ffi::CString::new(title) {
+            // SAFETY: reads a NUL-terminated string and copies it.
+            unsafe {
+                libc::pthread_setname_np(c.as_ptr());
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = title;
     }

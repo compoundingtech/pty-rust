@@ -17,22 +17,9 @@ fn main() {
     std::process::exit(cli::dispatch(args));
 }
 
-/// `process.title = "pty"` (bin/pty:7, cli.ts:80). On Linux `prctl(PR_SET_NAME)`
-/// renames the thread the way Node's `process.title` does (`/proc/<pid>/comm`);
-/// elsewhere it is a no-op.
+/// `process.title = "pty"` (bin/pty:7, cli.ts:80), the same way the daemon
+/// names itself. See `daemon::launch::set_process_title` for why macOS has
+/// its own call rather than nothing.
 fn set_process_title(title: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let mut bytes = title.as_bytes().to_vec();
-        bytes.truncate(15);
-        bytes.push(0);
-        // SAFETY: PR_SET_NAME reads at most 16 bytes from a NUL-terminated buffer.
-        unsafe {
-            libc::prctl(libc::PR_SET_NAME, bytes.as_ptr() as libc::c_ulong, 0, 0, 0);
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = title;
-    }
+    daemon::set_process_title(title);
 }

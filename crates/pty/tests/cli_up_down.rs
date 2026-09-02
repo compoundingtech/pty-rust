@@ -142,7 +142,20 @@ fn manifest_errors() {
     assert_eq!(out.code, 1);
     // Without a pty.toml the token is a session name and the manifest is
     // looked for in the cwd.
-    assert_eq!(out.stderr, format!("No pty.toml found in {}\n", rig.scratch.display()));
+    // Compare the DIRECTORY, not the spelling of it. The tool reports where
+    // it looked, which is `getcwd()`, and that resolves symlinks; the rig
+    // built its path without resolving. On Linux those are the same string
+    // and on a Mac they are not, because `/tmp` is a link there.
+    let printed = out
+        .stderr
+        .trim()
+        .strip_prefix("No pty.toml found in ")
+        .unwrap_or_else(|| panic!("unexpected message: {:?}", out.stderr));
+    assert_eq!(
+        std::fs::canonicalize(printed).unwrap(),
+        std::fs::canonicalize(&rig.scratch).unwrap(),
+        "reported {printed:?}, which is not the rig's scratch directory"
+    );
     let dir = rig.write_toml("emptycfg", "# empty config\n");
     let out = rig.run(&["up", dir.to_str().unwrap()]);
     assert_eq!(out.stderr, format!("No sessions defined in {}\n", dir.join("pty.toml").display()));

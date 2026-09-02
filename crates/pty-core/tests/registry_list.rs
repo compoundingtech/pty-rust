@@ -201,6 +201,9 @@ fn live_socket_with_exit_record_is_exited() {
 /// node: src/sessions.ts:2086-2095; tests/recovery.test.ts:129-170
 #[test]
 fn daemon_pid_needs_a_matching_start_token() {
+    if registry_support::skip_without_ps("lstart=") {
+        return;
+    }
     let _ = root();
     let me = std::process::id() as i32;
     let token = registry::read_process_start_token(me).expect("own start token");
@@ -326,9 +329,11 @@ fn process_helpers() {
         registry::pid_alive(1),
         "pid 1 exists; EPERM counts as alive"
     );
-    assert!(!registry::has_process_exited_for_reap(
-        std::process::id() as i32
-    ));
+    if !registry_support::skip_without_ps("stat=") {
+        assert!(!registry::has_process_exited_for_reap(
+            std::process::id() as i32
+        ));
+    }
     assert!(registry::has_process_exited_for_reap(DEAD_PID));
     let start = std::time::Instant::now();
     assert!(registry::wait_for_process_exit(

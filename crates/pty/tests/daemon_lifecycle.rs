@@ -75,10 +75,42 @@ fn publication_order_and_shapes() {
     assert_eq!(events[0]["session"], name);
     assert_eq!(events[0]["tags"], json!({"team": "a", "keep": "true"}));
     assert!(events[0]["ts"].as_str().unwrap() >= m["createdAt"].as_str().unwrap());
-    assert_eq!(
-        std::fs::read_to_string(format!("/proc/{}/comm", d.pid)).unwrap().trim(),
-        "pty-daemon"
-    );
+    assert_eq!(process_name(d.pid), Some("pty-daemon".to_string()));
+}
+
+/// What `ps` and `top` call a process, read the way each machine offers it.
+///
+/// **This used to read `/proc` and nothing else, so on a Mac it panicked with
+/// a bare "No such file or directory" — and gating it there would have hidden
+/// a real gap rather than found one.** The daemon was not named on macOS at
+/// all: `ps -o comm=` gave the whole path of the binary where the Node tool
+/// gives `pty-daemon`. Measured 2026-09-02, which is when the macOS branch of
+/// `set_process_title` came to exist.
+///
+/// `None` when the machine will not say, which is a different answer from a
+/// name that is wrong.
+fn process_name(pid: i32) -> Option<String> {
+    if cfg!(target_os = "linux") {
+        return std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string());
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    // `ps -o comm=` prints a path on some machines and a bare name on
+    // others; the question is what the process is CALLED either way.
+    Some(
+        name.rsplit('/')
+            .next()
+            .unwrap_or(&name)
+            .to_string(),
+    )
 }
 
 /// node: tests/exit-signal.test.ts:49-71

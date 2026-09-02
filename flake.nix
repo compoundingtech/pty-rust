@@ -187,19 +187,32 @@
           # on the check PATH.
           nativeCheckInputs = [
             pkgs.bashInteractive
-          ]
-          # The sandbox has no `ps`, and the only two functional
-          # platform-specific paths in the whole port both shell out to it:
-          # reading a process start token (`ps -o lstart=`) and asking whether
-          # a process has already been reaped (`ps -o stat=`). Without it both
-          # fall to their failure branches.
+          ];
+
+          # THERE IS DELIBERATELY NO `ps` HERE, AND THAT IS THE SECOND
+          # DECISION ON IT RATHER THAN THE FIRST.
           #
-          # **So a darwin build that passed its checks without this was green
-          # WITHOUT having tested the macOS-specific code, which is worse than
-          # a red one.** Found on 2026-09-02 by the two tests failing in the
-          # sandbox and passing natively, with a control proving `ps` was the
-          # thing that was absent rather than something else being wrong.
-          ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.darwin.ps ];
+          # A build sandbox has none, and three things in this port shell out
+          # to one on a Mac: the process start token (`-o lstart=`), whether a
+          # process has been reaped (`-o stat=`) and a session's memory and
+          # CPU (`-o rss=,pcpu=`).
+          #
+          # `pkgs.darwin.ps` was added on 2026-09-02 to cover them and taken
+          # out the same day, because it gets one of the three right. It is
+          # entitlement-limited: `rss` is refused outright, the state field
+          # comes back blank for a live process, and only `lstart` is
+          # correct. That made the check phase fail confusingly instead of
+          # obviously, and it defeated a fix for the memory reading while
+          # appearing to test it.
+          #
+          # **So the tests that need a working `ps` ask whether they have one
+          # and say when they do not.** A skip that names its reason is worth
+          # more than a green that measured nothing, and more than a red that
+          # blames the code.
+          #
+          # Anything that finds a `ps` for darwin with the entitlements to
+          # answer `rss` and `stat` can put it back and delete this.
+          # `/bin/ps` on a real Mac answers all three.
 
           preCheck = ''
             export TMPDIR=$(mktemp -d /tmp/pty.XXXXXX)
@@ -290,8 +303,7 @@
           # Likewise: without these a `cargo test --workspace` in this shell
           # does not get as far as the tests on a Mac. It fails building
           # libghostty.
-          ++ darwinBuildInputs
-          ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.darwin.ps ];
+          ++ darwinBuildInputs;
 
           # `nix develop` appends `nix-shell.XXXXXX` to `TMPDIR`, and on a
           # Mac that pushes a session's socket path past the 104-byte kernel
