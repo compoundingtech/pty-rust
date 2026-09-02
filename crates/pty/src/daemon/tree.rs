@@ -174,3 +174,49 @@ mod tests {
         assert!(terminate_process_identities(&ids, Duration::ZERO, Duration::ZERO).is_empty());
     }
 }
+
+#[cfg(test)]
+mod unreadable_token_tests {
+    use super::snapshot_from_listing;
+
+    /// **A descendant whose start token cannot be read is left out of the
+    /// snapshot entirely, and therefore never signalled.**
+    ///
+    /// This pins the current behaviour rather than endorsing it. Reading a
+    /// token is a `/proc` read on Linux and a `ps` call per descendant on
+    /// macOS, and a `ps` that answers slowly, or not at all, silently drops
+    /// that process from the teardown.
+    ///
+    /// The Node tool omits it in the same way (`src/process-tree.ts`), so
+    /// this is shared rather than a difference. Recorded because it is a
+    /// candidate mechanism for a harness that survived a `pty kill` on a Mac
+    /// on 2026-09-02.
+    #[test]
+    fn a_descendant_with_no_readable_token_is_not_in_the_snapshot() {
+        // daemon 100 -> middle 200 -> harness 300
+        let listing = "100 1\n200 100\n300 200\n";
+        // The middle answers; the harness does not.
+        let ids = snapshot_from_listing(100, listing, |pid| {
+            (pid != 300).then(|| format!("tok:{pid}"))
+        });
+        let pids: Vec<i32> = ids.iter().map(|i| i.pid).collect();
+        assert_eq!(pids, vec![200], "300 was dropped, so nothing will signal it");
+
+        // And with a readable token it is there, deepest first.
+        let ids = snapshot_from_listing(100, listing, |pid| Some(format!("tok:{pid}")));
+        let pids: Vec<i32> = ids.iter().map(|i| i.pid).collect();
+        assert_eq!(pids, vec![300, 200]);
+    }
+
+    /// Its children are still walked, so only the unreadable process escapes
+    /// and not its subtree.
+    #[test]
+    fn the_subtree_below_an_unreadable_process_is_still_reached() {
+        let listing = "100 1\n200 100\n300 200\n400 300\n";
+        let ids = snapshot_from_listing(100, listing, |pid| {
+            (pid != 300).then(|| format!("tok:{pid}"))
+        });
+        let pids: Vec<i32> = ids.iter().map(|i| i.pid).collect();
+        assert_eq!(pids, vec![400, 200]);
+    }
+}
