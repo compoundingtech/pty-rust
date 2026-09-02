@@ -121,8 +121,10 @@ fn vanished_session_is_refused_without_evaluating_its_command() {
     let code = t.wait_exit(Duration::from_secs(10)).expect("attach exits");
     let output = t.output_str();
     assert_ne!(code, 0, "{output}");
-    expect_contains(&output, "is not running");
-    expect_contains(&output, "vanished");
+    // The status in its own place. The session id here is
+    // "vanished-target", so a check for the bare word matched the id and
+    // said nothing about the status the command reported.
+    expect_contains(&output, &format!("Session \"{id}\" is not running (status: vanished)."));
     expect_not_contains(&output, "Restart?");
     expect_not_contains(&output, "synthetic stored command");
     assert!(!marker.exists(), "the stored command ran");

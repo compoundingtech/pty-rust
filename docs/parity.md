@@ -413,7 +413,7 @@ looked.
 | Item | Status | Note |
 |---|---|---|
 | Binary name `pty`; daemon re-execs `current_exe()` | have | The binary path must outlive its sessions. |
-| Rust edition 2024, let-chains (≥ 1.88); README says 2021 | fix README | |
+| Rust edition 2024, let-chains (≥ 1.88) | have | The README says edition 2024 and Rust 1.88; checked 2026-09-02. |
 | `libghostty-vt-sys` needs Zig 0.15.2 and fetches Ghostty source at build | have | A nix package needs a fixed-output fetch. |
 | `flake.nix` for this repo | have | Added on `parity`. `st2`'s flake still pins the Node `pty`. |
 | Completion files vendored byte for byte | have | Added on `parity`; `checks.completions` compares them. |

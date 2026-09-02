@@ -90,7 +90,9 @@ fn errors_when_no_command_is_given() {
     let rig = Rig::new();
     let out = rig.pty_env(&[("PTY_SESSION", "test")], &["exec"]);
     expect_failure(&out);
-    expect_contains(&out.stderr(), "Usage");
+    // This command's usage line. Every other command prints one too, so
+    // the bare word proved only that something printed a usage line.
+    expect_contains(&out.stderr(), "Usage: pty exec -- <command> [args...]");
 }
 
 /// node: tests/exec.test.ts:208
@@ -114,7 +116,10 @@ fn errors_on_a_nonexistent_command() {
     start(&rig, "ex8", &[]);
     let out = exec_in(&rig, "ex8", None, &["/nonexistent/cmd"]);
     expect_failure(&out);
-    expect_contains(&out.stderr(), "not found");
+    // Which thing was not found. `pty exec` also reports a session whose
+    // metadata it cannot read as "not found", so the bare phrase could not
+    // tell a missing command from a broken session lookup.
+    expect_contains(&out.stderr(), "Command not found: /nonexistent/cmd");
 }
 
 /// node: tests/exec.test.ts:244

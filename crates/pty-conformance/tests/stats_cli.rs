@@ -88,7 +88,12 @@ fn shows_exited_for_a_dead_session() {
     rig.wait_for_exit(&name);
     let out = rig.pty(&["stats", &name]);
     expect_status(&out, 0);
-    expect_contains(&out.stdout(), "exited");
+    // The whole sentence, not the word. Both binaries answer a dead
+    // session from the registry rather than from the daemon, and the word
+    // on its own also appears in the daemon's reading block — which is how
+    // this test passed for the wrong reason once already (see the note at
+    // the top of this file).
+    expect_contains(&out.stdout(), &format!("Session \"{name}\" has exited (code 0)."));
 }
 
 /// node: tests/stats-cli.test.ts:185
@@ -118,7 +123,7 @@ fn hides_cpu_and_memory_for_exited_sessions() {
     let out = rig.pty(&["stats", &name]);
     expect_status(&out, 0);
     let s = out.stdout();
-    expect_contains(&s, "exited");
+    expect_contains(&s, &format!("Session \"{name}\" has exited (code 0)."));
     expect_not_contains(&s, "CPU:");
     expect_not_contains(&s, "Memory:");
 }

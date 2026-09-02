@@ -142,9 +142,17 @@ fn run_ls_peek_send_kill_lifecycle() {
     assert_eq!(code, 0);
     std::thread::sleep(Duration::from_millis(300));
     let ls2 = ok_pty(&root, &["ls"]);
+    // Name the section, not the word. The text listing never prints
+    // "running" for a live session — it prints "Active sessions:" and a
+    // line per session — so a `kill` that did nothing at all would have
+    // satisfied a check for the absence of that word.
     assert!(
-        !ls2.contains("running"),
-        "session still running after kill:\n{ls2}"
+        ls2.contains("Exited sessions:") && ls2.contains(&name),
+        "the killed session is not listed as exited:\n{ls2}"
+    );
+    assert!(
+        !ls2.contains("Active sessions:"),
+        "session still listed as active after kill:\n{ls2}"
     );
 
     let _ = std::fs::remove_dir_all(&root);

@@ -347,8 +347,11 @@ fn events_text_shows_display_name_clear_as_null() {
     expect_status(&rig.pty(&["rename", &name, "old"]), 0);
     expect_status(&rig.pty(&["rename", "--clear", &name]), 0);
     let text = recent_text(&rig, &name);
-    expect_contains(&text, "null");
-    expect_contains(&text, "\"old\"");
+    // The clear's own line. The rename before it already wrote
+    // `display_name -> "old" (was null)`, so checking for a bare `null`
+    // and a bare `"old"` was satisfied by that one line whether or not
+    // the clear emitted anything.
+    expect_contains(&text, "display_name -> null (was \"old\")");
 }
 
 /// node: tests/metadata-events.test.ts:660
