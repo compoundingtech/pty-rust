@@ -413,4 +413,40 @@ step on a machine; the note to the Node maintainers; anything that would grow th
 
 ## Status
 
-Approved on 2026-08-29. This file is the record of the plan; `docs/parity.md` is the map it closes.
+Approved on 2026-08-29. This file is the record of the plan; `docs/parity.md`
+is the map it closes.
+
+**Every work package here is built except WP-CUT, as of 2026-09-02.** WP1,
+lanes A to E, WP5, WP6, WP7a, WP7b, WP8, WP-CONF, WP-KIT, WP-TS, WP-TUI with
+the session manager, and WP-PKG are all on `parity`.
+
+What that means, measured rather than claimed:
+
+- The whole workspace test suite passes: 1298 tests, none failing.
+- The conformance map covers all 120 Node test files. Every command-line and
+  protocol suite has Rust tests and none are left to do. Six gated pairs
+  remain and each points at a decision record; those six are the parity debt.
+- `nix flake check` passes end to end.
+- The TypeScript testing package passes 17 of 17 driving the Rust binary.
+- The help text is byte-identical to the Node tool for 24 of 25 verbs. The
+  one difference is `--version`, by decision.
+- A client of either implementation drives a session hosted by the other, in
+  both directions, for list, peek, send, stats, kill and rm. That is what
+  makes a staged rollout safe: sessions keep running while the binary on PATH
+  changes.
+- A real coding-agent harness runs in a session this daemon hosts. It renders,
+  it takes keys, and a bracketed paste reaches its composer. Hosting the same
+  harness, this daemon holds 6.7 MB against the Node daemon's 60.8 MB.
+
+**WP-CUT is what is left, and most of it is not code.** The consumer runs
+belong to the people who own those repositories, the flake change belongs to
+`st2`, and the rollout is a decision rather than a task.
+
+**One thing must be fixed before this binary reaches a machine that runs
+evals, and it is not in this repository.** `st2`'s boot gate decides a task is
+alive from a single reading of `pty list --json`. Both implementations leave a
+session's record saying "running" for about five milliseconds after `pty run
+-d` returns; the Node command line takes 33 milliseconds to start and so
+always stepped over that window, while this one answers in 1.2 milliseconds
+and lands inside it. The gate was protected by the slowness of the tool it was
+asking. **Do not slow this tool down to restore that.**
