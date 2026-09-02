@@ -419,6 +419,26 @@ on both.
 which of the two it is doing and pins the answer, rather than assuming the one
 it was written on.
 
+## 12d. Absent on macOS
+
+Measured on Apple silicon on 2026-09-02, by a machine that could run what this
+one cannot.
+
+| | |
+|---|---|
+| **The daemon has no name.** `ps -o comm=` shows the binary's whole path; the Node tool shows `pty-daemon`. | Cosmetic. Nothing reads it. Node rewrites the process-argument region to do this, which means overwriting the memory `argv` points at, in place; `pthread_setname_np` compiles and does not move the field. Both dead ends are written beside `set_process_title`. |
+
+Everything else that was absent there is now done: the child is told its
+working directory as the caller wrote it, memory and CPU come from `ps` where
+there is no `/proc`, and the build works.
+
+**Two more failures on that machine are open and neither is understood.** A
+multi-byte character split across two DATA frames comes back as a replacement
+character, and a detached client is still counted as attached after its socket
+has closed. Both reproduce there and neither reproduces here; the frame split
+was checked on Linux and it really does split, so a pass here is not an
+accident of chunking.
+
 ## 13. In flight, not on `main`
 
 Checked again on 2026-09-02.

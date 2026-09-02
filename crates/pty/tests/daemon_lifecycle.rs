@@ -75,7 +75,20 @@ fn publication_order_and_shapes() {
     assert_eq!(events[0]["session"], name);
     assert_eq!(events[0]["tags"], json!({"team": "a", "keep": "true"}));
     assert!(events[0]["ts"].as_str().unwrap() >= m["createdAt"].as_str().unwrap());
-    assert_eq!(process_name(d.pid), Some("pty-daemon".to_string()));
+    // Linux names its daemon; macOS does not yet. Pinned both ways rather
+    // than skipped, so implementing it there turns this green instead of
+    // leaving a gap nobody is watching. See `set_process_title`.
+    let named = process_name(d.pid);
+    if cfg!(target_os = "linux") {
+        assert_eq!(named, Some("pty-daemon".to_string()));
+    } else {
+        assert_ne!(
+            named,
+            Some("pty-daemon".to_string()),
+            "the daemon is named here now — implement it and make this the \
+             assertion for every platform"
+        );
+    }
 }
 
 /// What `ps` and `top` call a process, read the way each machine offers it.

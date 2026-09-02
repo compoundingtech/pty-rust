@@ -132,19 +132,30 @@ pub fn config_for(params: &SpawnParams) -> DaemonConfig {
 
 /// Name this process for `ps`, `top` and `/proc/<pid>/comm`.
 ///
-/// Linux caps the name at 15 characters and takes it through
-/// `prctl(PR_SET_NAME)`. **macOS has its own way and this used to say it did
-/// not**, so the daemon showed up there as the full path of the binary while
-/// the Node tool showed `pty-daemon`. Node gets that from libuv, which names
-/// the main thread with the one-argument `pthread_setname_np` that Apple's
-/// libc provides; this does the same.
+/// **Linux only, and that is a gap rather than a decision.** On Linux this is
+/// `prctl(PR_SET_NAME)`, which moves the name `ps -o comm=` reads.
 ///
-/// Measured on 2026-09-02 before the macOS branch existed: `ps -o comm=`
-/// gave `pty-daemon` for the Node daemon and the binary's whole path for
-/// this one.
+/// **On macOS the daemon still shows the binary's whole path, where the Node
+/// tool shows `pty-daemon`.** Two attempts are recorded here so nobody
+/// repeats them:
 ///
-/// Everywhere else it is still a no-op, which is honest rather than lazy: a
-/// platform we have not named a process on is one we have not tested.
+/// - **"macOS has no equivalent" — false.** This file said so until
+///   2026-09-02 and the Node tool disproves it.
+/// - **`pthread_setname_np` — compiles, and does not do this job.** Apple's
+///   one-argument form names the calling THREAD, for debuggers and
+///   Instruments, and macOS does not surface thread names through `ps` at
+///   all. Tried on 2026-09-02: `comm`, `ucomm` and `args` were all unchanged.
+///
+/// **What Node actually does is rewrite the process-argument region**, which
+/// is where macOS `ps -o comm=` reads its answer. Its daemon's `args` field
+/// is the bare string `pty-daemon` rather than a command line, which is the
+/// tell. Doing the same here means overwriting the memory `argv` points at,
+/// in place, within the space the kernel gave us — and getting that wrong
+/// corrupts the arguments of a live process.
+///
+/// **So it is left undone rather than half done.** It is cosmetic: it changes
+/// what `ps` and `top` display and nothing reads it. `docs/parity.md` records
+/// it as absent.
 pub fn set_process_title(title: &str) {
     #[cfg(target_os = "linux")]
     {
@@ -156,18 +167,7 @@ pub fn set_process_title(title: &str) {
             }
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        // Apple's is one argument and names the CALLING thread, so it must
-        // run on the main one to name the process.
-        if let Ok(c) = std::ffi::CString::new(title) {
-            // SAFETY: reads a NUL-terminated string and copies it.
-            unsafe {
-                libc::pthread_setname_np(c.as_ptr());
-            }
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = title;
     }

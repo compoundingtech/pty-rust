@@ -62,6 +62,27 @@ fn wait_for_dump(dump: &std::path::Path, min_len: usize, timeout: Duration) -> V
     std::fs::read(dump).unwrap_or_default()
 }
 
+/// Each DATA frame's bytes, separately.
+///
+/// **The frame boundaries are the whole question for a split scalar** — two
+/// bytes of one character arriving in two frames is the case these tests
+/// exist to create, and a failure message that concatenates them first
+/// cannot say whether the split happened or whether something mangled the
+/// bytes inside a single frame. Measured on Linux 2026-09-02: the sample
+/// really does arrive as `[c3]` then `[a9]`, so the split is real here and a
+/// pass is not an accident of chunking.
+fn describe_data_frames(packets: &[pty_core::protocol::Packet]) -> String {
+    let frames: Vec<String> = packets
+        .iter()
+        .filter(|p| p.type_ == MessageType::Data)
+        .map(|p| format!("{:02x?}", p.payload))
+        .collect();
+    if frames.is_empty() {
+        return "none".to_string();
+    }
+    format!("{} -> {}", frames.len(), frames.join(" "))
+}
+
 fn plain_screen(rig: &Rig, id: &str) -> String {
     let out = rig.pty(&["peek", "--plain", id]);
     expect_status(&out, 0);
@@ -91,7 +112,16 @@ fn bytes_split_output_reassembles_every_scalar() {
         let data = data_bytes(&packets);
         assert!(
             data.windows(sample.len()).any(|w| w == sample.as_bytes()),
-            "[{id}] DATA frames do not concatenate to the sample: {:?}",
+            "[{id}] DATA frames do not concatenate to the sample\n  \
+             wanted: {:02x?}\n  \
+             got:    {:02x?}\n  \
+             frames: {}\n  \
+             (a lossy rendering of the bytes is what this used to print, and \
+             it hid whether the scalar was split across frames or mangled \
+             inside one: {:?})",
+            sample.as_bytes(),
+            data,
+            describe_data_frames(&packets),
             String::from_utf8_lossy(&data)
         );
         let screen = plain_screen(&rig, id);
