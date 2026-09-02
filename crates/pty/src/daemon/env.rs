@@ -81,6 +81,23 @@ pub fn build_child_env_from(
             }
         }
     }
+    // `PWD` is the working directory as the caller WROTE it, not as the
+    // kernel resolves it. node-pty does exactly this
+    // (`src/unixTerminal.ts`, `env.PWD = cwd`) and the difference is
+    // visible wherever the path runs through a symlink.
+    //
+    // Without it the child's shell derives `PWD` from `getcwd()` whenever
+    // the inherited one does not name the same directory — so the value
+    // depended on WHERE THE LAUNCHER STOOD. `pty run --cwd X` from inside X
+    // gave the path as written, and the same command from anywhere else
+    // gave the resolved one. Same arguments, two answers.
+    //
+    // On Linux this hides, because the usual temp directories are real
+    // directories. On a Mac `/tmp` and `/var` are both symlinks, so every
+    // session under either showed it. Reproduced on Linux with a symlinked
+    // directory on 2026-09-02; it is not a platform difference, it is a
+    // symlink difference.
+    env.insert("PWD".to_string(), cfg.cwd());
     env.insert("PTY_SESSION".to_string(), cfg.name.clone());
     if !generation.is_empty() {
         env.insert("PTY_SESSION_GENERATION".to_string(), generation.to_string());

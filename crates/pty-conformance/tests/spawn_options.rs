@@ -195,3 +195,56 @@ fn isolate_env_defaults_term_when_the_caller_has_none() {
     let dumped = wait_for_file(&dump);
     expect_contains(&dumped, "TERM=xterm-256color");
 }
+
+/// `PWD` is the working directory as the caller WROTE it, not as the kernel
+/// resolves it, and it does not depend on where the launcher stood.
+///
+/// node: node-pty `src/unixTerminal.ts`, `env.PWD = cwd`.
+///
+/// Without this the child's shell derived `PWD` from `getcwd()` whenever the
+/// inherited one did not name the same directory, so `pty run --cwd X` gave
+/// one answer from inside X and another from anywhere else. It hides on a
+/// machine whose temp directories are real directories and shows on one where
+/// they are symlinks, which is why it was found on a Mac — but it is a
+/// symlink difference, not a platform one, and this test makes its own
+/// symlink so it fails anywhere.
+#[test]
+fn pwd_is_the_directory_as_written_wherever_the_caller_stood() {
+    let rig = Rig::new();
+    let real = rig.make_dir("pwd-real");
+    let link = rig.tmp().join("pwd-link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    assert_ne!(
+        real.canonicalize().unwrap(),
+        link,
+        "the fixture needs a link that differs from its target"
+    );
+    let link_s = link.to_string_lossy().into_owned();
+
+    // Two launchers: one inside the session directory, one far from it. The
+    // defect was that these disagreed.
+    for (id, launcher) in [("pwd-here", link.clone()), ("pwd-away", rig.root().to_path_buf())] {
+        let mut cmd = rig.command(&[
+            "run", "-d", "--id", id, "--no-display-name", "--tag", "keep=true", "--cwd", &link_s,
+            "--", "env",
+        ]);
+        cmd.current_dir(&launcher);
+        let out = rig.run(cmd, None);
+        expect_status(&out, 0);
+        wait_until(&format!("{id} records its exit"), || {
+            rig.meta(id).is_some_and(|m| m.get("exitCode").is_some())
+        });
+        let printed = rig.pty(&["peek", "--full", "--plain", id]).stdout();
+        let pwd = printed
+            .lines()
+            .find_map(|l| l.strip_prefix("PWD="))
+            .unwrap_or_else(|| panic!("no PWD in the child environment:\n{printed}"))
+            .trim()
+            .to_string();
+        assert_eq!(
+            pwd, link_s,
+            "launched from {}: the child was told {pwd:?} instead of the path as written",
+            launcher.display()
+        );
+    }
+}
