@@ -86,6 +86,13 @@
           "fish"
         ];
 
+        # Needed to build at all on a Mac; see the note beside their use.
+        darwinBuildInputs = lib.optionals pkgs.stdenv.isDarwin [
+          pkgs.apple-sdk_15
+          pkgs.xcbuild
+          pkgs.cctools
+        ];
+
         pty = pkgs.rustPlatform.buildRustPackage {
           pname = "pty";
           inherit version;
@@ -113,15 +120,24 @@
           # constructs the bench target unconditionally and only gates
           # installing it. So the SDK has to be present rather than skipped.
           #
-          # `apple-sdk_15` is what was proved to work. **`apple-sdk_26` is
-          # untested**, and the native failure this replaced tracked an SDK
-          # version of 26.x, so the 15 may be load-bearing rather than
-          # incidental. Do not raise it without building on a Mac.
-          ++ lib.optionals pkgs.stdenv.isDarwin [
-            pkgs.apple-sdk_15
-            pkgs.xcbuild
-            pkgs.cctools
-          ];
+          # `apple-sdk_15` is what was proved to work, and it resolves to an
+          # SDK that reports 14.4. **`apple-sdk_26` is untested**, and the
+          # native failure this replaced tracked an SDK version of 26.x, so
+          # the version here may be load-bearing rather than incidental. Do
+          # not raise it without building on a Mac.
+          #
+          # **`xcbuild` is here for a reason that may not last, and the reason
+          # is worth reading before anyone removes it.** On a Mac's own shell,
+          # isolated one input at a time, it is the only one of the three that
+          # makes a plain `zig build` link at all — and it works by BREAKING
+          # SDK detection. nixpkgs' `xcrun` cannot find an SDK, so Zig stops
+          # looking at the host's Xcode SDK and falls back to its own bundled
+          # libSystem stub; the emitted link line carries no `-syslibroot`.
+          # **If nixpkgs' `xcbuild` ever gains working SDK detection this
+          # breaks again**, and the failure will look like a Zig-versus-macOS
+          # problem rather than a packaging one, which is how it cost somebody
+          # an afternoon the first time.
+          ++ darwinBuildInputs;
 
           # zig's setup hook would otherwise replace cargo's build, check, and
           # install phases; zig is only here for libghostty-vt-sys's build script.
@@ -169,7 +185,21 @@
           # The testkit's line-editing tests drive readline through `bash`;
           # stdenv's bash is built without it, so the interactive one goes first
           # on the check PATH.
-          nativeCheckInputs = [ pkgs.bashInteractive ];
+          nativeCheckInputs = [
+            pkgs.bashInteractive
+          ]
+          # The sandbox has no `ps`, and the only two functional
+          # platform-specific paths in the whole port both shell out to it:
+          # reading a process start token (`ps -o lstart=`) and asking whether
+          # a process has already been reaped (`ps -o stat=`). Without it both
+          # fall to their failure branches.
+          #
+          # **So a darwin build that passed its checks without this was green
+          # WITHOUT having tested the macOS-specific code, which is worse than
+          # a red one.** Found on 2026-09-02 by the two tests failing in the
+          # sandbox and passing natively, with a control proving `ps` was the
+          # thing that was absent rather than something else being wrong.
+          ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.darwin.ps ];
 
           preCheck = ''
             export TMPDIR=$(mktemp -d /tmp/pty.XXXXXX)
@@ -249,7 +279,19 @@
             pkgs.rustc
             pkgs.rustfmt
             pkgs.zig_0_15
-          ];
+
+            # The package build has this and the shell did not, so a
+            # `cargo test --workspace` in here failed two line-editing tests
+            # for a reason that had nothing to do with the code: the testkit
+            # drives readline through `bash`, and stdenv's bash is built
+            # without it.
+            pkgs.bashInteractive
+          ]
+          # Likewise: without these a `cargo test --workspace` in this shell
+          # does not get as far as the tests on a Mac. It fails building
+          # libghostty.
+          ++ darwinBuildInputs
+          ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.darwin.ps ];
 
           # The same pre-fetched Ghostty as the package, so a `cargo build` in
           # this shell fetches nothing.

@@ -392,14 +392,21 @@ until somebody has read it.
 
 Checked on 2026-09-02, on Linux here and on Apple silicon by another machine.
 
-**Closing a socket that still holds unread data reaches the peer as a reset on
-Linux and as an ordinary end of stream on macOS.** Linux hands over the bytes
-already in flight and then fails the next read with `ECONNRESET`, errno 104.
-Apple silicon ends the stream instead.
+**Closing a socket that still holds unread data is reported differently by the
+two kernels, and macOS is not silent about it — it uses a different errno in a
+different place.** Measured on the unix-domain sockets `pty` actually uses:
 
-**Both pty implementations decide the same way and so both inherit it.** The
-Node client branches on `err.code === "ECONNRESET"` and this one on the same
-errno, and neither can report a reset its kernel never delivered.
+| | Linux | macOS |
+|---|---|---|
+| the peer's next **read** | fails, `ECONNRESET`, errno 104 | ends the stream cleanly |
+| the peer's next **write** | — | fails, `EPIPE`, errno 32 |
+
+**Both pty implementations inspect the read and both branch on
+`ECONNRESET`** — the Node client on `err.code === "ECONNRESET"`, this one on
+the same errno — so both reach the same two answers on the same two kernels.
+**The boundary is which errno is inspected, not what the kernel is willing to
+say.** A client that also treated `EPIPE` as "the session is gone" would reach
+the Linux answer on both, and neither implementation does that today.
 
 **What it means for somebody watching a session:** where the reset does not
 arrive, a daemon that drops a client with input still unread looks exactly

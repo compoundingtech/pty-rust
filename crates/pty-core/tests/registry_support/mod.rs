@@ -37,6 +37,31 @@ pub fn root() -> PathBuf {
             std::env::remove_var("PTY_SESSION_DIR");
             std::env::remove_var("PTY_SESSION");
         }
+        // Say this once, here, rather than letting the tests that bind a
+        // socket fail with "path must be shorter than SUN_LEN" and look like
+        // a defect in the port.
+        //
+        // The budget is the rig's, not the product's. `pty` generates short
+        // ids and its own check allows for those; a test picks its own name,
+        // and the longest in the suite is 16 characters plus a counter. So a
+        // root that satisfies the product can still be too long here, which
+        // is exactly what made this confusing the first time.
+        //
+        // macOS caps the socket path at 104 bytes where Linux allows 108,
+        // and macOS's own temp directory already spends about 49 of them.
+        // Anything that nests inside it eats the rest: a `nix develop` shell
+        // took 16 more and turned twenty tests red on 2026-09-02.
+        let longest = dir.join("a-session-name-of-the-length-tests-use.sock");
+        assert!(
+            longest.as_os_str().len() <= pty_core::registry::SUN_PATH_MAX,
+            "the test root is too long for a unix socket path: {} bytes of {} at
+  {}
+  \
+             This is the test harness, not the software. Set a shorter TMPDIR (TMPDIR=/tmp works).",
+            longest.as_os_str().len(),
+            pty_core::registry::SUN_PATH_MAX,
+            dir.display()
+        );
         dir
     })
     .clone()

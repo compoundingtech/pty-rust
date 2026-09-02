@@ -48,6 +48,19 @@ impl Rig {
         let scratch = base.join("scratch");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&scratch).unwrap();
+        // The same trap as the other rigs: a long TMPDIR makes every socket
+        // bind fail with a message about `sun_path` that reads like a defect
+        // in the port. macOS has 104 bytes and spends about 49 of them on its
+        // own temp directory before anything nests inside it.
+        let longest = root.join("a-session-name-of-a-plausible-length.sock");
+        assert!(
+            longest.as_os_str().len() <= pty_core::registry::SUN_PATH_MAX,
+            "the test root is too long for a unix socket path: {} bytes of {} at\n  {}\n  \
+             This is the test harness, not the software. Set a shorter TMPDIR (TMPDIR=/tmp works).",
+            longest.as_os_str().len(),
+            pty_core::registry::SUN_PATH_MAX,
+            root.display()
+        );
         Rig { root, scratch }
     }
 
