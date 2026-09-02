@@ -174,6 +174,41 @@ creators for the same id arrive together. Then two daemons can own one name,
 with socket rebinding and last-writer-wins metadata, or two event writers can
 interleave a truncation with an append.
 
+## A test that watches a stream must start the stream itself
+
+**Found 2026-09-02, on a slower machine, and it read as a character-encoding
+defect for most of an afternoon.**
+
+A test had a child print one byte at a time so it could check that a
+multi-byte character split across several DATA frames still arrives whole. The
+child slept for a third of a second first, to let the client attach.
+
+On a slower machine **the first byte of the sample never appeared**, and every
+other byte arrived correctly, one per frame. That looks exactly like a decoder
+losing its place at a character boundary. It is nothing of the kind.
+
+**Anything the child writes before the daemon has processed an ATTACH reaches
+that client in the initial SCREEN, not as a DATA frame.** The test collected
+DATA only, so an early byte was not late — it was invisible.
+
+**The sleep was the bug.** It made the race rare enough to look like something
+else, and rare enough that the same test passed under load, because a busy
+machine attaches at a different point in that third of a second. **A test that
+passes when the machine is busy and fails when it is idle is the shape to
+recognise**; the usual flake is the other way round.
+
+The child now waits for a file the test creates after the SCREEN has arrived,
+so the stream cannot begin before the watcher is watching. Two controls: never
+open the gate and no bytes arrive at all; delay the attach by far longer than
+the original sleep and it still passes.
+
+**And the first assertion could not have told anybody this.** It concatenated
+the frames and printed them as lossy text, so a character split across two
+frames and a character mangled inside one frame produced the same message —
+and those want completely different searches. It now prints the wanted bytes,
+the received bytes, and each frame separately. **The rewritten message found
+the cause in one run.**
+
 ## What is enforced
 
 - **Frame size.** A declared length above 32 MiB drops the connection, on

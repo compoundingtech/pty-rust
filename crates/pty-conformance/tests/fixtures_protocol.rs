@@ -33,8 +33,27 @@ fn fixture(name: &str) -> Value {
 /// A `sh` script that prints `bytes` one byte at a time with a pause, then
 /// `after`, then keeps the session alive with `cat`. The leading sleep gives
 /// a client time to attach before the first byte.
-fn byte_by_byte_script(bytes: &[u8], after: &str) -> String {
-    let mut s = String::from("sleep 0.3; ");
+/// The child writes one byte at a time, and does not start until `gate`
+/// exists.
+///
+/// **The gate replaces a sleep, and the sleep was a race.** Anything the
+/// child writes before a client's ATTACH has been processed reaches that
+/// client in the initial SCREEN instead of as DATA, and `drain` collects
+/// DATA only — so an early byte is not late, it is invisible.
+///
+/// It cost a real afternoon. On a slower machine the FIRST byte of a sample
+/// went missing while every other byte arrived correctly, one per frame,
+/// which reads exactly like a mangled character and is nothing of the kind.
+/// Reproduced here on 2026-09-02 by removing the head start: then every byte
+/// goes missing, which is the same fault with the timing turned up.
+///
+/// A caller that passes no gate keeps the old head start, for the cases that
+/// read the screen rather than the frames.
+fn byte_by_byte_script_gated(bytes: &[u8], after: &str, gate: Option<&std::path::Path>) -> String {
+    let mut s = match gate {
+        Some(g) => format!("until [ -e '{}' ]; do sleep 0.01; done; ", g.display()),
+        None => String::from("sleep 0.3; "),
+    };
     for b in bytes {
         s.push_str(&format!("printf '\\{b:03o}'; sleep 0.05; "));
     }
@@ -83,6 +102,10 @@ fn describe_data_frames(packets: &[pty_core::protocol::Packet]) -> String {
     format!("{} -> {}", frames.len(), frames.join(" "))
 }
 
+fn byte_by_byte_script(bytes: &[u8], after: &str) -> String {
+    byte_by_byte_script_gated(bytes, after, None)
+}
+
 fn plain_screen(rig: &Rig, id: &str) -> String {
     let out = rig.pty(&["peek", "--plain", id]);
     expect_status(&out, 0);
@@ -104,10 +127,17 @@ fn bytes_split_output_reassembles_every_scalar() {
         let sample = case["sample"].as_str().unwrap();
         let expect_plain = case["expectPlain"].as_str().unwrap();
         let rig = Rig::new();
-        let script = byte_by_byte_script(sample.as_bytes(), "");
+        let gate = rig.tmp().join(format!("{id}.go"));
+        let script = byte_by_byte_script_gated(sample.as_bytes(), "", Some(&gate));
         rig.daemon(id, &["sh", "-c", &script], DaemonOpts::no_display_name());
         let mut conn = rig.connect(id);
         conn.attach(24, 80);
+        // The SCREEN is the daemon's answer to this ATTACH, so it proves the
+        // client is on the books. Only then may the child speak, and every
+        // byte it writes must arrive as DATA.
+        conn.wait_for(MessageType::Screen, deadline())
+            .unwrap_or_else(|| panic!("[{id}] no SCREEN in reply to ATTACH"));
+        std::fs::write(&gate, b"go").expect("open the gate");
         let packets = conn.drain(Duration::from_millis(1500));
         let data = data_bytes(&packets);
         assert!(
