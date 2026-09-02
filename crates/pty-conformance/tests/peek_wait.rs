@@ -148,3 +148,38 @@ fn events_wait_times_out_when_the_event_never_occurs() {
     expect_status(&r, 1);
     expect_contains(&r.stderr(), "Timed out");
 }
+
+/// `--timeout inf` used to end the command with a Rust panic. It is an
+/// ordinary thing to type and `f64::from_str` accepts it, so it reached
+/// `Duration::from_secs_f64`, which panics on a value that is not finite.
+/// `--timeout NaN` quietly turned the bounded wait into an unbounded one.
+///
+/// Both now wait, which is what the Node tool does with the same input.
+#[test]
+fn a_timeout_that_is_not_a_finite_number_waits_instead_of_crashing() {
+    let rig = Rig::new();
+    rig.daemon("pw-inf", &["cat"], DaemonOpts::no_display_name());
+    for value in ["inf", "Infinity", "NaN", "-1"] {
+        let mut child = rig
+            .command(&["peek", "--wait", "NEVERMATCH", "--timeout", value, "pw-inf"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn pty peek --wait");
+        // Long enough that a crash would already have happened, short
+        // enough to keep the suite quick.
+        std::thread::sleep(Duration::from_millis(600));
+        let finished = child.try_wait().expect("try_wait");
+        let _ = child.kill();
+        let out = child.wait_with_output().expect("wait");
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            finished.is_none(),
+            "--timeout {value} ended early with {finished:?}: {said}"
+        );
+        assert!(
+            !said.contains("panicked"),
+            "--timeout {value} panicked: {said}"
+        );
+    }
+}

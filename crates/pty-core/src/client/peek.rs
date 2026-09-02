@@ -318,7 +318,7 @@ pub const PEEK_WAIT_INTERVAL: Duration = Duration::from_millis(200);
 /// substring. Returns the text to print (the plain screen, or a fresh ANSI
 /// screen when `plain` is false; the CLI appends `"\n"`). When the session
 /// has exited, `lastLines` from the metadata is matched instead.
-/// `timeout_secs <= 0` waits forever.
+/// A `timeout_secs` that is not a finite positive number waits forever.
 ///
 /// node: tests/peek-wait.test.ts:111-188
 pub fn peek_wait(
@@ -328,7 +328,11 @@ pub fn peek_wait(
     plain: bool,
 ) -> Result<String, PeekWaitError> {
     let start = Instant::now();
-    let timeout = if timeout_secs > 0.0 {
+    // A finite, positive number of seconds is a deadline. Anything else
+    // waits, which is what the Node tool does with the same input.
+    // `Duration::from_secs_f64` panics on infinity, and `pty peek --wait x
+    // --timeout inf` is an ordinary thing for somebody to type.
+    let timeout = if timeout_secs.is_finite() && timeout_secs > 0.0 {
         Some(Duration::from_secs_f64(timeout_secs))
     } else {
         None
