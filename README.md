@@ -96,6 +96,30 @@ for the reasoning): `pty recover`, `pty evidence`, and `pty test`. Their help
 texts are kept verbatim so `--help` still describes them, but running them
 prints `pty <cmd>: not available in this build. See docs/parity.md.` and exits 1.
 
+### One known defect, documented rather than fixed
+
+**A session's lock files are not exclusive across a crash.** When a lock's
+holder has died, any process may steal it, and two processes stealing the same
+stale lock can both end up holding it. Measured on 2026-09-02: eight threads
+released together against one stale lock produced more than one winner in 386
+races out of 400.
+
+The **Node tool has the identical sequence and the identical defect**, so a
+shared `$PTY_ROOT` is no worse than either implementation alone, and neither
+one can be relied on here.
+
+**In ordinary use this does not arise.** Taking a lock still keeps two live,
+healthy processes apart. It needs a daemon that died holding a lock and two
+processes arriving together to clean up after it — typically two creators for
+the same session name.
+
+**Do not rely on these locks for correctness after a crash.** A correct steal
+needs an exclusive create that only one process can win, which means a second
+file in a directory both implementations read. That is a change to a protocol
+they share and has to be agreed between them, which is why it is written down
+here instead of fixed on one side. `crates/pty-core/src/registry/lock.rs` and
+`docs/hardening.md` carry the interleaving in full.
+
 ## The crates
 
 A Cargo workspace of six crates under `crates/`:

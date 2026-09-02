@@ -8,6 +8,36 @@
 //! event lock first, then creation lock (`with_both_locks`).
 //!
 //! node: src/sessions.ts:2273-2336, 2374-2386; src/events.ts:224-249
+//!
+//! # These locks are not exclusive across a crash
+//!
+//! **A lock whose holder died is stolen, and two processes stealing the same
+//! stale lock can both end up holding it.** Measured on 2026-09-02: eight
+//! threads released together against one stale lock, over four hundred
+//! rounds, produced more than one winner in 386 of them.
+//!
+//! The steal is a read, a decision and then an unlink followed by a create,
+//! and nothing binds those together. A second process that made its decision
+//! from the same file unlinks what the first one has already put there. **The
+//! loser removes the winner's lock and then takes it**, and either one's
+//! release can remove the other's file.
+//!
+//! **The Node tool has the identical sequence and the identical defect**
+//! (`src/sessions.ts`, `acquireFileLock`), so a shared `$PTY_ROOT` is no
+//! worse than either implementation alone. This is not a difference between
+//! them.
+//!
+//! **So do not rely on these locks for correctness after a crash.** Taking
+//! one still keeps two live, healthy processes apart, which is what it is for
+//! in ordinary use. It does not settle a race between two processes tidying
+//! up after a daemon that died holding it.
+//!
+//! **A correct steal needs one exclusive create that only one process can
+//! win**, which means funnelling the steal through a second file — and that
+//! file lives in a directory both implementations read, so it is a change to
+//! a protocol they share and has to be agreed between them rather than added
+//! on one side. It is left undone deliberately. See `docs/hardening.md`,
+//! "Stealing a stale lock is not exclusive", for the interleaving in full.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -86,6 +116,8 @@ fn try_create(lock_path: &Path) -> std::io::Result<bool> {
 /// them.
 ///
 /// node: src/sessions.ts:2293-2336
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGuard>> {
     ensure_session_dir()?;
     let guard = |path: &Path| LockGuard {
@@ -122,6 +154,8 @@ pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGua
 /// to a caller wants [`lock_or_refusal`] instead: folding an I/O error into
 /// `None` turns a read-only registry into "the event log is busy, retry",
 /// which is untrue and sends the caller round a loop that cannot end.
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn acquire_file_lock(lock_path: &Path) -> Option<LockGuard> {
     try_acquire_file_lock(lock_path).ok().flatten()
 }
@@ -142,6 +176,8 @@ pub enum LockRefusal {
 ///
 /// node: src/sessions.ts:2293-2336 (`acquireFileLock` returns false only on
 /// `EEXIST` and rethrows every other error).
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn lock_or_refusal(lock_path: &Path) -> Result<LockGuard, LockRefusal> {
     match try_acquire_file_lock(lock_path) {
         Ok(Some(guard)) => Ok(guard),
@@ -155,6 +191,8 @@ pub fn lock_or_refusal(lock_path: &Path) -> Result<LockGuard, LockRefusal> {
 
 /// Take `<name>.events.lock`, with Node's busy text when a live holder has
 /// it and the real cause when the file cannot be created.
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn take_event_lock(name: &str) -> Result<LockGuard, String> {
     lock_or_refusal(&event_lock_path(name)).map_err(|r| match r {
         LockRefusal::Busy => event_busy_message(name),
@@ -164,6 +202,8 @@ pub fn take_event_lock(name: &str) -> Result<LockGuard, String> {
 
 /// Take `<name>.lock`, with Node's busy text when a live holder has it and
 /// the real cause when the file cannot be created.
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn take_metadata_lock(name: &str) -> Result<LockGuard, String> {
     lock_or_refusal(&lock_path(name)).map_err(|r| match r {
         LockRefusal::Busy => metadata_busy_message(name),
@@ -195,6 +235,8 @@ pub(crate) fn parse_leading_int(s: &str) -> Option<i32> {
 }
 
 /// Acquire the creation/metadata lock `<name>.lock`.
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn acquire_lock(name: &str) -> Option<LockGuard> {
     acquire_file_lock(&lock_path(name))
 }
@@ -207,6 +249,8 @@ pub fn release_lock(name: &str) {
 /// Acquire the event lock `<name>.events.lock` without waiting.
 ///
 /// node: src/events.ts:228-230
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn acquire_event_lock(name: &str) -> Option<LockGuard> {
     acquire_file_lock(&event_lock_path(name))
 }
@@ -223,6 +267,8 @@ pub const EVENT_LOCK_WAIT: Duration = Duration::from_millis(5_000);
 /// Node's busy text when the deadline passes.
 ///
 /// node: src/events.ts:237-249
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn wait_for_event_lock(name: &str, wait: Duration) -> Result<LockGuard, String> {
     let deadline = Instant::now() + wait;
     let path = event_lock_path(name);
@@ -270,6 +316,8 @@ impl LockBusy {
 /// creation/metadata lock. Neither waits.
 ///
 /// node: src/sessions.ts:2188-2202
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn with_both_locks<T>(name: &str, f: impl FnOnce() -> T) -> Result<T, LockBusy> {
     let events = lock_or_refusal(&event_lock_path(name)).map_err(|r| match r {
         LockRefusal::Busy => LockBusy::Events,

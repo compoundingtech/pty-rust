@@ -9,6 +9,16 @@
 //! This crate deliberately does not depend on libghostty, so it builds without
 //! a Zig toolchain. Terminal emulation lives in `pty-terminal`; the daemon and
 //! CLI live in the `pty` binary crate.
+//!
+//! # One thing to know before you build on this
+//!
+//! **The registry's file locks are not exclusive across a crash.** They keep
+//! two live, healthy processes apart, which is what they are for. They do not
+//! settle a race between two processes tidying up after a daemon that died
+//! holding one: both can end up believing they hold it. The Node tool has the
+//! same defect, so a shared `$PTY_ROOT` is no worse than either alone.
+//! [`registry::lock`] states the measurement and what a correct fix would
+//! need.
 
 pub mod client;
 pub mod duration;

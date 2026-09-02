@@ -7,6 +7,11 @@
 //! `.recovery/<name>.revision.json`. Atomic writes go through
 //! `<path>.tmp.<pid>.<16 hex>` + rename; readers skip names containing
 //! `.tmp.`.
+//!
+//! **The two lock files are not exclusive across a crash.** A lock whose
+//! holder died is stolen, and two processes stealing the same stale lock can
+//! both end up holding it. Both this implementation and the Node one share
+//! the defect. See [`lock`] before you build anything on them.
 
 pub mod atomic;
 pub mod cleanup;
