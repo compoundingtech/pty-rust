@@ -32,7 +32,6 @@ use super::daemon_warn;
 use super::config::DaemonConfig;
 use super::env::{build_child_env, describe_invalid_cwd, invalid_cwd_error};
 use super::tree::{
-    
     KILL_WAIT, ProcessIdentity, TERM_WAIT, signal_process_identities,
     snapshot_descendant_processes, terminate_process_identities,
 };
