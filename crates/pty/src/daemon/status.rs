@@ -19,23 +19,9 @@ pub fn query_process_resources(pid: i32) -> Option<Resources> {
     if pid <= 0 {
         return None;
     }
-    if cfg!(target_os = "linux") {
-        return pty_core::stats::read_resources(pid);
-    }
-    let out = std::process::Command::new("ps")
-        .args(["-o", "rss=,pcpu=", "-p", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut parts = text.split_whitespace();
-    let rss_kb = parts.next()?.parse().ok()?;
-    let cpu_percent = parts.next()?.parse().ok()?;
-    Some(Resources {
-        rss_kb,
-        cpu_percent,
-    })
+    // One implementation, not one per caller: `/proc` on Linux and
+    // `proc_pidinfo` on macOS, both inside `pty_core`.
+    pty_core::stats::read_resources(pid)
 }
 
 impl Daemon {

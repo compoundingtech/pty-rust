@@ -3,5 +3,13 @@ Usage: pty kill <ref>
 Terminate a running session's daemon and exact descendant tree. Metadata is kept —
 restart or `pty rm` it later.
 
+The daemon tears the tree down on its way out, which races its own exit. So once
+the daemon has gone, `pty kill` re-reads the process table, signals any process
+group the session left behind, and reports what is still there. It exits non-zero
+unless it verified the tree is empty.
+
+A descendant that calls setsid leaves the session and the group, and neither the
+tree walk nor the group sweep can reach it.
+
 Examples:
   pty kill myserver

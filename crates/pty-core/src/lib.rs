@@ -26,6 +26,7 @@ pub mod events;
 pub mod input;
 pub mod keys;
 pub mod paste;
+pub mod proctable;
 pub mod protocol;
 pub mod ptyfile;
 pub mod queries;

@@ -141,6 +141,20 @@ pub fn read_process_start_token(pid: i32) -> Option<String> {
         return Some(format!("linux:{start_time}"));
     }
     if cfg!(target_os = "macos") {
+        // **THE LAST `ps` IN THIS CODEBASE, AND IT STAYS.**
+        //
+        // Everything else moved to `proctable`, which reads `/proc` on Linux
+        // and `proc_pidinfo` on macOS and spawns nothing. This one cannot,
+        // because the text it produces is written into session metadata as
+        // `recovery.processStartToken` and the Node tool reads it back from
+        // the same registry. `ps -o lstart=` output is therefore a contract
+        // between two programs, not an implementation detail, and libproc's
+        // microsecond start time is a different string for the same process.
+        //
+        // It is safe where it is: one call per session lookup, never inside a
+        // poll loop, and a failure here already means "cannot confirm" rather
+        // than "gone". `proctable::LiveIdentity` exists so the cheap identity
+        // used by the teardown can never be confused with this one.
         let out = std::process::Command::new("ps")
             .args(["-o", "lstart=", "-p", &pid.to_string()])
             .stdin(std::process::Stdio::null())
@@ -187,24 +201,15 @@ pub fn has_process_exited_for_reap(pid: i32) -> bool {
     if !pid_alive(pid) {
         return true;
     }
-    if cfg!(target_os = "linux") {
-        return match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => match stat.rfind(") ") {
-                Some(idx) => stat.as_bytes().get(idx + 2) == Some(&b'Z'),
-                None => false,
-            },
-            Err(_) => !pid_alive(pid),
-        };
-    }
-    match std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-    {
-        Ok(out) => {
-            let state = String::from_utf8_lossy(&out.stdout);
-            reaped_from_ps_state(&state, || pid_alive(pid))
-        }
-        Err(_) => !pid_alive(pid),
+    // One `/proc` read on Linux, one `proc_pidinfo` call on macOS. Neither
+    // spawns anything, which is the whole point: this is called from poll
+    // loops, and it used to be a `ps` subprocess per iteration.
+    match crate::proctable::has_exited(pid) {
+        crate::proctable::Answer::Known(exited) => exited,
+        crate::proctable::Answer::NotPresent => true,
+        // We did not find out. Ask the kernel once more rather than reading
+        // our own silence as a death.
+        crate::proctable::Answer::Unknown(_) => !pid_alive(pid),
     }
 }
 
