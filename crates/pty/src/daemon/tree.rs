@@ -18,13 +18,183 @@ pub struct ProcessIdentity {
 
 /// `ps -axo pid=,ppid=`.
 fn list_processes() -> String {
+    ps(&["-axo", "pid=,ppid="])
+}
+
+/// `ps -axo pid=,ppid=,pgid=,stat=`. One call for the whole machine, which is
+/// the point: reading a start token costs a `ps` per descendant on macOS, and
+/// a group sweep needs no tokens at all.
+///
+/// The state column is not decoration. `ps` lists a zombie with its process
+/// group, so without it the sweep counts a corpse as a member and reports a
+/// group it has already emptied. Measured on Linux 2026-09-03: a zombie's row
+/// is `<pid> <ppid> <pgid> Z`.
+pub fn list_processes_with_groups() -> String {
+    ps(&["-axo", "pid=,ppid=,pgid=,stat="])
+}
+
+fn ps(args: &[&str]) -> String {
     std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid="])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
+}
+
+/// One row of `ps -axo pid=,ppid=,pgid=,stat=`. The state is optional so a
+/// three-column listing still parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRow {
+    pub pid: i32,
+    pub ppid: i32,
+    pub pgid: i32,
+    pub state: String,
+}
+
+impl ProcessRow {
+    /// A zombie is a dead process that still has a row and still has a process
+    /// group. It is not a member worth signalling or reporting.
+    pub fn is_zombie(&self) -> bool {
+        self.state.starts_with('Z')
+    }
+}
+
+pub fn parse_rows(listing: &str) -> Vec<ProcessRow> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut it = line.split_whitespace();
+            let (Some(pid), Some(ppid), Some(pgid)) = (it.next(), it.next(), it.next()) else {
+                return None;
+            };
+            let state = it.next().unwrap_or("").to_string();
+            if it.next().is_some() {
+                return None;
+            }
+            Some(ProcessRow {
+                pid: pid.parse().ok()?,
+                ppid: ppid.parse().ok()?,
+                pgid: pgid.parse().ok()?,
+                state,
+            })
+        })
+        .collect()
+}
+
+/// Every distinct process group inside `root_pid`'s tree, plus the groups of
+/// the root's own children.
+///
+/// **Deliberately not filtered by start token.** `snapshot_from_listing` drops
+/// a descendant whose token cannot be read, and that process is then never
+/// signalled. A group needs no identity, so collecting groups from the raw
+/// listing reaches a process the token reader could not name.
+///
+/// The root's own group is excluded. A pty child calls `setsid`, so the daemon
+/// sits alone in its group and signalling it would reach the daemon and
+/// nothing else. Measured on Linux, both tools, 2026-09-03.
+pub fn groups_in_tree(root_pid: i32, rows: &[ProcessRow]) -> Vec<i32> {
+    let mut children: std::collections::HashMap<i32, Vec<i32>> = Default::default();
+    let mut pgid_of: std::collections::HashMap<i32, i32> = Default::default();
+    for r in rows {
+        children.entry(r.ppid).or_default().push(r.pid);
+        pgid_of.insert(r.pid, r.pgid);
+    }
+    let root_group = pgid_of.get(&root_pid).copied();
+    let mut groups: Vec<i32> = Vec::new();
+    let mut seen = std::collections::HashSet::from([root_pid]);
+    let mut queue: std::collections::VecDeque<i32> =
+        children.get(&root_pid).cloned().unwrap_or_default().into();
+    while let Some(pid) = queue.pop_front() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        if let Some(&g) = pgid_of.get(&pid)
+            && Some(g) != root_group
+            && g > 1
+            && !groups.contains(&g)
+        {
+            groups.push(g);
+        }
+        for &c in children.get(&pid).map(|v| v.as_slice()).unwrap_or(&[]) {
+            queue.push_back(c);
+        }
+    }
+    groups.sort_unstable();
+    groups
+}
+
+/// The live pids that still belong to any of `groups`. A zombie is excluded:
+/// `ps` still lists it with its group, and counting it would make the sweep
+/// report a group it has already emptied.
+pub fn members_of_groups(groups: &[i32], rows: &[ProcessRow]) -> Vec<i32> {
+    let mut out: Vec<i32> = rows
+        .iter()
+        .filter(|r| !r.is_zombie() && groups.contains(&r.pgid))
+        .map(|r| r.pid)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// TERM every group, wait, KILL what is left, wait, then say what is STILL
+/// there. The caller reports the return value; it never reports the sending.
+///
+/// `own_group` is skipped so the command survives to print its own result.
+pub fn sweep_groups(
+    groups: &[i32],
+    own_group: i32,
+    term_wait: Duration,
+    kill_wait: Duration,
+    mut live: impl FnMut(&[i32]) -> Vec<i32>,
+    mut signal: impl FnMut(i32, i32),
+) -> Vec<i32> {
+    let targets: Vec<i32> = groups
+        .iter()
+        .copied()
+        .filter(|&g| g > 1 && g != own_group)
+        .collect();
+    if targets.is_empty() {
+        return live(groups);
+    }
+    for &g in &targets {
+        signal(g, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + term_wait;
+    let mut remaining = live(&targets);
+    while !remaining.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+        remaining = live(&targets);
+    }
+    if remaining.is_empty() {
+        return Vec::new();
+    }
+    for &g in &targets {
+        signal(g, libc::SIGKILL);
+    }
+    let deadline = Instant::now() + kill_wait;
+    remaining = live(&targets);
+    while !remaining.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+        remaining = live(&targets);
+    }
+    remaining
+}
+
+/// `kill(2)` on a whole process group.
+pub fn signal_group(pgid: i32, signal: i32) {
+    if pgid <= 1 {
+        return;
+    }
+    // SAFETY: a negative pid is the documented way to signal a process group.
+    unsafe { libc::kill(-pgid, signal) };
+}
+
+/// The caller's own process group.
+pub fn own_process_group() -> i32 {
+    // SAFETY: getpgrp(2) takes no arguments and cannot fail.
+    unsafe { libc::getpgrp() }
 }
 
 /// BFS from `root_pid` over a `pid ppid` listing; deepest first, then the
@@ -172,6 +342,239 @@ mod tests {
         }];
         assert!(signal_process_identities(&ids, 0).is_empty());
         assert!(terminate_process_identities(&ids, Duration::ZERO, Duration::ZERO).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    // daemon 100 (its own group), pty child 200 (setsid: its own group and
+    // session), 300 under the child, and 400 in a background group of its own.
+    // 900 is an unrelated process. This is the shape measured on Linux for
+    // both tools on 2026-09-03.
+    const ROWS: &str = "\
+100 1 100
+200 100 200
+300 200 200
+400 300 400
+900 1 900
+";
+
+    #[test]
+    fn the_daemons_own_group_is_not_a_target() {
+        let groups = groups_in_tree(100, &parse_rows(ROWS));
+        assert!(
+            !groups.contains(&100),
+            "the daemon sits alone in its group; signalling it reaches the daemon and nothing else"
+        );
+        assert_eq!(groups, vec![200, 400]);
+    }
+
+    #[test]
+    fn an_unrelated_group_is_never_a_target() {
+        assert!(!groups_in_tree(100, &parse_rows(ROWS)).contains(&900));
+    }
+
+    /// The reason to sweep groups at all: `snapshot_from_listing` drops a
+    /// descendant whose start token cannot be read, so that process is never
+    /// signalled. Groups are read from the raw listing, so its group is still
+    /// a target.
+    #[test]
+    fn a_descendant_with_no_readable_token_is_still_inside_a_target_group() {
+        let rows = parse_rows(ROWS);
+        let snapshot = snapshot_from_listing(100, ROWS, |pid| {
+            // 400 is the one whose token cannot be read.
+            (pid != 400).then(|| format!("tok:{pid}"))
+        });
+        assert!(
+            !snapshot.iter().any(|i| i.pid == 400),
+            "precondition: the token reader drops 400 from the snapshot"
+        );
+        assert!(
+            groups_in_tree(100, &rows).contains(&400),
+            "its group must still be a target"
+        );
+    }
+
+    #[test]
+    fn members_are_read_back_by_group() {
+        let rows = parse_rows(ROWS);
+        assert_eq!(members_of_groups(&[200], &rows), vec![200, 300]);
+        assert_eq!(members_of_groups(&[400], &rows), vec![400]);
+        assert_eq!(members_of_groups(&[], &rows), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn a_short_listing_row_is_ignored_rather_than_guessed() {
+        let rows = parse_rows("1 2\nx y z\n7 8 9\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].pid, rows[0].ppid, rows[0].pgid), (7, 8, 9));
+    }
+
+    /// `ps` lists a zombie with its process group. Counting it would make the
+    /// sweep report a group it has already emptied, and then signal it again.
+    /// Measured on Linux 2026-09-03: the row reads `<pid> <ppid> <pgid> Z`.
+    #[test]
+    fn a_zombie_is_not_a_group_member() {
+        let rows = parse_rows("100 1 100 Ss\n200 100 200 Sl\n300 200 200 Z\n");
+        assert_eq!(
+            members_of_groups(&[200], &rows),
+            vec![200],
+            "300 is a corpse and must not count as a member"
+        );
+    }
+
+    fn sweep(groups: &[i32], own: i32, alive: Vec<Vec<i32>>) -> (Vec<i32>, Vec<(i32, i32)>) {
+        let sent = RefCell::new(Vec::new());
+        let step = RefCell::new(0usize);
+        let left = sweep_groups(
+            groups,
+            own,
+            Duration::ZERO,
+            Duration::ZERO,
+            |_| {
+                let mut i = step.borrow_mut();
+                let v = alive.get(*i).cloned().unwrap_or_default();
+                *i += 1;
+                v
+            },
+            |g, sig| sent.borrow_mut().push((g, sig)),
+        );
+        (left, sent.into_inner())
+    }
+
+    #[test]
+    fn a_group_that_answers_term_is_never_killed() {
+        let (left, sent) = sweep(&[200], 5, vec![vec![]]);
+        assert!(left.is_empty());
+        assert_eq!(sent, vec![(200, libc::SIGTERM)], "SIGKILL must not be sent");
+    }
+
+    /// A coding agent was measured ignoring SIGTERM for ten seconds. A design
+    /// that sends one TERM and hopes is already known not to work here.
+    #[test]
+    fn a_group_that_ignores_term_is_killed() {
+        let (left, sent) = sweep(&[200], 5, vec![vec![300], vec![]]);
+        assert!(left.is_empty());
+        assert_eq!(sent, vec![(200, libc::SIGTERM), (200, libc::SIGKILL)]);
+    }
+
+    /// The command reports the machine, not the signals. A group that outlives
+    /// SIGKILL comes back as still there.
+    #[test]
+    fn what_outlives_sigkill_is_returned_not_swallowed() {
+        let (left, _) = sweep(&[200], 5, vec![vec![300], vec![300]]);
+        assert_eq!(left, vec![300]);
+    }
+
+    #[test]
+    fn my_own_group_is_never_signalled() {
+        let (_, sent) = sweep(&[200], 200, vec![vec![]]);
+        assert!(sent.is_empty(), "the command must survive to print its result");
+    }
+
+    #[test]
+    fn group_one_and_below_are_never_signalled() {
+        let (_, sent) = sweep(&[0, 1, -1], 999, vec![vec![]]);
+        assert!(sent.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod real_group_tests {
+    use super::*;
+
+    fn live(targets: &[i32]) -> Vec<i32> {
+        members_of_groups(targets, &parse_rows(&list_processes_with_groups()))
+    }
+
+    /// The mocked sweep tests prove the ordering. This one proves the ordering
+    /// is about real processes: it builds a real process group whose members
+    /// ignore SIGTERM, runs the real sweep against it, and checks the machine
+    /// afterwards rather than the signals sent at it.
+    ///
+    /// A coding agent was measured ignoring SIGTERM for ten seconds on
+    /// 2026-09-02. This is that shape, in a test.
+    #[test]
+    fn a_real_group_that_ignores_term_is_killed_and_verified_gone() {
+        // `setsid` gives the shell its own session and process group, so this
+        // group is ours alone and nothing else on the machine is in it.
+        let mut child = std::process::Command::new("setsid")
+            .args(["sh", "-c", "trap '' TERM; sleep 60 & sleep 60"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn setsid sh");
+        let leader = child.id() as i32;
+
+        // Wait for the group to actually exist before testing anything.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while live(&[leader]).len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let members = live(&[leader]);
+        assert!(
+            members.len() >= 2,
+            "precondition: expected a group with the shell and its child, got {members:?}"
+        );
+
+        // SIGTERM alone must not be enough, or the test proves nothing about
+        // escalation.
+        signal_group(leader, libc::SIGTERM);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !live(&[leader]).is_empty(),
+            "precondition: this group is supposed to ignore SIGTERM"
+        );
+
+        let still_there = sweep_groups(
+            &[leader],
+            own_process_group(),
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            |t| live(t),
+            signal_group,
+        );
+
+        assert!(
+            still_there.is_empty(),
+            "the sweep reported success while these were alive: {still_there:?}"
+        );
+        assert!(
+            live(&[leader]).is_empty(),
+            "the process table disagrees with the sweep"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The command must not signal the group it is running in, or it dies
+    /// before it can report. Proven against this test process's own group.
+    #[test]
+    fn the_running_process_group_is_never_signalled() {
+        let own = own_process_group();
+        let me = std::process::id() as i32;
+        let still_there = sweep_groups(
+            &[own],
+            own,
+            Duration::ZERO,
+            Duration::ZERO,
+            |t| live(t),
+            signal_group,
+        );
+        assert!(
+            still_there.contains(&me) || !still_there.is_empty(),
+            "the sweep should report our own group as still there, not signal it"
+        );
+        assert!(registry_alive(me), "we must still be running");
+    }
+
+    fn registry_alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        unsafe { libc::kill(pid, 0) == 0 }
     }
 }
 

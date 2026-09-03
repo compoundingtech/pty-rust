@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use pty_core::registry::{self, SessionStatus};
 
-use crate::daemon::tree::{ProcessIdentity, snapshot_descendant_processes};
+use crate::daemon::tree::{
+    ProcessIdentity, groups_in_tree, list_processes_with_groups, members_of_groups,
+    own_process_group, parse_rows, signal_group, snapshot_descendant_processes, sweep_groups,
+};
 
 use super::{CliResult, require_ref};
 
@@ -14,6 +17,13 @@ use super::{CliResult, require_ref};
 /// record on the way out, so returning early would let a following `pty rm`
 /// race that write.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(7);
+
+/// How long the escalation gives a group to answer SIGTERM before it stops
+/// asking. A coding agent was measured ignoring SIGTERM for ten seconds, so
+/// this grace is a courtesy, not a plan.
+const ESCALATE_TERM_WAIT: Duration = Duration::from_millis(2_000);
+/// How long to wait after SIGKILL before reporting what is still there.
+const ESCALATE_KILL_WAIT: Duration = Duration::from_millis(1_000);
 
 /// `cmdKill`.
 pub fn run(args: &[String]) -> CliResult {
@@ -41,6 +51,10 @@ pub fn run(args: &[String]) -> CliResult {
     // session's processes are gone. This snapshot is the only chance to learn
     // which processes the word "killed" would be a claim about.
     let before = snapshot_descendant_processes(pid);
+    // Groups come from the raw listing, NOT from `before`. The snapshot drops a
+    // descendant whose start token cannot be read, and that process is then
+    // never signalled. A group needs no identity, so this reaches it anyway.
+    let groups = groups_in_tree(pid, &parse_rows(&list_processes_with_groups()));
 
     // SAFETY: kill(2) with a pid from the registry.
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
@@ -60,8 +74,15 @@ pub fn run(args: &[String]) -> CliResult {
         return Ok(1);
     }
     registry::cleanup_socket(&name);
-    let after = aftermath(&before);
-    report(&name, &after);
+    let mut after = aftermath(&before);
+    let mut escalated = None;
+    if !after.all_gone() {
+        escalated = Some(escalate_over_groups(&groups));
+        // Re-measure. The report must describe the machine now, not the
+        // signals that were sent at it.
+        after = aftermath(&before);
+    }
+    report(&name, &after, escalated.as_deref());
 
     if was_permanent
         && let Some(path) = tags.and_then(|t| t.get("ptyfile"))
@@ -134,17 +155,45 @@ fn aftermath(before: &[ProcessIdentity]) -> Aftermath {
     )
 }
 
+/// TERM the groups, wait, KILL what is left, wait, then re-read the process
+/// table. Returns the pids still alive in those groups.
+fn escalate_over_groups(groups: &[i32]) -> Vec<i32> {
+    sweep_groups(
+        groups,
+        own_process_group(),
+        ESCALATE_TERM_WAIT,
+        ESCALATE_KILL_WAIT,
+        |targets| members_of_groups(targets, &parse_rows(&list_processes_with_groups())),
+        signal_group,
+    )
+}
+
 /// Say what was verified, and nothing more.
 ///
 /// `killed` is now a claim about the whole tree, so it is printed only when
 /// every process in the snapshot is gone. Otherwise stdout gets the part that
 /// was verified — the daemon stopped — and stderr gets what survived it.
-fn report(name: &str, after: &Aftermath) {
+fn report(name: &str, after: &Aftermath, escalated: Option<&[i32]>) {
     if after.all_gone() {
-        println!("Session \"{name}\" killed.");
+        match escalated {
+            // The daemon left something behind and the escalation cleared it.
+            // Say so: a silent success here would hide that the teardown needed
+            // a second pass, which is the fact somebody debugging wants.
+            Some(_) => println!("Session \"{name}\" killed (the escalation stopped the remainder)."),
+            None => println!("Session \"{name}\" killed."),
+        }
         return;
     }
     println!("Session \"{name}\" daemon stopped.");
+    if let Some(still_there) = escalated
+        && !still_there.is_empty()
+    {
+        eprintln!(
+            "Session \"{name}\": {} process(es) survived SIGKILL to their process group: {}",
+            still_there.len(),
+            join_pids(still_there)
+        );
+    }
     if !after.survived.is_empty() {
         eprintln!(
             "Session \"{name}\": {} process(es) survived the kill and are still running: {}",
