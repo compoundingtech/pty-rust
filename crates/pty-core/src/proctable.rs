@@ -525,11 +525,13 @@ fn page_size_kb() -> u64 {
 /// 2026-09-03 with an `offsetof` probe compiled warnings-as-errors, and
 /// checked identical against both the 26.5 and 15.4 SDKs:
 ///
-///     sizeof(kinfo_proc) = 648   sizeof(extern_proc) = 296
-///     kp_proc = 0                kp_eproc = 296
-///     p_starttime = 0            tv_sec +0 (8 bytes), tv_usec +8 (4 bytes)
-///     p_stat = 36 (1 byte)       p_pid = 40 (4 bytes, signed)
-///     e_ppid = 560 (4 bytes)     e_pgid = 564 (4 bytes)
+/// ```text
+/// sizeof(kinfo_proc) = 648   sizeof(extern_proc) = 296
+/// kp_proc = 0                kp_eproc = 296
+/// p_starttime = 0            tv_sec +0 (8 bytes), tv_usec +8 (4 bytes)
+/// p_stat = 36 (1 byte)       p_pid = 40 (4 bytes, signed)
+/// e_ppid = 560 (4 bytes)     e_pgid = 564 (4 bytes)
+/// ```
 #[cfg(target_os = "macos")]
 mod kinfo {
     pub const SIZE: usize = 648;
