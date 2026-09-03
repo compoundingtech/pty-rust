@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 
 use pty_core::registry::{self, SessionStatus};
 
+use pty_core::proctable::{Answer, LiveIdentity, ProcTable};
+
 use crate::daemon::tree::{
-    ProcessIdentity, groups_in_tree, list_processes_with_groups, members_of_groups,
-    own_process_group, parse_rows, signal_group, snapshot_descendant_processes, sweep_groups,
+    ProcessIdentity, groups_in_tree, members_of_groups, own_process_group, signal_group,
+    snapshot_from_table, sweep_groups,
 };
 
 use super::{CliResult, require_ref};
@@ -50,11 +52,13 @@ pub fn run(args: &[String]) -> CliResult {
     // reparented to init, so the parent links that identify them as this
     // session's processes are gone. This snapshot is the only chance to learn
     // which processes the word "killed" would be a claim about.
-    let before = snapshot_descendant_processes(pid);
-    // Groups come from the raw listing, NOT from `before`. The snapshot drops a
-    // descendant whose start token cannot be read, and that process is then
-    // never signalled. A group needs no identity, so this reaches it anyway.
-    let groups = groups_in_tree(pid, &parse_rows(&list_processes_with_groups()));
+    // One table read serves both. The snapshot drops a descendant whose start
+    // identity could not be read; the group list does not, because a group
+    // needs no identity. So a process the snapshot cannot name is still inside
+    // a group this command will signal.
+    let table = ProcTable::read();
+    let before = snapshot_from_table(pid, &table);
+    let groups = groups_in_tree(pid, &table);
 
     // SAFETY: kill(2) with a pid from the registry.
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
@@ -128,7 +132,7 @@ impl Aftermath {
 /// `kill(pid, 0)` succeeds.
 pub(crate) fn aftermath_with(
     before: &[ProcessIdentity],
-    read_token: impl Fn(i32) -> Option<String>,
+    read_identity: impl Fn(i32) -> Option<LiveIdentity>,
     exited: impl Fn(i32) -> bool,
 ) -> Aftermath {
     let mut out = Aftermath::default();
@@ -136,9 +140,9 @@ pub(crate) fn aftermath_with(
         if exited(id.pid) {
             continue;
         }
-        match read_token(id.pid) {
-            Some(token) if token == id.process_start_token => out.survived.push(id.pid),
-            // A different token is a pid the kernel handed to somebody else.
+        match read_identity(id.pid) {
+            Some(found) if found == id.identity => out.survived.push(id.pid),
+            // A different identity is a pid the kernel handed to somebody else.
             Some(_) => {}
             None => out.unknown.push(id.pid),
         }
@@ -147,10 +151,18 @@ pub(crate) fn aftermath_with(
 }
 
 fn aftermath(before: &[ProcessIdentity]) -> Aftermath {
+    let table = ProcTable::read();
     aftermath_with(
         before,
-        registry::read_process_start_token,
-        registry::has_process_exited_for_reap,
+        |pid| table.identity(pid).known(),
+        // Exited means: the table read, and it said either "not there" or
+        // "there but a zombie". An unreadable table says neither, so it does
+        // not answer this question and the identity check decides instead.
+        |pid| match table.is_running(pid) {
+            Answer::Known(running) => !running,
+            Answer::NotPresent => true,
+            Answer::Unknown(_) => false,
+        },
     )
 }
 
@@ -162,7 +174,7 @@ fn escalate_over_groups(groups: &[i32]) -> Vec<i32> {
         own_process_group(),
         ESCALATE_TERM_WAIT,
         ESCALATE_KILL_WAIT,
-        |targets| members_of_groups(targets, &parse_rows(&list_processes_with_groups())),
+        |targets| members_of_groups(targets, &ProcTable::read()),
         signal_group,
     )
 }
@@ -259,7 +271,7 @@ mod tests {
     fn id(pid: i32, token: &str) -> ProcessIdentity {
         ProcessIdentity {
             pid,
-            process_start_token: token.to_string(),
+            identity: LiveIdentity::new(token),
             depth: 1,
         }
     }
@@ -267,7 +279,7 @@ mod tests {
     #[test]
     fn a_matching_token_is_a_survivor() {
         let before = vec![id(10, "tok:10")];
-        let after = aftermath_with(&before, |_| Some("tok:10".into()), |_| false);
+        let after = aftermath_with(&before, |_| Some(LiveIdentity::new("tok:10")), |_| false);
         assert_eq!(after.survived, vec![10]);
         assert!(after.unknown.is_empty());
         assert!(!after.all_gone());
@@ -276,7 +288,7 @@ mod tests {
     #[test]
     fn a_reused_pid_is_not_a_survivor() {
         let before = vec![id(10, "tok:10")];
-        let after = aftermath_with(&before, |_| Some("tok:different".into()), |_| false);
+        let after = aftermath_with(&before, |_| Some(LiveIdentity::new("tok:different")), |_| false);
         assert!(after.all_gone());
     }
 
@@ -314,25 +326,18 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id() as i32;
-        let token = registry::read_process_start_token(pid).expect("live pid has a start token");
-        let before = vec![id(pid, &token)];
+        let table = ProcTable::read();
+        let identity = table.identity(pid).known().expect("live pid has an identity");
+        let before = vec![ProcessIdentity { pid, identity, depth: 1 }];
 
-        let alive = aftermath_with(
-            &before,
-            registry::read_process_start_token,
-            registry::has_process_exited_for_reap,
-        );
+        let alive = aftermath(&before);
         assert_eq!(alive.survived, vec![pid], "a running process reads as a survivor");
         assert!(alive.unknown.is_empty());
 
         let _ = child.kill();
         let _ = child.wait();
 
-        let dead = aftermath_with(
-            &before,
-            registry::read_process_start_token,
-            registry::has_process_exited_for_reap,
-        );
+        let dead = aftermath(&before);
         assert!(
             dead.all_gone(),
             "a reaped process must not read as a survivor, got {dead:?}"
@@ -347,8 +352,9 @@ mod tests {
     fn a_real_zombie_is_not_a_survivor() {
         let mut child = std::process::Command::new("true").spawn().expect("spawn true");
         let pid = child.id() as i32;
-        let token = registry::read_process_start_token(pid).expect("live pid has a start token");
-        let before = vec![id(pid, &token)];
+        let table = ProcTable::read();
+        let identity = table.identity(pid).known().expect("live pid has an identity");
+        let before = vec![ProcessIdentity { pid, identity: identity.clone(), depth: 1 }];
 
         // Let it exit. It stays a zombie because nothing has waited on it.
         for _ in 0..200 {
@@ -362,9 +368,9 @@ mod tests {
             "precondition: an unreaped zombie still answers kill(pid, 0)"
         );
         assert_eq!(
-            registry::read_process_start_token(pid).as_deref(),
-            Some(token.as_str()),
-            "precondition: a zombie keeps its start token, so the token alone cannot decide"
+            ProcTable::read().identity(pid).known().as_ref(),
+            Some(&identity),
+            "precondition: a zombie keeps its identity, so identity alone cannot decide"
         );
 
         let after = aftermath(&before);

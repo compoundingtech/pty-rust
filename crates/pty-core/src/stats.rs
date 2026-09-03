@@ -169,13 +169,21 @@ pub fn read_resources(pid: i32) -> Option<Resources> {
 ///
 /// node: src/server.ts `queryProcessResources`
 fn read_resources_from_ps(pid: i32) -> Option<Resources> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "rss=,pcpu=", "-p", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    parse_ps_resources(&String::from_utf8_lossy(&out.stdout))
+    #[cfg(target_os = "macos")]
+    {
+        return match crate::proctable::resources_of(pid) {
+            crate::proctable::Answer::Known((rss_kb, cpu_percent)) => Some(Resources {
+                rss_kb,
+                cpu_percent,
+            }),
+            _ => None,
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 /// Split out from its caller so it can be tested where there is no `ps` that
