@@ -313,6 +313,18 @@ fn status_after_exit_and_mode_flags() {
     let mut c = d.connect();
     c.attach(24, 80);
     assert!(c.wait_type(Screen, T));
+    // **A screen frame does not mean the child has spoken.** Attach publishes
+    // the current screen, which can be empty and can arrive before the child's
+    // escapes have been read and parsed. Asserting straight after it is a race
+    // that only loses when the child is slow.
+    //
+    // Silber.pty hit it on a Mac under suite load, on this exact line, with
+    // `sgrMouse` still false. Reproduced on Linux by giving the child a
+    // `sleep 0.4` before its `printf`, which is what the load was doing.
+    assert!(
+        wait_until(T, || c.query_status()["modes"]["sgrMouse"] == true),
+        "the child's mode escapes were never parsed"
+    );
     let st = c.query_status();
     assert_eq!(st["modes"]["sgrMouse"], true);
     assert_eq!(st["modes"]["cursorHidden"], true);
