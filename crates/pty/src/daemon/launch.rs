@@ -419,12 +419,21 @@ fn wait_for_publication(
 /// metadata is still being written. **By a different pid**, or we would refuse
 /// our own success. **By a live one**, or stale metadata from a daemon that
 /// died would make the name permanently unusable.
+///
+/// "Live" here means `has_process_exited_for_reap`, never `pid_alive`. **A
+/// zombie answers `kill(pid, 0)`**, measured on Linux 2026-09-03, so the cheap
+/// predicate calls a corpse live. An unreaped daemon is the precise case this
+/// has to get right.
 pub fn published_by_another(name: &str, mine: u32) -> bool {
     let meta = registry::read_metadata(name);
     published_elsewhere(
         meta.as_ref().and_then(|m| m.daemon_pid),
         mine,
-        registry::pid_alive,
+        // **NOT `pid_alive`.** A zombie answers `kill(pid, 0)`, so the cheap
+        // predicate calls a corpse live — and a corpse recorded as the owner
+        // would make this session name refuse every future `pty run`, which is
+        // precisely the failure this check exists to avoid.
+        |pid| !registry::has_process_exited_for_reap(pid),
         || {
             meta.as_ref()
                 .is_some_and(|m| has_published_session_start(name, &m.created_at))
@@ -530,6 +539,31 @@ mod tests {
             !published_elsewhere(Some(200), 100, dead, yes),
             "a dead owner would make the name permanently unusable"
         );
+
+        // The predicate the production path actually passes, against a real
+        // corpse. `pid_alive` would say true here and refuse the name forever.
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let corpse = child.id() as i32;
+        for _ in 0..500 {
+            if registry::has_process_exited_for_reap(corpse) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            registry::pid_alive(corpse),
+            "precondition: an unreaped child still answers kill(pid, 0)"
+        );
+        assert!(
+            !published_elsewhere(
+                Some(corpse),
+                100,
+                |pid| !registry::has_process_exited_for_reap(pid),
+                yes
+            ),
+            "a zombie daemon must not make the session name unusable"
+        );
+        let _ = child.wait();
         assert!(
             !published_elsewhere(Some(200), 100, live, no),
             "metadata still being written is not a published session"
