@@ -66,7 +66,16 @@ fn load_theme() -> (Theme, String) {
         .filter(|s| !s.is_empty());
     match saved.as_deref().and_then(|n| theme_by_name(n).map(|t| (t, n))) {
         Some((theme, name)) => (theme, name.to_string()),
-        None => (pty_tui::theme::COOL_BLUE, "coolBlue".to_string()),
+        // **The default is the terminal's own theme, which paints nothing.**
+        // Every slot in `TERMINAL` is `None`, so no colour sequence is emitted
+        // and whatever the user has configured shows through. The Node tool
+        // has defaulted this way deliberately since the picker was written
+        // (`interactive.ts`: `return terminalIdx >= 0 ? terminalIdx : 0`), and
+        // it is the specification here rather than a comparison.
+        //
+        // Defaulting to a painted theme means a dark palette on a light
+        // terminal, which is the report that produced this line.
+        None => (pty_tui::theme::TERMINAL, "terminal".to_string()),
     }
 }
 
