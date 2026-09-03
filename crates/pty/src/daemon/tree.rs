@@ -167,24 +167,34 @@ pub fn snapshot_descendant_processes(root_pid: i32) -> Vec<ProcessIdentity> {
     snapshot_from_table(root_pid, &ProcTable::read())
 }
 
-/// Is this still the same process?
+/// Is this still the same process, and still running?
+///
+/// **A corpse is not a survivor.** On Linux an unreaped descendant keeps its
+/// `/proc` row and its identity, so matching on identity alone counted it as
+/// alive: the teardown would wait out its whole TERM budget for a process that
+/// had already died, then report it as a descendant that survived a SIGKILL.
+/// That is the kill over-claiming again, in the other direction.
+///
+/// macOS never had this: libproc stops listing a process the moment it exits.
+/// `Silber.pty` measured that on a real Mac on 2026-09-03, and chasing why its
+/// zombie test failed is what found this.
 ///
 /// **One process, not the whole table.** A full table read costs about as much
 /// as 473 single reads (measured on Linux, 2026-09-03: 4.21 ms against
-/// 0.0089 ms), so a poll loop over a handful of descendants must ask about
-/// each one rather than re-read the machine. Both are subprocess-free now,
-/// which is what makes the cheap call available on macOS too.
+/// 0.0089 ms), so a poll loop over a handful of descendants asks about each one
+/// rather than re-reading the machine.
 ///
 /// **An unreadable answer means `false`, and that is deliberate**: it says
 /// "do not signal", never "it is gone". Every caller here wants the safe
 /// direction for a signal; a caller that needs the difference asks
 /// `proctable` and reads the three cases.
 fn is_same_process(id: &ProcessIdentity) -> bool {
-    pty_core::proctable::process(id.pid)
-        .known()
-        .and_then(|r| r.identity)
-        .as_ref()
-        == Some(&id.identity)
+    match pty_core::proctable::process(id.pid) {
+        pty_core::proctable::Answer::Known(row) if !row.is_zombie() => {
+            row.identity.as_ref() == Some(&id.identity)
+        }
+        _ => false,
+    }
 }
 
 /// Signal the identities whose start token still matches. Returns the pids
@@ -205,7 +215,7 @@ pub fn signal_process_identities(ids: &[ProcessIdentity], signal: i32) -> Vec<i3
     signalled
 }
 
-/// **One table read per iteration, not one per identity.**
+/// **One question per surviving identity, and each question is now cheap.**
 ///
 /// The shape of this loop is unchanged and it is now affordable.
 ///
@@ -281,6 +291,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// An unreaped descendant kept its `/proc` row and its identity on Linux,
+    /// so the teardown counted a corpse as a survivor: it waited out the whole
+    /// TERM budget for a process that had already died, and would then report
+    /// it as having survived a SIGKILL.
+    ///
+    /// macOS never had this, because libproc drops the process at once. The
+    /// disagreement between the two platforms is what exposed it.
+    #[test]
+    fn a_corpse_is_not_a_survivor() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = child.id() as i32;
+        let identity = pty_core::proctable::process(pid)
+            .known()
+            .and_then(|r| r.identity);
+        // On macOS it may already be gone, and then there is nothing to pin.
+        if let Some(identity) = identity {
+            let id = ProcessIdentity { pid, identity, depth: 1 };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while is_same_process(&id) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                !is_same_process(&id),
+                "an exited but unreaped child still reads as a live descendant"
+            );
+            assert!(
+                signal_process_identities(&[id], 0).is_empty(),
+                "and nothing should be signalled at it"
+            );
+        }
+        let _ = child.wait();
     }
 
     #[test]
@@ -443,15 +486,24 @@ mod real_group_tests {
     /// 2026-09-02. This is that shape, in a test.
     #[test]
     fn a_real_group_that_ignores_term_is_killed_and_verified_gone() {
-        // `setsid` gives the shell its own session and process group, so this
-        // group is ours alone and nothing else on the machine is in it.
-        let mut child = std::process::Command::new("setsid")
-            .args(["sh", "-c", "trap '' TERM; sleep 60 & sleep 60"])
+        // A new process group of our own, so nothing else on the machine is in
+        // it.
+        //
+        // **macOS has the `setsid` system call but no `setsid` executable.**
+        // An earlier version of this test spawned the binary, so on the one
+        // platform where process groups are the whole escalation story, the
+        // test could not run at all. `process_group(0)` is the same thing
+        // without the command. Reported from a real Mac by `Silber.pty` on
+        // 2026-09-03.
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 60 & sleep 60"])
+            .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("spawn setsid sh");
+            .expect("spawn sh in its own group");
         let leader = child.id() as i32;
 
         // Wait for the group to actually exist before testing anything.

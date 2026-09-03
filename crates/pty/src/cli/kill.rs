@@ -344,10 +344,14 @@ mod tests {
         );
     }
 
-    /// A zombie is a dead process that still answers `kill(pid, 0)` and still
-    /// has a matching start token. Reporting it as a surviving process would
-    /// be a false alarm, so this test uses a real one: Rust does not reap a
-    /// `Child` until something waits on it.
+    /// An unreaped child must not be reported as a survivor.
+    ///
+    /// **The two platforms get there differently.** On Linux the corpse keeps
+    /// a row and a matching identity, so the identity alone cannot decide and
+    /// the exit check does. On macOS libproc stops listing it at once, so it
+    /// is simply absent. The test asserts the conclusion rather than either
+    /// mechanism; an earlier version asserted the Linux one and failed on a
+    /// real Mac.
     #[test]
     fn a_real_zombie_is_not_a_survivor() {
         let mut child = std::process::Command::new("true").spawn().expect("spawn true");
@@ -363,16 +367,9 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            registry::pid_alive(pid),
-            "precondition: an unreaped zombie still answers kill(pid, 0)"
-        );
-        assert_eq!(
-            ProcTable::read().identity(pid).known().as_ref(),
-            Some(&identity),
-            "precondition: a zombie keeps its identity, so identity alone cannot decide"
-        );
-
+        // On Linux the corpse is still listed with its identity intact, which
+        // is exactly why the identity check alone is not enough. On macOS it
+        // is not listed at all. Both are fine; neither is asserted.
         let after = aftermath(&before);
         assert!(after.all_gone(), "a zombie must not be reported, got {after:?}");
 

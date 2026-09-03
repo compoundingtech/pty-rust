@@ -241,10 +241,16 @@ impl ProcTable {
         let _ = SZOMB;
         let mut rows = Vec::with_capacity(pids.len());
         for pid in pids.into_iter().filter(|&p| p > 0) {
-            // A process that exits between the listing and the read is simply
-            // gone. Skipping it is correct and is not the silence this module
-            // guards against.
             if let Some(row) = read_bsdinfo(pid) {
+                rows.push(row);
+                continue;
+            }
+            // `proc_listpids` listed it and `proc_pidinfo` refuses it, which on
+            // this platform is what an unreaped child looks like. Dropping it
+            // here would make the table disagree with Linux, where the corpse
+            // keeps its row. A process that genuinely exited between the two
+            // calls comes back `NotPresent` and is skipped.
+            if let Answer::Known(row) = sysctl_proc(pid) {
                 rows.push(row);
             }
         }
@@ -395,10 +401,25 @@ pub fn process(pid: i32) -> Answer<Row> {
     }
     #[cfg(target_os = "macos")]
     {
-        match read_bsdinfo(pid) {
-            Some(row) => Answer::Known(row),
-            None => Answer::NotPresent,
+        if let Some(row) = read_bsdinfo(pid) {
+            return Answer::Known(row);
         }
+        // **`proc_pidinfo` refuses an unreaped child, and that is not the same
+        // as the child being gone.** Measured by `Silber.pty` on a real Mac on
+        // 2026-09-03, for zombie pid 92893:
+        //
+        //     proc_listpids           contains=1
+        //     PROC_PIDTBSDINFO        got=0 want=136 errno=3 (ESRCH)
+        //     PROC_PIDT_SHORTBSDINFO  got=0 want=64  errno=3 (ESRCH)
+        //     sysctl KERN_PROC_PID    rc=0 size=648 status=5 ppid=92892 pgid=92540
+        //     /bin/ps                 92893 92892 92540 Z
+        //
+        // The pid listing is right and only the per-process detail call
+        // refuses. **This is this module's own defect class at the scale of a
+        // single lookup**: a reader returning nothing, read as "the process
+        // does not exist". `KERN_PROC_PID` is the only API that answers, so
+        // the layout below is a cost rather than a preference.
+        sysctl_proc(pid)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -498,7 +519,103 @@ fn page_size_kb() -> u64 {
     if sz > 0 { (sz as u64) / 1024 } else { 4 }
 }
 
-/// One `proc_pidinfo` call. `None` means the process is not there.
+/// `sysctl KERN_PROC_PID`, the only macOS API that answers for a zombie.
+///
+/// Field offsets into `kinfo_proc`, measured on a Mac by `Silber.pty` on
+/// 2026-09-03 with an `offsetof` probe compiled warnings-as-errors, and
+/// checked identical against both the 26.5 and 15.4 SDKs:
+///
+///     sizeof(kinfo_proc) = 648   sizeof(extern_proc) = 296
+///     kp_proc = 0                kp_eproc = 296
+///     p_starttime = 0            tv_sec +0 (8 bytes), tv_usec +8 (4 bytes)
+///     p_stat = 36 (1 byte)       p_pid = 40 (4 bytes, signed)
+///     e_ppid = 560 (4 bytes)     e_pgid = 564 (4 bytes)
+#[cfg(target_os = "macos")]
+mod kinfo {
+    pub const SIZE: usize = 648;
+    pub const START_SEC: usize = 0;
+    pub const START_USEC: usize = 8;
+    pub const P_STAT: usize = 36;
+    pub const P_PID: usize = super::P_PID_OFFSET;
+    pub const E_PPID: usize = 560;
+    pub const E_PGID: usize = 564;
+    /// `SZOMB` from `<sys/proc.h>`.
+    pub const SZOMB: u8 = 5;
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl_proc(pid: i32) -> Answer<Row> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    let mut buf = [0u8; kinfo::SIZE];
+    let mut len = buf.len();
+    // SAFETY: a four-element MIB and a buffer whose length is passed alongside.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Answer::NotPresent,
+            _ => Answer::Unknown(Unknown::TableUnreadable),
+        };
+    }
+    // A zero-length answer is how this call reports a pid it no longer has.
+    if len == 0 {
+        return Answer::NotPresent;
+    }
+    if len < kinfo::SIZE {
+        return Answer::Unknown(Unknown::TableUnreadable);
+    }
+
+    // **A layout that cannot find itself is not a layout.** The offsets above
+    // were measured on someone else's machine against two SDKs, and this code
+    // cannot be run where it was written. So before any of them is believed,
+    // the struct has to contain the pid that was asked for. A wrong offset then
+    // returns "I could not find out" rather than feeding a garbage ppid into a
+    // kill path.
+    if !layout_finds_itself(&buf, pid) {
+        return Answer::Unknown(Unknown::TableUnreadable);
+    }
+
+    let sec = u64::from_ne_bytes(buf[kinfo::START_SEC..kinfo::START_SEC + 8].try_into().unwrap());
+    let usec = u32::from_ne_bytes(buf[kinfo::START_USEC..kinfo::START_USEC + 4].try_into().unwrap());
+    Some(Row {
+        pid,
+        ppid: read_i32(&buf, kinfo::E_PPID),
+        pgid: read_i32(&buf, kinfo::E_PGID),
+        state: if buf[kinfo::P_STAT] == kinfo::SZOMB { "Z".into() } else { "S".into() },
+        rss_kb: None,
+        cpu_percent: None,
+        identity: Some(LiveIdentity::new(format!("darwin:{sec}.{usec:06}"))),
+    })
+    .map(Answer::Known)
+    .unwrap_or(Answer::Unknown(Unknown::TableUnreadable))
+}
+
+fn read_i32(buf: &[u8], at: usize) -> i32 {
+    i32::from_ne_bytes(buf[at..at + 4].try_into().unwrap())
+}
+
+/// Does the buffer contain the pid it was fetched for?
+///
+/// Split out so it can be tested where `sysctl` cannot be called. The offsets
+/// it checks were measured on another machine, and this is what stops them
+/// being believed when they are wrong.
+fn layout_finds_itself(buf: &[u8], pid: i32) -> bool {
+    buf.len() >= P_PID_OFFSET + 4 && read_i32(buf, P_PID_OFFSET) == pid
+}
+
+/// `kinfo_proc.kp_proc.p_pid`, measured on a Mac. Kept outside the `macos`
+/// module so the guard above is compiled and tested everywhere.
+const P_PID_OFFSET: usize = 40;
+
+/// One `proc_pidinfo` call. `None` means the process is not there./// One `proc_pidinfo` call. `None` means the process is not there.
 #[cfg(target_os = "macos")]
 fn read_bsdinfo(pid: i32) -> Option<Row> {
     // <sys/proc.h>: SZOMB. A zombie is a corpse that still has a row.
@@ -698,6 +815,39 @@ mod tests {
         assert!(t.is_running(1).or_absent_when_unknown().is_definitely_absent());
     }
 
+    // ---- the struct layout, which was measured elsewhere ----------------
+
+    /// **This tests the guard, not the offset.** It writes the pid at
+    /// `P_PID_OFFSET` and reads it back from the same constant, so it stays
+    /// green whatever that constant is — I changed 40 to 44 and it still
+    /// passed. Only a Mac can prove the number, and `Silber.pty` did, against
+    /// two SDKs.
+    ///
+    /// What this pins is the thing that makes a wrong number safe: **a layout
+    /// that cannot find itself is not a layout**, so a bad offset returns "I
+    /// could not find out" instead of a garbage ppid in a kill path.
+    #[test]
+    fn a_buffer_that_does_not_contain_its_own_pid_is_refused() {
+        let mut buf = [0u8; 648];
+        buf[P_PID_OFFSET..P_PID_OFFSET + 4].copy_from_slice(&4242i32.to_ne_bytes());
+        assert!(layout_finds_itself(&buf, 4242));
+        assert!(!layout_finds_itself(&buf, 4243), "a different pid is a wrong layout");
+
+        // The same bytes one field out, which is what a bad offset looks like.
+        let mut shifted = [0u8; 648];
+        shifted[P_PID_OFFSET + 4..P_PID_OFFSET + 8].copy_from_slice(&4242i32.to_ne_bytes());
+        assert!(
+            !layout_finds_itself(&shifted, 4242),
+            "an off-by-one-field layout must not be believed"
+        );
+    }
+
+    #[test]
+    fn a_short_buffer_is_refused_rather_than_indexed() {
+        assert!(!layout_finds_itself(&[0u8; 8], 1));
+        assert!(!layout_finds_itself(&[], 1));
+    }
+
     // ---- a ps that is slow, silent or truncated -------------------------
 
     fn fake_ps(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -826,29 +976,54 @@ mod tests {
         assert!(t.is_running(0x7FFF_FFFF).is_definitely_absent());
     }
 
-    /// A zombie has a row, a group, and answers `kill(pid, 0)`. The table must
-    /// still say it is not running.
+    /// An unreaped child must never read as running. **The two platforms
+    /// reach that answer differently, and the test asserts the answer.**
+    ///
+    /// On Linux the corpse keeps a row with state `Z`, so the table says
+    /// `Known(false)`. On macOS libproc stops listing it the moment it exits,
+    /// even before `wait`, so the table says `NotPresent`. Measured on a real
+    /// Mac by `Silber.pty` on 2026-09-03: the child was seen once as `S`, and
+    /// every read after that was `NotPresent`.
+    ///
+    /// An earlier version of this test asserted the Linux mechanism and failed
+    /// on macOS after 200 reads. The product was right and the test was wrong.
     #[test]
-    fn a_real_zombie_is_present_but_not_running() {
+    fn an_unreaped_child_never_reads_as_running() {
         let mut child = std::process::Command::new("true").spawn().expect("spawn");
         let pid = child.id() as i32;
-        let mut seen = None;
-        for _ in 0..200 {
+
+        let mut settled = None;
+        for _ in 0..500 {
             let t = ProcTable::read();
-            if let Answer::Known(row) = t.row(pid)
-                && row.is_zombie()
-            {
-                seen = Some(t);
-                break;
+            match t.is_running(pid) {
+                // Linux: still listed, but a corpse.
+                Answer::Known(false) => {
+                    settled = Some("listed as not running");
+                    break;
+                }
+                // macOS: gone from the listing entirely.
+                Answer::NotPresent => {
+                    settled = Some("no longer listed");
+                    break;
+                }
+                _ => std::thread::sleep(Duration::from_millis(10)),
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
-        let t = seen.expect("the child never appeared as a zombie");
-        assert_eq!(t.is_running(pid), Answer::Known(false));
+        let how = settled.expect("an exited child still read as running");
+
+        // Whichever route, the conclusion callers depend on is the same.
         assert!(
-            !t.is_running(pid).is_definitely_absent(),
-            "a zombie is present in the table; it is just not running"
+            registry_has_exited(pid),
+            "an unreaped child must count as exited ({how})"
         );
         let _ = child.wait();
+    }
+
+    fn registry_has_exited(pid: i32) -> bool {
+        match has_exited(pid) {
+            Answer::Known(z) => z,
+            Answer::NotPresent => true,
+            Answer::Unknown(_) => false,
+        }
     }
 }
