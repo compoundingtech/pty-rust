@@ -60,7 +60,8 @@ pub fn run(args: &[String]) -> CliResult {
         return Ok(1);
     }
     registry::cleanup_socket(&name);
-    report(&name, &aftermath(&before));
+    let after = aftermath(&before);
+    report(&name, &after);
 
     if was_permanent
         && let Some(path) = tags.and_then(|t| t.get("ptyfile"))
@@ -68,7 +69,10 @@ pub fn run(args: &[String]) -> CliResult {
         eprintln!("Note: this session is managed by {path}");
         eprintln!("The strategy tag will be restored on the next 'pty up'.");
     }
-    Ok(0)
+    // Anything left is a failure, and the status says so. `unknown` counts:
+    // "I could not confirm the tree is empty" is not success, and a caller
+    // that reads 0 as done would be wrong.
+    Ok(if after.all_gone() { 0 } else { 1 })
 }
 
 /// What the pre-kill snapshot looks like once the daemon has gone.

@@ -47,9 +47,16 @@ unchanged, `kill(pid, 0)` succeeds.
 sent. It kills nothing extra and waits no longer. Widening the kill is a
 separate question, and an unverified wider signal would leave the same orphans.
 
-**Exit code.** Unchanged. `pty kill` still exits 0 when the daemon stops, even
-with survivors. Making it non-zero is a behaviour change that scripts can trip
-over, so it is asked as a question rather than taken as a decision.
+**Exit code.** Non-zero when anything survived, and non-zero when a start token
+could not be read so the outcome is undecided. Nathan decided the first on
+2026-09-03: "kill that doesn't actually kill everything is def a non-zero."
+`Silber.cos` decided the second, on the grounds that "I could not confirm the
+tree is empty" is not success and a caller that reads 0 as done would be wrong.
+
+**This is a compatibility break.** A script that runs `pty kill` and checks the
+status will now fail where it used to pass. That is the point rather than a side
+effect: it was passing on a false success. The fix for such a caller is to stop
+treating an unverified kill as a completed one.
 
 **What is tested and what is not.** The classification is pinned by unit tests,
 including two that run against the real process table: one live process and one

@@ -74,6 +74,27 @@ fn killed_means_the_descendants_are_gone_too() {
     );
 }
 
+/// The status has to agree with the words. A caller that reads only the exit
+/// code must reach the same conclusion as one that reads the output, or the
+/// honest line is decoration.
+#[test]
+fn a_verified_kill_exits_zero_and_an_unverified_one_does_not() {
+    let rig = Rig::new();
+    let d = rig.daemon("kr4", &["cat"], DaemonOpts::no_display_name());
+    let daemon_pid = d.pid();
+    let out = rig.pty(&["kill", "kr4"]);
+    let stdout = out.stdout();
+
+    // This session is ordinary, so the tree should be empty and the status 0.
+    let tree_empty = descendants(daemon_pid).into_iter().all(|p| !pid_alive(p));
+    assert!(tree_empty, "precondition: the tree should be gone");
+    expect_status(&out, 0);
+    assert!(
+        stdout.contains("killed"),
+        "a verified kill says so: {stdout:?}"
+    );
+}
+
 /// The honest report goes somewhere a person reads. A clean kill must not
 /// invent a warning, or the real one stops meaning anything.
 #[test]
