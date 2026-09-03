@@ -82,7 +82,8 @@ pub fn run(args: &[String]) -> CliResult {
         // signals that were sent at it.
         after = aftermath(&before);
     }
-    report(&name, &after, escalated.as_deref());
+    let verified_empty = verified_empty(&after, escalated.as_deref());
+    report(&name, &after, escalated.as_deref(), verified_empty);
 
     if was_permanent
         && let Some(path) = tags.and_then(|t| t.get("ptyfile"))
@@ -90,10 +91,8 @@ pub fn run(args: &[String]) -> CliResult {
         eprintln!("Note: this session is managed by {path}");
         eprintln!("The strategy tag will be restored on the next 'pty up'.");
     }
-    // Anything left is a failure, and the status says so. `unknown` counts:
-    // "I could not confirm the tree is empty" is not success, and a caller
-    // that reads 0 as done would be wrong.
-    Ok(if after.all_gone() { 0 } else { 1 })
+    // Anything left is a failure, and the status says so.
+    Ok(if verified_empty { 0 } else { 1 })
 }
 
 /// What the pre-kill snapshot looks like once the daemon has gone.
@@ -168,13 +167,25 @@ fn escalate_over_groups(groups: &[i32]) -> Vec<i32> {
     )
 }
 
+/// Did this command verify that nothing is left?
+///
+/// **Both halves are required.** `Aftermath` only describes the processes that
+/// were in the pre-kill snapshot, and the snapshot drops anything whose start
+/// token could not be read. A process the sweep found and could not kill may
+/// therefore be absent from `after` entirely. Reading `after` alone would print
+/// the success line over a process that just survived SIGKILL, which is the
+/// defect this command exists to stop making.
+fn verified_empty(after: &Aftermath, escalated: Option<&[i32]>) -> bool {
+    after.all_gone() && escalated.is_none_or(<[i32]>::is_empty)
+}
+
 /// Say what was verified, and nothing more.
 ///
 /// `killed` is now a claim about the whole tree, so it is printed only when
 /// every process in the snapshot is gone. Otherwise stdout gets the part that
 /// was verified — the daemon stopped — and stderr gets what survived it.
-fn report(name: &str, after: &Aftermath, escalated: Option<&[i32]>) {
-    if after.all_gone() {
+fn report(name: &str, after: &Aftermath, escalated: Option<&[i32]>, verified_empty: bool) {
+    if verified_empty {
         match escalated {
             // The daemon left something behind and the escalation cleared it.
             // Say so: a silent success here would hide that the teardown needed
@@ -360,6 +371,27 @@ mod tests {
         assert!(after.all_gone(), "a zombie must not be reported, got {after:?}");
 
         let _ = child.wait();
+    }
+
+    /// A process the sweep could not kill need not appear in `Aftermath` at
+    /// all: the snapshot drops anything whose start token could not be read,
+    /// and a process spawned after the snapshot was never in it. Reading the
+    /// snapshot alone would print the success line over a process that just
+    /// survived SIGKILL.
+    #[test]
+    fn a_survivor_of_the_escalation_is_never_a_verified_empty_tree() {
+        let clean = Aftermath::default();
+        assert!(clean.all_gone(), "precondition: the snapshot says nothing is left");
+        assert!(
+            !verified_empty(&clean, Some(&[4321])),
+            "a process that survived SIGKILL to its group must not read as success"
+        );
+        assert!(verified_empty(&clean, Some(&[])), "an escalation that cleared everything is success");
+        assert!(verified_empty(&clean, None), "no escalation needed is success");
+        assert!(
+            !verified_empty(&Aftermath { survived: vec![1], unknown: vec![] }, Some(&[])),
+            "the snapshot still decides when the sweep found nothing"
+        );
     }
 
     #[test]

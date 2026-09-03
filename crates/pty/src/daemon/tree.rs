@@ -539,16 +539,21 @@ mod real_group_tests {
             signal_group,
         );
 
+        // Clean up the whole group before asserting. The leader alone is not
+        // the cleanup: on a failure its group would leak into the next run.
+        let verdict = (still_there.clone(), live(&[leader]));
+        signal_group(leader, libc::SIGKILL);
+        let _ = child.wait();
+
         assert!(
-            still_there.is_empty(),
-            "the sweep reported success while these were alive: {still_there:?}"
+            verdict.0.is_empty(),
+            "the sweep reported success while these were alive: {:?}",
+            verdict.0
         );
         assert!(
-            live(&[leader]).is_empty(),
+            verdict.1.is_empty(),
             "the process table disagrees with the sweep"
         );
-        let _ = child.kill();
-        let _ = child.wait();
     }
 
     /// The command must not signal the group it is running in, or it dies
