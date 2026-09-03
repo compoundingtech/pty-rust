@@ -69,6 +69,9 @@ pub enum SpawnError {
     SocketTimeout { name: String },
     /// A socket, but no matching metadata + `session_start` within the budget.
     PublicationTimeout { name: String },
+    /// The session was published, by somebody else. This attempt cannot win,
+    /// so there is nothing to wait for.
+    AlreadyPublished { name: String },
     /// Spawning the process itself failed.
     Io(String),
 }
@@ -96,6 +99,13 @@ impl std::fmt::Display for SpawnError {
             SpawnError::PublicationTimeout { name } => write!(
                 f,
                 "Timed out waiting for daemon publication for session \"{name}\"."
+            ),
+            // The same sentence `pty run` prints when it sees a running session
+            // before it spawns anything. Losing the race later should not
+            // produce a different explanation of the same situation.
+            SpawnError::AlreadyPublished { name } => write!(
+                f,
+                "Session \"{name}\" is already running. Use \"pty attach {name}\" to connect."
             ),
             SpawnError::Io(msg) => write!(f, "{msg}"),
         }
@@ -375,6 +385,24 @@ fn wait_for_publication(
                 .unwrap_or_default();
             return Ok(SpawnedDaemon { pid, generation });
         }
+        // **Read the fact that is already there before waiting for one that is
+        // not.** If somebody else has published this name, this attempt can
+        // never win: `is_published_by` compares against our own pid and will be
+        // false for the rest of the budget. The only other way out of this loop
+        // is noticing our own daemon die, so when that is slow — a loaded
+        // machine, a daemon still starting up — the loop spends the whole
+        // `DEFAULT_START_TIMEOUT` and then reports a timeout, when the true
+        // answer was on disk in the first iteration.
+        //
+        // Measured on a Mac by `Silber.pty` on 2026-09-03: the losing
+        // `pty run` took 30.06 s against a 30 s budget and said
+        // "Timed out waiting for daemon publication" instead of
+        // "is already running".
+        if published_by_another(name, pid) {
+            return Err(SpawnError::AlreadyPublished {
+                name: name.to_string(),
+            });
+        }
         watch.check_early_exit()?;
         if started.elapsed() >= timeout {
             return Err(SpawnError::PublicationTimeout {
@@ -382,6 +410,39 @@ fn wait_for_publication(
             });
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Has this session been published by a live process that is not us?
+///
+/// All three conditions matter. **Published**, or we would refuse a name whose
+/// metadata is still being written. **By a different pid**, or we would refuse
+/// our own success. **By a live one**, or stale metadata from a daemon that
+/// died would make the name permanently unusable.
+pub fn published_by_another(name: &str, mine: u32) -> bool {
+    let meta = registry::read_metadata(name);
+    published_elsewhere(
+        meta.as_ref().and_then(|m| m.daemon_pid),
+        mine,
+        registry::pid_alive,
+        || {
+            meta.as_ref()
+                .is_some_and(|m| has_published_session_start(name, &m.created_at))
+        },
+    )
+}
+
+/// The decision, without the registry, so all four ways of answering "no" can
+/// be tested rather than raced for.
+fn published_elsewhere(
+    owner: Option<i32>,
+    mine: u32,
+    alive: impl Fn(i32) -> bool,
+    published: impl Fn() -> bool,
+) -> bool {
+    match owner {
+        Some(owner) => owner != mine as i32 && alive(owner) && published(),
+        None => false,
     }
 }
 
@@ -440,6 +501,42 @@ mod tests {
         assert_eq!(
             SpawnError::PublicationTimeout { name: "id".into() }.to_string(),
             "Timed out waiting for daemon publication for session \"id\"."
+        );
+        // Deliberately the same sentence `pty run` prints before it spawns.
+        assert_eq!(
+            SpawnError::AlreadyPublished { name: "id".into() }.to_string(),
+            "Session \"id\" is already running. Use \"pty attach id\" to connect."
+        );
+    }
+
+    /// Every way of answering "no", so the one way of answering "yes" means
+    /// something. Raced for, only the last of these would ever be exercised.
+    #[test]
+    fn only_a_live_different_and_published_owner_counts() {
+        let live = |_: i32| true;
+        let dead = |_: i32| false;
+        let yes = || true;
+        let no = || false;
+
+        assert!(
+            published_elsewhere(Some(200), 100, live, yes),
+            "a live, different, published owner is somebody else's session"
+        );
+        assert!(
+            !published_elsewhere(Some(100), 100, live, yes),
+            "our own pid is not somebody else"
+        );
+        assert!(
+            !published_elsewhere(Some(200), 100, dead, yes),
+            "a dead owner would make the name permanently unusable"
+        );
+        assert!(
+            !published_elsewhere(Some(200), 100, live, no),
+            "metadata still being written is not a published session"
+        );
+        assert!(
+            !published_elsewhere(None, 100, live, yes),
+            "no owner recorded is not somebody else"
         );
     }
 
