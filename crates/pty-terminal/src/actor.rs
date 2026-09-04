@@ -24,8 +24,49 @@ use crate::serialize::{self, SerializeOpts};
 use crate::snapshot::{self, CellGrid};
 use crate::strip::{OutputScanner, Osc, Token};
 
-/// Node's scrollback (`src/server.ts:333-338`).
+/// Node's scrollback (`src/server.ts:333-338`), in lines.
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
+
+/// The most memory one terminal's history may be given, whatever scrollback
+/// it was asked for: 64 MiB, which is 10 000 lines of a 400-column terminal.
+///
+/// A session that asks for more history than this gets what fits and says so
+/// ([`TerminalActor::scrollback`] reports what is actually retainable, not
+/// what was requested), because a silently unmet promise is what this whole
+/// conversion exists to remove.
+pub const MAX_SCROLLBACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// libghostty's `max_scrollback` is a **byte** budget for the history page
+/// list, not a line count — its own doc comment says "lines", but the
+/// behaviour is bytes and the page list evicts whole pages. Passing 10 000
+/// for "10 000 lines" buys one page: 745 rows at 80 columns, 456 at 200,
+/// 3 310 at 20. A line promise therefore has to be converted, and the cost
+/// of a row depends on how wide it is.
+///
+/// These two numbers are the conversion, measured against libghostty-vt
+/// 0.2.1: a plain row costs ~838 bytes at 80 columns and ~1 804 at 200, so
+/// ~9-10 bytes per column plus per-row overhead. They are deliberately
+/// generous — roughly 1.8x the measured cost — because the page list rounds
+/// up to whole pages and because a row of styled or multi-codepoint cells
+/// costs more than a plain one. Under-budgeting loses history; over-budgeting
+/// costs address space that is only touched when the history actually fills.
+const SCROLLBACK_BYTES_PER_COL: usize = 16;
+/// Fixed per-row cost, independent of width. See
+/// [`SCROLLBACK_BYTES_PER_COL`].
+const SCROLLBACK_ROW_OVERHEAD: usize = 256;
+
+/// What one row of a `cols`-wide terminal costs in the history.
+fn scrollback_row_bytes(cols: u16) -> usize {
+    SCROLLBACK_ROW_OVERHEAD + SCROLLBACK_BYTES_PER_COL * cols.max(1) as usize
+}
+
+/// The byte budget that retains `lines` lines of a `cols`-wide terminal,
+/// capped at [`MAX_SCROLLBACK_BYTES`].
+fn scrollback_budget(lines: usize, cols: u16) -> usize {
+    lines
+        .saturating_mul(scrollback_row_bytes(cols))
+        .min(MAX_SCROLLBACK_BYTES)
+}
 
 /// A desktop notification the child asked for (OSC 9, 99, or 777).
 /// Shapes follow Node (`src/server.ts:421-454`).
@@ -156,7 +197,12 @@ pub struct TerminalActor {
     modes: Modes,
     events: Vec<TerminalEvent>,
     last_title: Option<String>,
-    scrollback: usize,
+    /// Lines of history the owner asked for.
+    scrollback_request: usize,
+    /// The byte budget libghostty was given for the history. Fixed at
+    /// construction: libghostty takes it in `Options` and exposes no setter,
+    /// so a resize changes how many lines it holds, not how much memory.
+    scrollback_bytes: usize,
     /// How big a cell is on the surface that draws this terminal, zero when
     /// undeclared. It comes from the client (a font on its host), travels on
     /// ATTACH and RESIZE, and decides the cell extent of any placement that
@@ -176,12 +222,17 @@ pub struct TerminalActor {
 
 impl TerminalActor {
     /// A terminal of `rows` x `cols` with `scrollback` lines of history.
+    ///
+    /// The line count is converted to the byte budget libghostty actually
+    /// takes (see [`MAX_SCROLLBACK_BYTES`]); [`TerminalActor::scrollback`]
+    /// reports how many lines that buys at the current width.
     pub fn new(rows: u16, cols: u16, scrollback: usize) -> TerminalActor {
         let shared: Rc<RefCell<Shared>> = Rc::new(RefCell::new(Shared::default()));
+        let scrollback_bytes = scrollback_budget(scrollback, cols);
         let mut term = Terminal::new(Options {
             cols: cols.max(1),
             rows: rows.max(1),
-            max_scrollback: scrollback,
+            max_scrollback: scrollback_bytes,
         })
         .expect("libghostty terminal");
         {
@@ -210,7 +261,8 @@ impl TerminalActor {
             modes: Modes::default(),
             events: Vec::new(),
             last_title: None,
-            scrollback,
+            scrollback_request: scrollback,
+            scrollback_bytes,
             cell: CellSize::default(),
             graphics: None,
             normal_replay: None,
@@ -653,13 +705,38 @@ impl TerminalActor {
     }
 
     /// Node's `scrollbackCapacity`: `rows + scrollback`.
+    ///
+    /// A guaranteed minimum, not a ceiling. libghostty's history is a list of
+    /// pages and it never holds less than one, so a terminal asked for a
+    /// small scrollback retains more than it promised (a 100-line request at
+    /// 80 columns keeps ~1 000 rows). Node's number is a ceiling because
+    /// xterm counts lines; this one is a floor because libghostty counts
+    /// bytes and rounds to pages
+    /// (docs/decisions/0013-scrollback-is-a-line-promise.md).
     pub fn scrollback_capacity(&self) -> usize {
-        self.rows() as usize + self.scrollback
+        self.rows() as usize + self.scrollback()
     }
 
-    /// Configured scrollback lines.
+    /// How many lines of history this terminal retains at its current width.
+    ///
+    /// Normally the line count the owner asked for. It is less when the byte
+    /// budget cannot buy that many — either because the request exceeded
+    /// [`MAX_SCROLLBACK_BYTES`], or because the terminal has since been
+    /// widened and libghostty's budget is fixed at construction. Reporting
+    /// the request in that case is what made the promise a lie.
     pub fn scrollback(&self) -> usize {
-        self.scrollback
+        let fits = self.scrollback_bytes / scrollback_row_bytes(self.cols());
+        self.scrollback_request.min(fits)
+    }
+
+    /// Lines of history the owner asked for, whether or not they fit.
+    pub fn scrollback_request(&self) -> usize {
+        self.scrollback_request
+    }
+
+    /// The byte budget libghostty holds the history in.
+    pub fn scrollback_bytes(&self) -> usize {
+        self.scrollback_bytes
     }
 
     /// Node's `baseY`: the buffer row where the active area starts.
