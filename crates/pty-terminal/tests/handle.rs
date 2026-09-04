@@ -279,6 +279,234 @@ fn attach_identity_reconnect_reaches_the_replacement() {
     rig.kill("a");
 }
 
+/// The case a Node daemon cannot serve: the child draws a kitty image, and a
+/// client attaches only afterwards. The image was in `DATA` that this client
+/// never saw, so everything it knows comes from the daemon's `SCREEN` — which
+/// carries the image because the session's own terminal holds it
+/// (docs/decisions/0012-kitty-graphics-replay.md).
+///
+/// The bytes are OMP's (`packages/tui/src/terminal-capabilities.ts`
+/// `encodeKittyTransmit`, `packages/tui/src/kitty-graphics.ts`
+/// `encodeKittyVirtualPlacement` / `encodeKittyPlaceholderGrid`): a `f=100`
+/// PNG transmission, a virtual placement, and a placeholder cell carrying the
+/// image id in its foreground colour and the placement id in its underline
+/// colour.
+#[test]
+fn a_late_attach_gets_the_image_the_child_drew_before_it_connected() {
+    let Some(rig) = Rig::new() else {
+        eprintln!("skipping: no pty binary");
+        return;
+    };
+    // A 1x1 red PNG (the kitty protocol's own example image), image id 4242,
+    // placement id 7, one placeholder cell at image row 0, column 0.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let script = format!(
+        "printf 'drawn\\n'; \
+         printf '\\033_Ga=t,f=100,q=2,i=4242;{png}\\033\\\\'; \
+         printf '\\033_Ga=p,U=1,q=2,i=4242,p=7,c=1,r=1\\033\\\\'; \
+         printf '\\033[38;2;0;16;146m\\033[58:2::0:0:7m\u{10eeee}\u{305}\u{305}\\033[39;59m'; \
+         exec cat"
+    );
+    rig.run("g", &script);
+    // Let the child finish drawing before anyone attaches: this client must
+    // learn the image from the replay, not from live DATA.
+    std::thread::sleep(Duration::from_millis(400));
+
+    let h = TerminalHandle::attach(
+        rig.session("g"),
+        AttachOptions {
+            graphics: Some(pty_terminal::GraphicsOptions::DEFAULT),
+            ..Default::default()
+        },
+    )
+    .expect("attach");
+    assert!(h.wait_ready(Duration::from_secs(5)), "first SCREEN");
+    assert!(h.plain(Range::Full).contains("drawn"));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let state = loop {
+        let state = h.graphics(0);
+        if !state.placements.is_empty() {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the replay carried no placement; screen:\n{}",
+            h.plain(Range::Full)
+        );
+        h.wait_rev(h.rev(), Duration::from_millis(100));
+    };
+
+    let image = state.image(4242).expect("the image came with the replay");
+    assert_eq!((image.width, image.height), (1, 1));
+    assert_eq!(
+        h.image_bytes(4242).map(|b| b.data),
+        Some(vec![255, 0, 0, 255]),
+        "the pixels themselves, decoded from the PNG"
+    );
+    let p = &state.placements[0];
+    assert_eq!((p.image_id, p.placement_id), (4242, 7));
+    assert!(p.is_virtual);
+    assert!(
+        matches!(p.position, pty_terminal::PlacementPosition::Placeholder(_)),
+        "located by its placeholder cell, at {:?}",
+        p.position
+    );
+
+    // A reconnect resets the terminal and replays a fresh SCREEN. The image
+    // has to come back with it: the reset must not take the storage away, or
+    // the replay's own transmission would be rejected.
+    let position = p.position;
+    h.reconnect().expect("reconnect");
+    assert!(h.wait_ready(Duration::from_secs(5)), "SCREEN after reconnect");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let after = loop {
+        let state = h.graphics(0);
+        if !state.placements.is_empty() {
+            break state;
+        }
+        assert!(Instant::now() < deadline, "reconnect lost the image");
+        h.wait_rev(h.rev(), Duration::from_millis(100));
+    };
+    assert_eq!(
+        h.image_bytes(4242).map(|b| b.data),
+        Some(vec![255, 0, 0, 255])
+    );
+    assert_eq!(after.placements[0].placement_id, 7);
+    assert_eq!(after.placements[0].position, position, "same cell");
+
+    h.kill();
+    rig.kill("g");
+}
+
+/// A daemon-side detach is a state a consumer has to be able to enter, so it
+/// is an event, not something to poll `connected()` for. A reconnect is the
+/// symmetric one: `Connected` means the new socket is up, and the attempt's
+/// first SCREEN follows.
+#[test]
+fn a_lost_socket_and_a_reconnect_are_both_announced() {
+    let Some(rig) = Rig::new() else {
+        eprintln!("skipping: no pty binary");
+        return;
+    };
+    rig.run("d", "printf 'first\\n'; exec sleep 60");
+    let h = TerminalHandle::attach(rig.session("d"), AttachOptions::default()).expect("attach");
+    assert!(h.wait_ready(Duration::from_secs(5)));
+    let events = h.subscribe();
+
+    rig.kill("d");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.connected() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!h.connected());
+    let mut saw_disconnected = false;
+    while let Ok(ev) = events.try_recv() {
+        if ev == HandleEvent::Disconnected {
+            saw_disconnected = true;
+        }
+    }
+    assert!(saw_disconnected, "the lost socket was announced");
+
+    rig.run("d", "printf 'second\\n'; exec sleep 60");
+    h.reconnect().expect("reconnect");
+    assert!(h.wait_ready(Duration::from_secs(5)));
+    let mut saw_connected = false;
+    while let Ok(ev) = events.try_recv() {
+        if ev == HandleEvent::Connected(h.attempt()) {
+            saw_connected = true;
+        }
+    }
+    assert!(saw_connected, "the new socket was announced");
+    h.kill();
+    rig.kill("d");
+}
+
+/// Cell metrics live on the client's host — its font — but the session's
+/// terminal is what answers geometry for a placement that left `c=`/`r=`
+/// implicit, including in the replay every other client gets. So the client
+/// declares them on ATTACH and RESIZE, and the daemon adopts them.
+#[test]
+fn a_client_declares_its_cell_size_and_the_session_geometry_follows() {
+    let Some(rig) = Rig::new() else {
+        eprintln!("skipping: no pty binary");
+        return;
+    };
+    // A 16x16 RGBA image (f=32, 1024 pixel bytes) placed with no c=/r=, so
+    // its cell extent is purely derived from the cell size.
+    let px = format!("{}==", "A".repeat(1366));
+    let script = format!(
+        "printf 'drawn\\n'; \
+         printf '\\033_Ga=t,q=2,i=77,f=32,s=16,v=16;{px}\\033\\\\'; \
+         printf '\\033_Ga=p,q=2,i=77,p=1\\033\\\\'; \
+         exec cat"
+    );
+    rig.run("c", &script);
+    std::thread::sleep(Duration::from_millis(400));
+
+    let graphics = pty_terminal::GraphicsOptions {
+        cell: pty_terminal::CellSize {
+            width: 16,
+            height: 16,
+        },
+        ..pty_terminal::GraphicsOptions::DEFAULT
+    };
+    let h = TerminalHandle::attach(
+        rig.session("c"),
+        AttachOptions {
+            graphics: Some(graphics),
+            ..Default::default()
+        },
+    )
+    .expect("attach");
+    assert!(h.wait_ready(Duration::from_secs(5)));
+
+    // 16x16 pixels at a declared 16x16 cell is 1x1 cells, on both sides: the
+    // client's own terminal and the daemon's, which was told on ATTACH.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let state = loop {
+        let state = h.graphics(0);
+        if !state.placements.is_empty() {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no placement; screen:\n{}",
+            h.plain(Range::Full)
+        );
+        h.wait_rev(h.rev(), Duration::from_millis(100));
+    };
+    assert!(state.cell_declared, "the client declared its cell size");
+    assert_eq!(state.placements[0].cell_size, (1, 1));
+    assert_eq!(state.placements[0].requested_cells, (0, 0));
+
+    // The daemon's own answer, via a PEEK-based read-only attach that never
+    // declares anything: the replay it gets carries the image, and the
+    // session's terminal is what resolved the geometry.
+    let (code, out, err) = rig.pty(&["peek", "c"]);
+    assert_eq!(code, 0, "peek failed: {out}{err}");
+    assert!(
+        out.contains("i=77"),
+        "the session's replay carries the image: {out:?}"
+    );
+
+    // A later declaration travels on RESIZE and moves the derived extent.
+    h.set_cell_size(8, 16);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = h.graphics(0);
+        if state.placements.first().map(|p| p.cell_size) == Some((2, 1)) {
+            assert_eq!(state.cell, pty_terminal::CellSize { width: 8, height: 16 });
+            break;
+        }
+        assert!(Instant::now() < deadline, "the new cell size never took");
+        h.wait_rev(h.rev(), Duration::from_millis(100));
+    }
+
+    h.kill();
+    rig.kill("c");
+}
+
 #[test]
 fn attach_to_missing_session_is_an_error() {
     let root = std::env::temp_dir();

@@ -114,9 +114,33 @@ fn size_payload(rows: u16, cols: u16) -> [u8; 4] {
     [r[0], r[1], c[0], c[1]]
 }
 
+/// `rows u16BE, cols u16BE, cell_width u16BE, cell_height u16BE`: the size
+/// payload with the client's cell pixel metrics appended.
+///
+/// The four extra bytes are an *optional suffix*, which is what makes this
+/// safe to send to any peer: every reader of a size payload takes rows and
+/// cols from the first four bytes and the frame carries its own length, so a
+/// daemon that predates this (the Node one included) reads the size it
+/// always read and ignores the rest.
+fn size_cell_payload(rows: u16, cols: u16, cell_width: u16, cell_height: u16) -> [u8; 8] {
+    let s = size_payload(rows, cols);
+    let w = cell_width.to_be_bytes();
+    let h = cell_height.to_be_bytes();
+    [s[0], s[1], s[2], s[3], w[0], w[1], h[0], h[1]]
+}
+
 /// Encode an ATTACH with a terminal size (4-byte payload).
 pub fn encode_attach(rows: u16, cols: u16) -> Vec<u8> {
     encode_packet(MessageType::Attach, &size_payload(rows, cols))
+}
+
+/// Encode an ATTACH that also declares the client's cell pixel size
+/// (8-byte payload; see [`decode_cell`]).
+pub fn encode_attach_with_cell(rows: u16, cols: u16, cell_width: u16, cell_height: u16) -> Vec<u8> {
+    encode_packet(
+        MessageType::Attach,
+        &size_cell_payload(rows, cols, cell_width, cell_height),
+    )
 }
 
 /// Encode a DETACH.
@@ -127,6 +151,14 @@ pub fn encode_detach() -> Vec<u8> {
 /// Encode a RESIZE.
 pub fn encode_resize(rows: u16, cols: u16) -> Vec<u8> {
     encode_packet(MessageType::Resize, &size_payload(rows, cols))
+}
+
+/// Encode a RESIZE that also declares the client's cell pixel size.
+pub fn encode_resize_with_cell(rows: u16, cols: u16, cell_width: u16, cell_height: u16) -> Vec<u8> {
+    encode_packet(
+        MessageType::Resize,
+        &size_cell_payload(rows, cols, cell_width, cell_height),
+    )
 }
 
 /// Encode a GEOMETRY (effective shared rows/cols, server → client).
@@ -175,6 +207,21 @@ pub fn decode_size(payload: &[u8]) -> (u16, u16) {
     let rows = u16::from_be_bytes([payload[0], payload[1]]);
     let cols = u16::from_be_bytes([payload[2], payload[3]]);
     (rows, cols)
+}
+
+/// The cell pixel size a client appended to an ATTACH or RESIZE payload, or
+/// `None` when it sent the plain 4-byte size or a degenerate zero.
+///
+/// Cell metrics are the client's to know — they come from its font, on its
+/// host — so a session daemon can only be told. `None` means nobody has, and
+/// the reader keeps its own deterministic fallback.
+pub fn decode_cell(payload: &[u8]) -> Option<(u16, u16)> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let width = u16::from_be_bytes([payload[4], payload[5]]);
+    let height = u16::from_be_bytes([payload[6], payload[7]]);
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 /// Decode a GEOMETRY payload (rows, cols); same layout and fallback as

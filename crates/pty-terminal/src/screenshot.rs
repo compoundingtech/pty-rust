@@ -34,7 +34,7 @@ impl Screenshot {
 /// This is the body without Node's mode prefix; the daemon gets the full
 /// payload from [`crate::TerminalActor::serialize`].
 pub fn serialize_for_replay(term: &Terminal) -> String {
-    serialize::vt(term, true)
+    serialize::vt(term, true, crate::graphics::CellSize::FALLBACK)
 }
 
 /// Capture the current terminal state into a [`Screenshot`].
@@ -48,7 +48,7 @@ pub fn capture(term: &Terminal) -> Screenshot {
     while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         lines.pop();
     }
-    let ansi = serialize::vt(term, true);
+    let ansi = serialize::vt(term, true, crate::graphics::CellSize::FALLBACK);
     let text = lines.join("\n");
     Screenshot { lines, text, ansi }
 }

@@ -19,6 +19,7 @@ use libghostty_vt::selection::Selection;
 use libghostty_vt::terminal::{Point, PointCoordinate, Terminal};
 
 use crate::actor::{Modes, TerminalActor};
+use crate::graphics::{self, CellSize};
 
 /// What a replay should carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,14 +89,36 @@ pub fn mode_prefix(modes: &Modes, include_alt_screen: bool) -> String {
 /// is the copy the actor took when the child left it. Without it a client
 /// that reconnects gets a blank normal screen the moment the program exits.
 ///
+/// The prefix comes first because its position is the contract (`ESC[?1049h`
+/// at byte 0), which leaves the client on its alternate screen just as the
+/// normal half arrives. For text that was invisible — the alternate screen is
+/// overwritten immediately afterwards — but kitty image storage is per
+/// screen, so the normal screen's images landed in the client's alternate
+/// storage and were lost the moment the program exited. One `ESC[?1049l`
+/// ahead of the normal half puts it where it belongs; the switch back is
+/// [`vt`]'s own `ESC[?1049h`, which also clears and homes the alternate
+/// screen the way the body that follows it expects.
+///
 /// node: src/server.ts:962 and 1017 (`serialize.serialize()`, whose addon
 /// walks both buffers).
 pub fn serialize_for_replay(actor: &TerminalActor, opts: SerializeOpts) -> String {
-    let mut out = mode_prefix(&actor.modes(), opts.include_alt_screen_prefix);
+    let modes = actor.modes();
+    let mut out = mode_prefix(&modes, opts.include_alt_screen_prefix);
     if let Some(normal) = actor.normal_replay() {
-        out.push_str(normal);
+        if opts.include_alt_screen_prefix && modes.alt_screen {
+            // Back to the normal screen for its own half, then to the
+            // alternate one again with the cursor homed — Node's
+            // `ESC[?1049h ESC[H` — because the normal half leaves the cursor
+            // wherever its own trailing CUP put it and the alternate body
+            // that follows is written from wherever the cursor is.
+            out.push_str("\x1b[?1049l");
+            out.push_str(normal);
+            out.push_str("\x1b[?1049h\x1b[H");
+        } else {
+            out.push_str(normal);
+        }
     }
-    out.push_str(&vt(actor.terminal(), opts.scrollback));
+    out.push_str(&vt(actor.terminal(), opts.scrollback, actor.cell_size()));
     out
 }
 
@@ -242,10 +265,19 @@ fn plain_opts<'t, 's>() -> FormatterOptions<'t, 's> {
 }
 
 /// The VT serialization: cells with styles, then cursor position, modes that
-/// differ from their defaults, and the kitty keyboard flags. With
-/// `scrollback` the history rows come first; without it only the active area
-/// is emitted.
-pub fn vt(term: &Terminal, scrollback: bool) -> String {
+/// differ from their defaults, the kitty keyboard flags, and the kitty
+/// graphics storage. With `scrollback` the history rows come first; without
+/// it only the active area is emitted.
+///
+/// The graphics block comes last, after the cursor move, because it must not
+/// change where the cursor ends up: libghostty's formatter keeps the
+/// placeholder cells of a virtual placement (they are ordinary text) but
+/// neither the images nor the placements, so without the block a client would
+/// replay placeholders naming images it never received
+/// (docs/decisions/0012-kitty-graphics-replay.md). It is empty for a terminal
+/// with no graphics, so a session that never sent an image is byte-identical
+/// to before.
+pub fn vt(term: &Terminal, scrollback: bool, cell: CellSize) -> String {
     let mut out = if scrollback {
         format(term, vt_opts())
     } else {
@@ -271,6 +303,7 @@ pub fn vt(term: &Terminal, scrollback: bool) -> String {
     let cx = term.cursor_x().unwrap_or(0);
     let cy = term.cursor_y().unwrap_or(0);
     out.push_str(&format!("\x1b[{};{}H", cy + 1, cx + 1));
+    out.push_str(&graphics::replay(term, cell));
     out
 }
 
@@ -320,6 +353,11 @@ mod tests {
             bracketed_paste: true,
             focus_events: true,
             kitty_stack: vec![7, 1],
+            // Neither of these reaches the prefix: Node does not track them,
+            // and a replay must not tell the client's terminal to turn a mode
+            // on that the daemon's own prefix never carried.
+            mouse_9: true,
+            app_cursor: true,
         };
         assert_eq!(
             mode_prefix(&m, true),

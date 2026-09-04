@@ -1,9 +1,10 @@
 //! Port of the pty project's `tests/protocol.test.ts`.
 
 use pty_core::protocol::{
-    MAX_PACKET_LENGTH, MessageType, PacketReader, decode_exit, decode_geometry, decode_size,
-    encode_attach, encode_data, encode_detach, encode_exit, encode_geometry, encode_packet,
-    encode_resize, encode_screen, encode_status, encode_status_response,
+    MAX_PACKET_LENGTH, MessageType, PacketReader, decode_cell, decode_exit, decode_geometry,
+    decode_size, encode_attach, encode_attach_with_cell, encode_data, encode_detach, encode_exit,
+    encode_geometry, encode_packet, encode_resize, encode_resize_with_cell, encode_screen,
+    encode_status, encode_status_response,
 };
 use pty_core::stats::{ClientStats, ConnectionStats, Constrains, StatsResult};
 
@@ -33,6 +34,50 @@ fn attach_byte_identical_to_hand_built_packet() {
     assert_eq!(
         encode_attach(24, 80),
         encode_packet(MessageType::Attach, &[0, 24, 0, 80])
+    );
+}
+
+/// The cell pixel size is an optional suffix on a size payload: a reader that
+/// does not know about it takes the same rows and cols it always did, which
+/// is what makes this safe to send to any daemon.
+#[test]
+fn attach_can_declare_a_cell_size_without_changing_the_size_it_carries() {
+    let with_cell = encode_attach_with_cell(24, 80, 9, 18);
+    assert_eq!(
+        with_cell,
+        encode_packet(MessageType::Attach, &[0, 24, 0, 80, 0, 9, 0, 18])
+    );
+
+    let mut reader = PacketReader::new();
+    let packets = reader.feed(&with_cell).unwrap();
+    assert_eq!(packets[0].type_, MessageType::Attach);
+    assert_eq!(
+        decode_size(&packets[0].payload),
+        (24, 80),
+        "the size is where it always was"
+    );
+    assert_eq!(decode_cell(&packets[0].payload), Some((9, 18)));
+}
+
+#[test]
+fn resize_can_declare_a_cell_size() {
+    let mut reader = PacketReader::new();
+    let packets = reader.feed(&encode_resize_with_cell(30, 100, 7, 15)).unwrap();
+    assert_eq!(packets[0].type_, MessageType::Resize);
+    assert_eq!(decode_size(&packets[0].payload), (30, 100));
+    assert_eq!(decode_cell(&packets[0].payload), Some((7, 15)));
+}
+
+/// No declaration is the normal case, and it must not be mistaken for one.
+#[test]
+fn a_plain_size_payload_declares_no_cell() {
+    assert_eq!(decode_cell(&encode_attach(24, 80)[5..]), None);
+    assert_eq!(decode_cell(&encode_resize(24, 80)[5..]), None);
+    assert_eq!(decode_cell(&[]), None);
+    assert_eq!(
+        decode_cell(&[0, 24, 0, 80, 0, 0, 0, 0]),
+        None,
+        "a zero cell is no cell"
     );
 }
 

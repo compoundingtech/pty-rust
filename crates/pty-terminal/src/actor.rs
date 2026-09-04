@@ -16,6 +16,8 @@ use std::rc::Rc;
 use libghostty_vt::style::RgbColor;
 use libghostty_vt::terminal::{Options, Terminal};
 
+use crate::graphics::{self, CellSize, GraphicsOptions, GraphicsState, ImageBytes};
+use crate::input::{self, KeyEvent, MouseEvent};
 use crate::queries;
 use crate::screenshot::{self, Screenshot};
 use crate::serialize::{self, SerializeOpts};
@@ -66,6 +68,15 @@ pub struct Modes {
     pub mouse_1002: bool,
     /// `?1003`.
     pub mouse_1003: bool,
+    /// `?9` — X10 mouse reporting: button presses only, no releases, no
+    /// motion, and no wheel. Deliberately *not* part of
+    /// [`Modes::mouse_tracking`]: an input encoder has to treat it
+    /// differently from `?1000`/`?1002`/`?1003`, which do report the wheel.
+    pub mouse_9: bool,
+    /// `?1` (DECCKM) — application cursor keys: the child wants `SS3 A` for
+    /// Up, not `CSI A`. Node does not track it; an input encoder cannot
+    /// encode an arrow key correctly without it.
+    pub app_cursor: bool,
     /// `?1049` / `?1047` / `?47`.
     pub alt_screen: bool,
     /// `?25 l` seen and not yet undone by `?25 h`.
@@ -84,12 +95,20 @@ impl Modes {
         self.mouse_1000 || self.mouse_1002 || self.mouse_1003
     }
 
+    /// Whether any mouse reporting at all is on, X10 included. Use
+    /// [`Modes::mouse_tracking`] for "reports the wheel".
+    pub fn mouse_reporting(&self) -> bool {
+        self.mouse_9 || self.mouse_tracking()
+    }
+
     fn apply_dec(&mut self, mode: u16, set: bool, events: &mut Vec<TerminalEvent>) {
         match mode {
             1006 => self.sgr_mouse = set,
             1000 => self.mouse_1000 = set,
             1002 => self.mouse_1002 = set,
             1003 => self.mouse_1003 = set,
+            9 => self.mouse_9 = set,
+            1 => self.app_cursor = set,
             1049 | 1047 | 47 => self.alt_screen = set,
             25 => {
                 if set {
@@ -138,6 +157,14 @@ pub struct TerminalActor {
     events: Vec<TerminalEvent>,
     last_title: Option<String>,
     scrollback: usize,
+    /// How big a cell is on the surface that draws this terminal, zero when
+    /// undeclared. It comes from the client (a font on its host), travels on
+    /// ATTACH and RESIZE, and decides the cell extent of any placement that
+    /// did not name `c=`/`r=` itself.
+    cell: CellSize,
+    /// Whether kitty graphics are on, and with what bounds. Off means the
+    /// storage limit is zero, which is libghostty's own "protocol disabled".
+    graphics: Option<GraphicsOptions>,
     /// The normal screen, serialized at the moment the child switched to the
     /// alternate one. libghostty gives no reader for the screen that is not
     /// active, and a replay has to carry both: a client that reconnects while
@@ -184,6 +211,8 @@ impl TerminalActor {
             events: Vec::new(),
             last_title: None,
             scrollback,
+            cell: CellSize::default(),
+            graphics: None,
             normal_replay: None,
         }
     }
@@ -191,6 +220,198 @@ impl TerminalActor {
     /// Node's defaults: 24 x 80, 10 000 lines of scrollback.
     pub fn with_defaults() -> TerminalActor {
         TerminalActor::new(24, 80, DEFAULT_SCROLLBACK)
+    }
+
+    /// Turn kitty graphics on: a bounded image storage, the cell metrics
+    /// every placement question is answered in, and a PNG decoder for
+    /// `f=100` transmissions (installed on this thread, where the terminal
+    /// lives). Returns false when libghostty refused the options.
+    ///
+    /// `storage_bytes` is clamped to [`graphics::MAX_STORAGE_BYTES`] so
+    /// everything the terminal accepts can also be replayed; read back what
+    /// took effect with [`TerminalActor::graphics_options`]. A zero
+    /// `opts.cell` leaves the metrics undeclared — see
+    /// [`TerminalActor::set_cell_size`].
+    ///
+    /// Off by default: an owner that never reads images should not let a
+    /// child make the terminal hold any.
+    pub fn enable_graphics(&mut self, opts: GraphicsOptions) -> bool {
+        let opts = GraphicsOptions {
+            storage_bytes: opts.storage_bytes.min(graphics::MAX_STORAGE_BYTES),
+            ..opts
+        };
+        let previous = self.graphics;
+        if opts.cell.is_declared() {
+            self.cell = opts.cell;
+        }
+        if self.apply_cell().is_err() {
+            self.rollback_graphics(previous);
+            return false;
+        }
+        if self.term.set_apc_max_bytes_kitty(opts.apc_max_bytes).is_err()
+            || self
+                .term
+                .set_kitty_image_storage_limit(opts.storage_bytes)
+                .is_err()
+        {
+            self.rollback_graphics(previous);
+            return false;
+        }
+        // The child must not be able to name a path or a shared-memory
+        // segment the owner never authorized: inline transmission only.
+        let _ = self.term.set_kitty_image_from_file_allowed(false);
+        let _ = self.term.set_kitty_image_from_temp_file_allowed(false);
+        let _ = self.term.set_kitty_image_from_shared_mem_allowed(false);
+        if !graphics::install_png_decoder() {
+            self.rollback_graphics(previous);
+            return false;
+        }
+        self.graphics = Some(GraphicsOptions {
+            cell: self.cell,
+            ..opts
+        });
+        true
+    }
+
+    /// Put the storage limit back where a failed [`TerminalActor::enable_graphics`]
+    /// found it.
+    ///
+    /// Leaving a non-zero limit behind after a failure is the worst of both
+    /// worlds: `self.graphics` is `None`, so a child can fill the storage
+    /// with images that no read can reach and `clear_graphics` will not
+    /// free.
+    fn rollback_graphics(&mut self, previous: Option<GraphicsOptions>) {
+        let limit = previous.map(|o| o.storage_bytes).unwrap_or(0);
+        let _ = self.term.set_kitty_image_storage_limit(limit);
+        self.graphics = previous;
+    }
+
+    /// Push the current grid and cell metrics into libghostty.
+    fn apply_cell(&mut self) -> Result<(), libghostty_vt::error::Error> {
+        let cell = self.cell.or_fallback();
+        self.term
+            .resize(self.cols().max(1), self.rows().max(1), cell.width, cell.height)
+            .map(|_| ())
+    }
+
+    /// Declare how big a cell is on the surface that draws this terminal.
+    ///
+    /// Nothing else can know: the metrics come from a font on the client's
+    /// host, which a session daemon may never see. They change no bytes —
+    /// only derived geometry, which is why a placement that named `c=`/`r=`
+    /// itself is unaffected and one that did not now gets a cell extent that
+    /// matches what the client will actually draw.
+    ///
+    /// A zero width or height clears the declaration and returns the
+    /// terminal to [`CellSize::FALLBACK`].
+    pub fn set_cell_size(&mut self, cell: CellSize) {
+        if self.cell == cell {
+            return;
+        }
+        self.cell = cell;
+        let _ = self.apply_cell();
+        if let Some(opts) = &mut self.graphics {
+            opts.cell = cell;
+        }
+    }
+
+    /// The graphics options in effect, or `None` when graphics are off.
+    pub fn graphics_options(&self) -> Option<GraphicsOptions> {
+        self.graphics
+    }
+
+    /// The image-storage generation: 0 when graphics are off or nothing has
+    /// ever been stored. Unchanged means the images and the set of placements
+    /// are identical; geometry can still have moved.
+    pub fn graphics_generation(&self) -> u64 {
+        if self.graphics.is_none() {
+            return 0;
+        }
+        graphics::generation(&self.term)
+    }
+
+    /// The images and placements for the window `scroll_offset` rows above
+    /// the live viewport — the same window [`TerminalActor::snapshot`] reads,
+    /// so cell positions in both line up.
+    pub fn graphics_state(&self, scroll_offset: usize) -> GraphicsState {
+        if self.graphics.is_none() {
+            return GraphicsState::default();
+        }
+        graphics::read(&self.term, self.cell, scroll_offset)
+    }
+
+    /// The pixels of one image, copied out of the storage. `None` when it is
+    /// not there (a delete won the race).
+    pub fn image_bytes(&self, id: u32) -> Option<ImageBytes> {
+        self.graphics.and_then(|_| graphics::image_bytes(&self.term, id))
+    }
+
+    /// Drop every image and placement, keeping the protocol on: what a pane
+    /// does when it closes or is reused. Zeroing the limit is libghostty's
+    /// own delete-everything path, so this needs no synthesized escape.
+    pub fn clear_graphics(&mut self) {
+        let Some(opts) = self.graphics else { return };
+        let _ = self.term.set_kitty_image_storage_limit(0);
+        let _ = self.term.set_kitty_image_storage_limit(opts.storage_bytes);
+    }
+
+    /// Raise or lower the storage limit, clamped to
+    /// [`graphics::MAX_STORAGE_BYTES`] so everything stored can still be
+    /// replayed. Zero turns the protocol off and deletes everything stored.
+    ///
+    /// A non-zero limit goes through [`TerminalActor::enable_graphics`], so
+    /// there is one path that turns graphics on: raising the limit on an
+    /// actor that never enabled them installs the PNG decoder and the cell
+    /// metrics too, instead of leaving a terminal that stores images it
+    /// cannot decode or measure.
+    pub fn set_graphics_storage_limit(&mut self, bytes: u64) {
+        if bytes == 0 {
+            let _ = self.term.set_kitty_image_storage_limit(0);
+            self.graphics = None;
+            return;
+        }
+        let opts = self.graphics.unwrap_or(GraphicsOptions {
+            cell: self.cell,
+            ..GraphicsOptions::DEFAULT
+        });
+        self.enable_graphics(GraphicsOptions {
+            storage_bytes: bytes,
+            ..opts
+        });
+    }
+
+    /// The declared cell metrics, or a zero size when nobody has declared
+    /// them. [`CellSize::or_fallback`] gives what geometry actually used.
+    pub fn cell_size(&self) -> CellSize {
+        self.cell
+    }
+
+    /// The bytes the child expects for one key event, given the keyboard
+    /// state it asked for (DECCKM, keypad, `modifyOtherKeys`, kitty
+    /// keyboard flags). Empty for an event the child should not see.
+    ///
+    /// This is the only child key encoder: a consumer that owns a surface
+    /// sends [`KeyEvent`]s, not bytes (see [`crate::input`]).
+    pub fn encode_key(&self, ev: &KeyEvent) -> Vec<u8> {
+        input::key(&self.term, ev)
+    }
+
+    /// The bytes for one mouse event, or `None` when the mode the child
+    /// chose does not report it (no tracking, or a wheel notch under `?9`)
+    /// and the surface keeps the event.
+    pub fn encode_mouse(&self, ev: &MouseEvent) -> Option<Vec<u8>> {
+        input::mouse(&self.term, &self.modes, ev, self.cell_size())
+    }
+
+    /// The bytes for a focus change, or `None` when the child did not ask
+    /// for focus events.
+    pub fn encode_focus(&self, gained: bool) -> Option<Vec<u8>> {
+        input::focus(&self.modes, gained)
+    }
+
+    /// Pasted text, bracketed when the child asked for it.
+    pub fn encode_paste(&self, text: &str) -> Vec<u8> {
+        input::paste(&self.modes, text)
     }
 
     /// The normal screen as it was when the child entered the alternate
@@ -236,7 +457,7 @@ impl TerminalActor {
                             (false, true) => {
                                 self.flush_feed(&mut feed);
                                 self.normal_replay =
-                                    Some(crate::serialize::vt(&self.term, true));
+                                    Some(crate::serialize::vt(&self.term, true, self.cell));
                             }
                             // Back on the normal screen: it serializes itself.
                             (true, false) => self.normal_replay = None,
@@ -335,9 +556,14 @@ impl TerminalActor {
         self.events.push(TerminalEvent::Notification(n));
     }
 
-    /// Resize the terminal (the primary screen reflows).
+    /// Resize the terminal (the primary screen reflows). The cell metrics
+    /// stay as they are: a resize is a change of grid, not of font, and
+    /// dropping them would make every placement's geometry unanswerable.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        let _ = self.term.resize(cols.max(1), rows.max(1), 0, 0);
+        let cell = self.cell.or_fallback();
+        let _ = self
+            .term
+            .resize(cols.max(1), rows.max(1), cell.width, cell.height);
     }
 
     /// Full reset (RIS): screen, scrollback, modes, title. The tracked mode
@@ -349,6 +575,13 @@ impl TerminalActor {
         self.modes = Modes::default();
         self.shared.borrow_mut().titles.clear();
         self.shared.borrow_mut().bells = 0;
+        // RIS restores libghostty's defaults, which include no image storage
+        // and no cell metrics. An owner that asked for graphics keeps them
+        // across the reset that precedes a SCREEN replay — otherwise the
+        // replay's own images would be rejected.
+        if let Some(opts) = self.graphics {
+            self.enable_graphics(opts);
+        }
     }
 
     /// The plain-text screen: rows right-trimmed of never-written cells

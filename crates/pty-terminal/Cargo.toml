@@ -12,6 +12,7 @@ libghostty-vt.workspace = true
 portable-pty.workspace = true
 pty-core.workspace = true
 libc.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

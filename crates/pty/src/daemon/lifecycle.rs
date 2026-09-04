@@ -305,7 +305,7 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         name,
         generation,
         cfg,
-        actor: TerminalActor::new(rows, cols, pty_terminal::actor::DEFAULT_SCROLLBACK),
+        actor: terminal_actor(rows, cols),
         master: pair.master,
         writer,
         child_pid,
@@ -329,6 +329,26 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         listener_fd,
     };
     Ok(daemon.serve())
+}
+
+/// The session's terminal, with kitty graphics on.
+///
+/// A session is the durable owner of the child's screen, and since libghostty
+/// keeps image state per screen, that includes the child's images: without it
+/// the `SCREEN` a late client replays would carry placeholder cells naming
+/// images nobody has (docs/decisions/0012-kitty-graphics-replay.md). The
+/// storage limit is a cap, not an allocation — a session whose child never
+/// transmits an image holds nothing and serializes exactly as before.
+fn terminal_actor(rows: u16, cols: u16) -> TerminalActor {
+    let mut actor = TerminalActor::new(rows, cols, pty_terminal::actor::DEFAULT_SCROLLBACK);
+    if !actor.enable_graphics(pty_terminal::GraphicsOptions::DEFAULT) {
+        // The session still runs: text is unaffected and the actor rolled the
+        // storage limit back, so the only loss is images. Say so rather than
+        // leaving a client to wonder why its replay carries placeholder cells
+        // and no pictures.
+        daemon_warn!("pty: kitty graphics unavailable for this session");
+    }
+    actor
 }
 
 fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: Sender<Msg>) {

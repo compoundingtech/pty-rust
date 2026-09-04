@@ -66,7 +66,7 @@ fn peek_never_prefixes_1049h() {
     for opts in [SerializeOpts::PEEK, SerializeOpts::PEEK_FULL] {
         let screen = a.serialize(opts);
         let normal = a.normal_replay().unwrap_or("");
-        let body = pty_terminal::serialize::vt(a.terminal(), opts.scrollback);
+        let body = pty_terminal::serialize::vt(a.terminal(), opts.scrollback, a.cell_size());
         // The normal screen comes first and the alternate one after it, but
         // no mode prefix is added on top.
         assert_eq!(screen, format!("{normal}{body}"), "a prefix was added");

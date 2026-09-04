@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use pty_core::protocol::{
-    Packet, MessageType, decode_peek, decode_size, encode_exit, encode_geometry, encode_screen,
+    Packet, MessageType, decode_cell, decode_peek, decode_size, encode_exit, encode_geometry, encode_screen,
     encode_status_response,
 };
 use pty_core::registry::{self, MutateOptions};
@@ -128,6 +128,7 @@ impl Daemon {
             return;
         }
         let (rows, cols) = decode_size(payload);
+        self.adopt_cell_size(payload);
         // Read before negotiation: a smaller client shrinks the session to
         // its own size, which would then look like it had matched.
         let size_matched = rows == self.actor.rows() && cols == self.actor.cols();
@@ -220,7 +221,31 @@ impl Daemon {
         c.cols = cols;
         self.attach_counter += 1;
         c.attach_seq = self.attach_counter;
+        self.adopt_cell_size(payload);
         self.negotiate_size();
+    }
+
+    /// Take the cell pixel metrics a client declared on ATTACH or RESIZE.
+    ///
+    /// Only a client knows how big a cell is — it comes from a font on the
+    /// client's host, which this process may never see — and the session's
+    /// terminal needs them to answer the cell extent of a kitty placement
+    /// that did not name `c=`/`r=` itself. A payload without them (every
+    /// older client, the Node one included) changes nothing, and the terminal
+    /// keeps its deterministic fallback.
+    ///
+    /// The most recent declaration wins. Clients that draw cells of different
+    /// sizes cannot all be right about an implicit placement, and unlike rows
+    /// and cols there is nothing to negotiate: the metrics change no bytes and
+    /// no client's screen, only what this session reports as derived
+    /// geometry.
+    fn adopt_cell_size(&mut self, payload: &[u8]) {
+        if let Some((width, height)) = decode_cell(payload) {
+            self.actor.set_cell_size(pty_terminal::CellSize {
+                width: width as u32,
+                height: height as u32,
+            });
+        }
     }
 
     /// node: src/server.ts:1040-1043
