@@ -1,0 +1,8 @@
+Usage: pty up [<dir>] [<name>...]
+
+Start sessions declared in a pty.toml. With no args, reads ./pty.toml and starts all.
+
+Examples:
+  pty up
+  pty up ./backend
+  pty up web worker

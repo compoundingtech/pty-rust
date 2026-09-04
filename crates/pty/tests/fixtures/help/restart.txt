@@ -1,0 +1,12 @@
+Usage: pty restart [-y] [--force] <ref>
+
+SIGTERM the session's daemon and respawn it from stored metadata (command, cwd,
+tags, displayName). Prompts first if it's still running.
+
+Flags:
+  -y, --yes            Skip the "kill and restart?" prompt
+  --force              Attach after restart even from inside another pty session
+
+Examples:
+  pty restart myserver
+  pty restart -y myserver

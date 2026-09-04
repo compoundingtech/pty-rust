@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "note": "Framing limits on the session socket. `intactBytes`: one DATA of that size reaches the child unchanged (session runs `stty raw -echo; cat > dump`). `oversizedDeclaredLength`: a header declaring MAX_PACKET_LENGTH+1 makes the daemon drop the connection, and a client PacketReader fed the same header reports InvalidData. `coalesced`: three DATA frames in one write arrive in order.",
+  "maxPacketLength": 33554432,
+  "intactBytes": 100000,
+  "oversizedDeclaredLength": 33554433,
+  "coalesced": ["a", "b", "c"],
+  "expect": { "coalescedDump": "abc", "oversizedDropsConnection": true }
+}

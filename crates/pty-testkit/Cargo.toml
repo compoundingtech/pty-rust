@@ -1,0 +1,17 @@
+[package]
+name = "pty-testkit"
+description = "Playwright-style terminal test sessions: spawn a process in a real PTY, feed it to libghostty, take screenshots, wait for text, send named keys."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libghostty-vt.workspace = true
+portable-pty.workspace = true
+pty-core.workspace = true
+pty-terminal.workspace = true
+
+[dev-dependencies]
+libghostty-vt.workspace = true

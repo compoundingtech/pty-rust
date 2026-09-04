@@ -1,0 +1,7 @@
+Usage: pty rm <ref>
+
+Remove an exited session's files (socket/pid/json/events) (alias: pty remove).
+Won't remove a running session — kill it first.
+
+Examples:
+  pty rm myserver

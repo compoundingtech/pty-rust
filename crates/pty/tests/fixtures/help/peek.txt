@@ -1,0 +1,17 @@
+Usage: pty peek [-f] [--plain] [--full] [--wait <text> [-t <sec>]] [--remote <peer>] <ref>
+
+Print a session's screen (or follow it, or wait for text) without attaching.
+
+Flags:
+  --plain              Plain text, no ANSI escapes (best for scripts / agents)
+  --full               Full scrollback, not just the visible viewport
+  -f, --follow         Follow output read-only (Ctrl+\ to stop)
+  --wait <text>        Block until <text> appears on screen
+  -t, --timeout <sec>  Timeout (seconds) for --wait
+  --remote <peer>      Peek a session on a fabric peer (over fabric); <ref> is
+                       the session's name/id ON THE REMOTE (--wait not yet supported)
+
+Examples:
+  pty peek --plain myserver
+  pty peek --remote hetzner myserver
+  pty peek --wait "Listening" -t 10 --plain myserver

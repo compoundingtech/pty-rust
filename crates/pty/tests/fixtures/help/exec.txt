@@ -1,0 +1,8 @@
+Usage: pty exec -- <command> [args...]
+
+Replace the current session's leaf process with a new command. Run INSIDE a
+session (uses $PTY_SESSION); the session keeps its id and metadata.
+
+Examples:
+  pty exec -- codex
+  pty exec -- bash -l

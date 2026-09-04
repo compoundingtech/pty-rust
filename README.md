@@ -1,19 +1,17 @@
 # pty-rust
 
-A Rust port of the [`pty`](https://github.com/compoundingtech/pty) project —
-persistent terminal sessions with detach/attach **plus** a Playwright-style TUI
-testing library — using **[libghostty]** (the terminal library extracted from
-the [Ghostty] terminal emulator) as the terminal-emulation backend in place of
-`@xterm/headless`.
-
-Two things live here:
-
-1. **The `pty` CLI (v0)** — a runnable `pty` binary with a per-session daemon
-   that owns the PTY and a libghostty terminal: `run` / `ls` / `peek` / `send` /
-   `attach` / `kill` / `status`. See [The `pty` CLI](#the-pty-cli-v0) below.
-2. **`pty-testkit`** — the Rust port of pty's terminal testing harness (the
-   `Session` type), which is also the foundation the CLI is built on and the
-   correctness net for the port.
+`pty` keeps terminal sessions alive after you walk away. `pty run -- <command>`
+starts the command inside a real pseudo-terminal that a small per-session daemon
+owns; you can detach, come back with `pty attach`, read the screen from a script
+with `pty peek --plain`, type into it with `pty send`, and list, tag, restart,
+or kill sessions from any shell. Programs and agents drive sessions through the
+same commands and JSON output. This repository is a Rust port of the Node
+[`pty`](https://github.com/compoundingtech/pty), with
+[libghostty](https://libghostty.tip.ghostty.org/) (the terminal core extracted
+from [Ghostty](https://ghostty.org)) in place of `@xterm/headless`. The port is
+meant as a drop-in: same commands, flags, texts, JSON shapes, exit codes, files
+under `$PTY_ROOT`, and socket protocol, so the two implementations can share a
+registry while a fleet migrates.
 
 ## Direction: compatibility and embedding
 
@@ -43,185 +41,199 @@ real failing use case shows that the current byte-framed messages cannot express
 the required behavior. Track the compatibility matrix, crate boundaries, and
 acceptance tests in [issue #1](https://github.com/compoundingtech/pty-rust/issues/1).
 
-[libghostty]: https://libghostty.tip.ghostty.org/
-[Ghostty]: https://ghostty.org
+Where the port stands against the Node `pty`, surface by surface, is in
+[docs/parity.md](docs/parity.md); the work packages that close the gap are in
+[docs/parity-plan.md](docs/parity-plan.md).
 
-## The `pty` CLI (v0)
+## Install
+
+With Nix (flakes), from a checkout or straight from GitHub:
 
 ```sh
-cargo build                                   # builds the `pty` binary
-PTY=target/debug/pty
-
-$PTY run -- bash --norc --noprofile           # spawn a persistent session -> prints its id
-$PTY ls                                        # list sessions (--json for JSON)
-$PTY peek <id>                                 # print the current screen (ANSI)
-$PTY peek --plain <id>                         # ... as plain text
-$PTY peek -f <id>                              # follow output live (read-only; Ctrl-C to stop)
-$PTY peek --wait "Ready" -t 10 <id>            # wait until text appears
-$PTY send <id> --seq "echo hi" --seq key:return   # send an ordered key sequence
-$PTY send <id> "literal text"                  # or literal text (no newline)
-$PTY attach <id>                               # attach interactively (Ctrl+\ to detach)
-$PTY status <id>                               # session stats as JSON
-$PTY restart <id>                              # respawn with the same command
-$PTY rename <id> "My Service"                  # set a display label (also a lookup key)
-$PTY rm <id>                                   # kill (if running) and remove from the registry
-$PTY kill <id>                                 # terminate the session
-
-# Manifests (pty.toml):
-$PTY up [dir] [names...]                        # start sessions declared in ./pty.toml
-$PTY down [dir] [names...]                      # stop them
+nix build                                   # ./result/bin/pty, completions under ./result/share
+nix run . -- help
+nix profile install github:compoundingtech/pty-rust
 ```
 
-A `pty.toml` looks like:
+The flake builds hermetically: Ghostty's source and its Zig packages are
+fixed-output fetches, so `nix build` needs no network beyond the Nix cache.
+`nix flake check` also runs the test suite and verifies that the installed
+completion files are what the binary prints. `nix develop` opens a shell with
+the Rust toolchain and Zig, pointed at the same pre-fetched Ghostty.
 
-```toml
-prefix = "myapp"
+With Cargo (see the build requirements below):
 
-[sessions.web]
-command = "node server.js"
-cwd = ".."
-
-[sessions.web.env]
-PORT = "3000"
+```sh
+cargo install --path crates/pty
 ```
 
-Each session runs in a detached daemon that hosts the PTY and a libghostty
-terminal; clients connect to a per-session unix socket under `$PTY_ROOT`
-(default `~/.local/state/pty`) speaking the wire protocol (`protocol.rs`). The
-daemon replays the screen on attach and answers device queries (DA1/DSR) through
-libghostty, so the session behaves like a real terminal. Set `PTY_ROOT` to
-isolate a registry (e.g. for tests).
+Shell completions ship in [`completions/`](completions/) and are also printed
+by `pty completions <fish|bash|zsh>`.
 
-**Nesting prevention:** running `pty run` *inside* an existing pty session
-(detected via `PTY_SESSION`) runs the command directly instead of creating a
-session-inside-a-session; use `pty run -d` to force a background session anyway.
+## Usage
 
-## The testing harness (`pty-testkit`)
-
-The original `pty` project ships a `Session` testing harness: it spawns a
-process in a PTY, feeds the output into a headless `xterm.js`, and lets tests
-take "screenshots" (plain text + ANSI) and wait for on-screen content. This
-crate reimplements that harness in Rust, swapping the terminal emulator for
-libghostty:
-
-```
-   real process  ──stdout──▶  PTY  ──bytes──▶  libghostty Terminal  ──▶  Screenshot
-   (bash, ls, …)              (portable-pty)   (VT parse + grid)         { lines, text, ansi }
-        ▲                                            │
-        └──────────────  input / query replies  ◀────┘
+```sh
+pty run -d --name "API" -- node server.js    # start a session in the background
+pty list                                     # sessions (--json for programs)
+pty peek --plain API                         # the screen as plain text
+pty send API --seq "npm test" --seq key:return
+pty attach API                               # interactive; Ctrl+\ detaches
+pty kill API && pty rm API
+pty help                                     # every command; pty <cmd> --help for one
 ```
 
-- **`Session::spawn`** — spawn a command in a real PTY.
-- **`screenshot()`** → `{ lines, text, ansi }`, matching the TS `Screenshot`
-  (plain text via libghostty `Format::Plain`; ANSI via `Format::Vt`).
-- **`wait_for_text` / `wait_for_absent` / `wait_for`** — poll the screen.
-- **`send_keys` / `type_str` / `press("ctrl+c")`** — send input; named keys use
-  the same encoding table as `pty`'s `keys.ts`.
-- **`resize(rows, cols)`** — resize the PTY (SIGWINCH) and the emulator together.
-- **`title()`** — the OSC-set window title libghostty tracks.
-- Terminal **query replies** (DA1, DSR, …) that libghostty generates are
-  captured via `on_pty_write` and flushed back to the PTY, so programs that
-  block on a device-attributes response (e.g. fish) start promptly.
+Sessions live under `$PTY_ROOT` (default `~/.local/state/pty`): one unix socket,
+pid file, and metadata file per session. Set `PTY_ROOT` to isolate a registry,
+for example in tests.
 
-Because `Terminal` from libghostty is `!Send`, it lives on the test thread; a
-reader thread only ferries raw PTY bytes over a channel, which the main thread
-drains into the terminal on demand.
+`pty version` prints `0.13.<n>-rust+<short-sha>`: one minor above the Node line,
+a `rust` pre-release tag, and the commit it was built from.
 
-## Build requirements
+### If you are already inside a session
 
-- **Rust** (edition 2021; built with 1.97).
-- **Zig 0.15.2** on `PATH`. The `libghostty-vt-sys` build script fetches the
-  Ghostty source and compiles the VT core with `zig build`, so a matching Zig
-  toolchain must be installed. Install it with:
+**`run` and `attach` refuse to nest, and `--force` is how you say you meant
+it.** A session inside a session is usually a mistake — a detach key press then
+reaches the wrong one — so both commands stop and explain instead.
 
-  ```sh
-  curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ -C ~/.local/opt
-  ln -sf ~/.local/opt/zig-x86_64-linux-0.15.2/zig ~/.cargo/bin/zig   # ~/.cargo/bin is already on PATH for cargo
-  ```
+```sh
+pty attach --force API      # attach from inside another session
+pty run --force -- <cmd>    # create one from inside another session
+```
 
-The first build clones + compiles Ghostty's VT core (~20s); it is cached
-thereafter.
+**The refusal goes to standard error and exits 1**, in this tool and in the
+Node one. A script that captures only standard output sees an empty result
+and can mistake that for success, which is what happens if you forget
+`--force`; the exit code tells you the truth.
+
+`run` and `restart` are different and deliberately so: from inside a session
+`run` runs the command directly and `restart` restarts without attaching.
+Both did what was asked, so both exit 0.
+
+### Commands not in this build
+
+Three Node commands are deferred (see [docs/parity.md §12](docs/parity.md#12-candidates-to-leave-off)
+for the reasoning): `pty recover`, `pty evidence`, and `pty test`. Their help
+texts are kept verbatim so `--help` still describes them, but running them
+prints `pty <cmd>: not available in this build. See docs/parity.md.` and exits 1.
+
+### One known defect, documented rather than fixed
+
+**A session's lock files are not exclusive across a crash.** When a lock's
+holder has died, any process may steal it, and two processes stealing the same
+stale lock can both end up holding it. Measured on 2026-09-02: eight threads
+released together against one stale lock produced more than one winner in 386
+races out of 400.
+
+The **Node tool has the identical sequence and the identical defect**, so a
+shared `$PTY_ROOT` is no worse than either implementation alone, and neither
+one can be relied on here.
+
+**In ordinary use this does not arise.** Taking a lock still keeps two live,
+healthy processes apart. It needs a daemon that died holding a lock and two
+processes arriving together to clean up after it — typically two creators for
+the same session name.
+
+**Do not rely on these locks for correctness after a crash.** A correct steal
+needs an exclusive create that only one process can win, which means a second
+file in a directory both implementations read. That is a change to a protocol
+they share and has to be agreed between them, which is why it is written down
+here instead of fixed on one side. `crates/pty-core/src/registry/lock.rs` and
+`docs/hardening.md` carry the interleaving in full.
+
+## The crates
+
+A Cargo workspace of six crates under `crates/`:
+
+- **`pty-core`** — the wire protocol, session registry and locks, events,
+  metadata, names and tags, key/paste/duration/input parsing, `pty.toml`
+  manifests, and the client operations (attach loop, peek, send, status). No
+  terminal emulator, no Zig.
+- **`pty-terminal`** — the libghostty actor: owns the terminal, produces typed
+  snapshots and the VT/plain serializations, answers terminal queries.
+- **`pty-testkit`** — Playwright-style test sessions: spawn a process in a real
+  PTY, feed it to libghostty, take screenshots, wait for text, send named keys.
+- **`pty-tui`** — the TUI library (ratatui + crossterm): pane, theme, focus,
+  widgets, and the app runner behind the interactive session manager.
+- **`pty-conformance`** — the black-box suite that runs against any `pty`
+  binary, Node or Rust, chosen with `PTY_TEST_BIN`.
+- **`pty`** — the `pty` binary: the command-line interface, the per-session
+  daemon, and the remote bridge.
+
+## Building from source
+
+- Rust 1.88 or newer (edition 2024; `rust-version` is pinned in `Cargo.toml`).
+- Zig 0.15.2 on `PATH`, and `git`: the `libghostty-vt-sys` crate builds
+  Ghostty's terminal core from source with Zig.
+- The first build clones Ghostty at the commit `libghostty-vt-sys` pins and
+  lets Zig fetch Ghostty's own packages; both are cached under `target/` after
+  that. To build without network, point `GHOSTTY_SOURCE_DIR` at a Ghostty
+  checkout and `GHOSTTY_ZIG_SYSTEM_DIR` at a populated Zig package directory
+  (`flake.nix` shows how both are produced).
+
+```sh
+cargo build --release                        # target/release/pty
+```
 
 ## Running the tests
 
 ```sh
-cargo test
+cargo test --workspace                       # every crate's suite
+PTY_TEST_BIN=target/release/pty cargo test -p pty-conformance   # black-box, any binary
 ```
 
-173 tests pass:
+The workspace tests drive real programs through real PTYs and real daemons,
+with each test on its own `PTY_ROOT` under the temp dir. The conformance suite
+runs the same way against whichever binary `PTY_TEST_BIN` names, so it can be
+pointed at the Node `pty` to check the reference itself. Help texts and
+completion scripts are vendored byte for byte from the Node repository
+(`crates/pty/tests/fixtures/help/`, `completions/`) and the tests hold the
+binary to them.
 
-| Test file | Ported from | Count | Backend |
-| --- | --- | --- | --- |
-| `tests/keys.rs` | `tests/keys.test.ts` | 21 | pure |
-| `tests/duration.rs` | `tests/duration.test.ts` | 15 | pure |
-| `tests/env_isolation.rs` | `tests/env-isolation.test.ts` | 5 | pure |
-| `tests/input_parse.rs` | `tests/input-parse.test.ts` | 21 | pure |
-| `tests/mouse_parse.rs` | `tests/mouse-parse.test.ts` | 9 | pure |
-| `tests/protocol.rs` | `tests/protocol.test.ts` | 20 | pure |
-| `tests/ptyfile.rs` | `tests/ptyfile.test.ts` | 16 | pure |
-| `tests/paste.rs` | `tests/send-paste.test.ts` (wrapping) | 4 | pure |
-| `tests/terminal_queries.rs` (strip) | `tests/terminal-queries.test.ts` | 16 | pure |
-| `tests/terminal_queries.rs` (responses) | `tests/terminal-queries.test.ts` | 3 | **libghostty** |
-| `tests/terminal_spawn.rs` | `screenshot.test.ts` / `shells.test.ts` | 11 | **libghostty** |
-| `tests/terminal_fidelity.rs` | `screen-replay-altscreen` / `scrollback-fidelity` | 4 | **libghostty** |
-| `tests/interactive_tui.rs` | interactive-editing (Playwright-style) | 3 | **libghostty** |
-| `tests/parity.rs` | Node behavior parity cases | 7 | pure + **libghostty** |
-| `tests/parity_fixtures.rs` | shared Node/Rust JSON fixtures | 2 | **libghostty** |
-| `tests/registry_liveness.rs` | Node-compatible registry liveness | 1 | pure |
-| `tests/cli_e2e.rs` | `pty` CLI lifecycle / up-down / restart / attach (Ctrl+\\ detach + double-tap) / follow / nesting | 14 | **libghostty** |
-| doctest | — | 1 | — |
+### Reading a single failure from a full run
 
-`interactive_tui.rs` drives `bash`'s raw-mode readline through the harness —
-arrow-key cursor editing, `Ctrl-A` line-start jump, `Ctrl-C` line-discard — and
-asserts on how libghostty renders the in-place redraws. This is the marquee use
-case: send keystrokes, watch the screen update, assert the result.
+**One test failing in a whole-workspace run is not yet a defect. Re-run it
+alone before treating it as one.**
 
-The query-response tests prove libghostty answers device queries end-to-end:
-a program emits `ESC[c` / `ESC[6n` / `ESC[>c`, libghostty generates the reply
-(`ESC[?62;22c` / `ESC[1;1R` / `ESC[>1;0;0c`), and the harness flushes it back to
-the PTY. (libghostty does not answer the OSC 10/11 color queries without default
-colors configured, so those two TS response cases are intentionally not ported.)
-
-The libghostty-backed tests drive real programs and assert on the emulated
-screen: `echo`/`ls`/`ls -la` capture, ANSI color preservation, cursor
-positioning (CUP), CJK wide characters, clear-screen, bash input + echo, `ctrl+c`
-interrupt, `ctrl+d`, resize → SIGWINCH (`stty size`), OSC window-title tracking,
-alternate-screen enter/restore (`?1049h`/`?1049l`), scrollback retention, text
-styling (bold/underline) in the ANSI capture, and carriage-return overwrite.
-
-## Scope
-
-Ported so far (v0 + hardening): the **testing harness** (`Session` on
-libghostty), the **`pty` CLI + per-session daemon** (`run`/`ls`/`peek`/`send`/
-`attach`/`status`/`kill`/`up`/`down`/`restart`/`rename`/`rm`), the **wire
-protocol**, the **session registry** (`sessions.ts` layout), **pty.toml
-manifests**, and the pure utility modules the harness/CLI depend on (`keys`,
-`duration`, `input`, `queries`, `paste`).
-
-Still on the TypeScript side (not yet ported): the TUI framework + widgets,
-events log, tags, gc, remote/fabric, and the many higher-level CLI niceties
-(`exec`, `stats`, `tag`, filters, follow mode). The `pty` project is ~24.6k
-lines of tests across 108 files; this is a focused, faithful port of the core
-that proves libghostty can back a real `pty`, with the ported tests as the
-correctness net.
-
-## Layout
-
+```sh
+cargo test -p <crate> --test <binary> -- --exact --test-threads=1 <name>
 ```
-src/
-  bin/pty.rs      the `pty` CLI: run/ls/peek/send/attach/kill/status + __daemon
-  daemon.rs       per-session daemon: PTY + libghostty terminal, serves protocol
-  client.rs       client ops: peek / send / status / interactive attach
-  protocol.rs     wire packet framing (port of protocol.ts)
-  registry.rs     session dir + <name>.sock/.pid/.json (port of sessions.ts)
-  ptyfile.rs      pty.toml manifest parsing (port of ptyfile.ts)
-  session.rs      Session test harness: PTY (portable-pty) + libghostty Terminal
-  screenshot.rs   Screenshot { lines, text, ansi } capture
-  keys.rs         named-key → bytes (port of keys.ts)
-  duration.rs     parse/format durations (port of duration.ts)
-  input.rs        stdin key + SGR-mouse + Kitty CSI-u parsing (port of tui/input.ts)
-  queries.rs      terminal-query stripping (port of stripTerminalQueries)
-  paste.rs        bracketed-paste wrapping (port of paste.ts)
-examples/demo.rs  live libghostty screenshot loop (cargo run --example demo)
-tests/            ported test suites + CLI e2e (see table above)
+
+The suite runs 139 binaries in parallel, and each one drives real processes
+through real terminals. On a machine slow enough, one or two of them lose a
+race per run — **and which ones varies across the whole suite**, so a name you
+have never seen before is the normal case rather than a new regression.
+
+**Measured on 2026-09-02, and the two machines differ sharply.** Seventeen
+whole-workspace runs on one Linux host: fifteen completely clean, and the two
+that were not each named a real defect that was then fixed. No run there lost
+a race. Four runs on an Apple silicon laptop: one or two lost races every
+time, never the same ones, all green when run alone.
+
+**So do not chase these by name.** A failure worth fixing has a cause you can
+state — the two in this repository's history that looked like this both did: a
+sleep standing in for a handshake, in a test that then failed reliably once
+the timing was turned up. **A name that passes alone and has no such cause is
+a scheduling accident**, and hunting them one at a time is unbounded work.
+
+Whether a slower machine is the whole explanation is not established; there is
+one laptop and nothing to compare it against.
+
+### Checking the macOS build without a Mac
+
+`pty-core` deliberately has no Zig dependency, so it can be type-checked for
+Apple silicon from any machine:
+
+```sh
+rustup target add aarch64-apple-darwin
+cargo check -p pty-core --target aarch64-apple-darwin
+cargo check -p pty      --target aarch64-apple-darwin
 ```
+
+**This is worth running before you touch anything platform-specific.** It
+caught a call to `pipe2`, which Linux has and macOS does not, and it produced
+the same error a Mac did.
+
+Both crates that hold platform-specific code are covered, and the check really
+does compile the macOS branches — a deliberate error inside one is reported,
+and the host build is unaffected by it. Running the whole workspace's TESTS
+still needs a Mac.

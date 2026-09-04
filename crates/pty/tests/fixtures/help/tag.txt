@@ -1,0 +1,12 @@
+Usage: pty tag <ref>                           Show tags
+       pty tag <ref> key=value [key=value...]   Set tags
+       pty tag <ref> --rm key [--rm key...]     Remove tags
+
+Read or write tags on one session. Updates apply before removals.
+
+Flags:
+  --rm <key>           Remove a tag key (repeatable)
+
+Examples:
+  pty tag myserver role=web env=prod
+  pty tag myserver --rm env

@@ -1,0 +1,21 @@
+Usage:
+  pty tag-multi <selector> [--json] [--yes] [<ops>...]
+
+Selectors (pick one):
+  <name>...                explicit list of session names or displayNames
+  --filter-tag k=v         sessions matching tag (repeatable for AND)
+  --all                    every session
+
+Operations (presence flips command into write mode):
+  k=v                      set tag k to v
+  --rm k                   remove tag k
+
+Flags:
+  --json                   structured output (object: name → tags)
+  --yes / -y               required with --all when ops are present
+
+Examples:
+  pty tag-multi --all --json
+  pty tag-multi --filter-tag role=web env=prod
+  pty tag-multi sess-a sess-b --rm temp-flag
+  pty tag-multi --all --yes audit=2026-04-25

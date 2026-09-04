@@ -1,17 +1,29 @@
-[package]
-name = "pty-testkit"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
 
-[dependencies]
+[workspace.package]
+version = "0.13.0-rust"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/compoundingtech/pty-rust"
+
+[workspace.dependencies]
+# External crates, pinned to the versions in Cargo.lock.
 libc = "0.2.186"
 libghostty-vt = "0.2.1"
 portable-pty = "0.9.0"
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-toml = "1.1.3"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+indexmap = { version = "2.14.0", features = ["serde"] }
+notify = "8.2.0"
+toml = { version = "1.1.3", features = ["preserve_order"] }
 
-[dev-dependencies]
-libghostty-vt = "0.2.1"
-serde_json = "1.0.151"
+# Workspace crates.
+pty-core = { path = "crates/pty-core" }
+pty-terminal = { path = "crates/pty-terminal" }
+pty-testkit = { path = "crates/pty-testkit" }
+pty-tui = { path = "crates/pty-tui" }
+pty-conformance = { path = "crates/pty-conformance" }

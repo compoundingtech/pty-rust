@@ -1,0 +1,23 @@
+Usage: pty run [flags] -- <command> [args...]
+
+Create a session and attach to it (use -d to leave it running in the background).
+
+Flags:
+  --id <id>            Pin the on-disk id (sock/json filename; charset-validated, ≤ 104-byte sock path)
+  --name <label>       Display label (trimmed, single-line, ≤ 160 Unicode scalars)
+  --no-display-name    Skip the auto cwd+command label — just the id
+  -d, --detach         Create in the background; don't attach
+  -a, --attach         Create, OR attach if a session with the same id already exists
+  -e, --ephemeral      Force self-removal at exit even for strategy=permanent
+                       (non-permanent sessions already self-remove by default)
+  --tag key=value      Tag the session (repeatable)
+  --env KEY=VALUE      Overlay a child environment variable (repeatable)
+  --unset-env KEY      Remove an inherited environment variable (repeatable)
+  --tag keep=true      Exempt from reaping: keep metadata/logs after exit
+  --cwd <path>         Working directory for the command
+  --isolate-env        Scrub the child env to a safe allow-list (for remote-reachable sessions)
+  --force              Create even from inside another pty session (bypass the nesting guard)
+
+Examples:
+  pty run -- node server.js
+  pty run -d --name "API" --tag role=web --env PORT=3000 -- node server.js

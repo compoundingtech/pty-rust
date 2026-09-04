@@ -1,0 +1,21 @@
+Usage: pty attach [-r|--no-restart] [--force] [--remote <peer>] [--attach-stream-fd-v1 <fd>] <ref>
+
+Reconnect to a session (alias: pty a). Detach again with Ctrl+\.
+
+Flags:
+  -r, --auto-restart   Auto-restart the session if it has exited
+  --no-restart         Attach only while the session is running; never prompt
+                       or execute its stored command
+  --force              Attach even from inside another pty session (nested)
+  --remote <peer>      Attach a session on a fabric peer (over fabric); <ref> is
+                       the session's name/id ON THE REMOTE
+  --attach-stream-fd-v1 <fd>
+                       Machine mode for a running session. Write ordered framed
+                       GEOMETRY, SCREEN, DATA, and terminal EXIT or DETACH outcome
+                       to inherited fd (>= 3); keep stdin/stdout controlling TTY
+
+Examples:
+  pty attach myserver
+  pty attach -r myserver
+  pty attach --no-restart myserver
+  pty attach --remote hetzner myshell

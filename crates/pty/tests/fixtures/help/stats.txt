@@ -1,0 +1,11 @@
+Usage: pty stats [--json] [--all] [<ref>]
+
+Live CPU / memory / PIDs. Omit <ref> for every session.
+
+Flags:
+  --json               Emit stats as JSON (one snapshot)
+  --all                Include every session (with an explicit <ref> given)
+
+Examples:
+  pty stats
+  pty stats --json myserver

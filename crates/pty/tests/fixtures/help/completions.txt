@@ -1,0 +1,14 @@
+usage: pty completions <shell>
+
+Print a shell completion script to stdout.
+
+Shells:
+  fish
+  bash
+  zsh
+
+Examples:
+  pty completions fish > ~/.config/fish/completions/pty.fish
+  pty completions bash > /etc/bash_completion.d/pty
+  pty completions zsh  > "${fpath[1]}/_pty"
+

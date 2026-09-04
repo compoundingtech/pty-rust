@@ -1,0 +1,17 @@
+[package]
+name = "pty-terminal"
+description = "libghostty-backed terminal state for pty: the terminal actor, query answers, replay serialization, typed snapshots, and the embedding handle."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libghostty-vt.workspace = true
+portable-pty.workspace = true
+pty-core.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

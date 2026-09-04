@@ -1,0 +1,11 @@
+Usage: pty evidence snapshot --id <stable-id>
+       pty evidence remove --id <stable-id> --expected-generation <opaque>
+
+Read retained terminal evidence for one exact stable session generation, or
+remove that generation after the caller has durably consumed the evidence.
+Both operations emit exactly one tagged JSON document on stdout. Semantic
+outcomes exit 0; invalid arguments and operational failures exit nonzero.
+
+Examples:
+  pty evidence snapshot --id a1b2c3d4
+  pty evidence remove --id a1b2c3d4 --expected-generation 7f44b35e

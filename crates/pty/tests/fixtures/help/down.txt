@@ -1,0 +1,7 @@
+Usage: pty down [<dir>] [<name>...]
+
+Stop sessions declared in a pty.toml.
+
+Examples:
+  pty down
+  pty down web

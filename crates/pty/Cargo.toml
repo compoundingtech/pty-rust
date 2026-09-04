@@ -1,0 +1,29 @@
+[package]
+name = "pty"
+description = "The pty binary: persistent terminal sessions hosted by a per-session daemon, driven from the command line."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "pty"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+libghostty-vt.workspace = true
+portable-pty.workspace = true
+pty-core.workspace = true
+pty-terminal.workspace = true
+pty-tui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook = "0.3.18"
+
+[dev-dependencies]
+pty-testkit.workspace = true
+regex.workspace = true
+serde_json.workspace = true

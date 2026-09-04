@@ -1,0 +1,15 @@
+Usage: pty emit <type> [--json <payload>] [--text <string>]
+       pty emit <ref> <type> [--json <payload>] [--text <string>]
+
+Publish a user.* event to a session's event log. Inside a session the ref
+defaults to $PTY_SESSION. Types must start with "user." — "session_*", "state.*",
+"bell", etc. are reserved.
+
+Flags:
+  --json <payload>     Attach a JSON payload
+  --text <string>     Attach a text payload
+
+Examples:
+  pty emit user.build-done
+  pty emit user.progress --json '{"pct": 40}'
+  pty emit myserver user.tests-passed --json '{"n": 42}'

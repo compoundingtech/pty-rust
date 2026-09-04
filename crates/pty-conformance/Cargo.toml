@@ -1,0 +1,22 @@
+[package]
+name = "pty-conformance"
+description = "Black-box conformance suite that runs against any pty binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+portable-pty.workspace = true
+pty-core.workspace = true
+pty-testkit.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+
+[[bin]]
+name = "conformance-map"
+path = "src/bin/conformance_map.rs"
