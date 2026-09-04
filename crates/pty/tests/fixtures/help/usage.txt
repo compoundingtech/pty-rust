@@ -86,6 +86,8 @@ Lifecycle:
                                           permanent-respawn, exited-sweep
   pty gc --dry-run                        Preview without changing anything (alias: -n)
   pty gc --idle-days N                    Also reap permanents with no attach in N days
+  pty gc --keep-max-age <dur>             How long a `keep` tag holds a DEAD session against
+                                          the sweep (default 7d; 0 sweeps the backlog now)
   pty gc --fast-fail-window=N             Fast-fail window (seconds) for the respawn cap
                                           (default 60; per-session strategy.fast-fail-window wins)
   pty gc --fast-fail-limit=N              Consecutive fast fails before a permanent is flagged

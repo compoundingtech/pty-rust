@@ -8,10 +8,10 @@ Run: `PTY_TEST_BIN=$(which pty) cargo test -p pty-conformance` (Node) and `cargo
 
 ## Summary
 
-- Node suites: 120
-- Rust conformance tests: 648 (627 port a Node test, 21 cover the Rust-owned fixtures)
+- Node suites: 121
+- Rust conformance tests: 660 (635 port a Node test, 25 cover the Rust-owned fixtures)
 - Gated (`_node`/`_rust` pairs pointing at a decision record): 6 — the parity debt
-- cli: 55 suites, 55 with Rust tests, 0 to do
+- cli: 56 suites, 56 with Rust tests, 0 to do
 - not-portable: 49
 - protocol: 9 suites, 9 with Rust tests, 0 to do
 - unit: 7
@@ -51,6 +51,7 @@ Run: `PTY_TEST_BIN=$(which pty) cargo test -p pty-conformance` (Node) and `cargo
 | gc-flap-clear-badge-root-len.test.ts | cli | gc_badge.rs, pty_root.rs | 7 | 84, 118, 142, 163, 182, 197, 217 — root-length half in pty_root.rs; badge and restart bookkeeping-strip halves in gc_badge.rs; the flapping machinery itself is dropped in docs/parity.md §12 |
 | gc-flapping.test.ts | not-portable | — | 0 | dropped in docs/parity.md §12 (gc flapping classifier) |
 | gc-generation-guard.test.ts | not-portable | — | 0 | dropped in docs/parity.md §12 (gc permanent respawn) |
+| gc-keep-expiry.test.ts | cli | gc_keep_expiry.rs | 8 | 101, 113, 132, 155, 166, 188, 214, 239 — the keep-tag retention window in the sweep (Node PR #173) |
 | gc-parent-child.test.ts | cli | gc_parent_child.rs | 6 | 121, 140, 153, 169, 192, 213 — the library reapSkipped case (:92) is left out |
 | gc-permanent.test.ts | not-portable | — | 0 | dropped in docs/parity.md §12 (gc permanent respawn) |
 | help.test.ts | cli | help.rs | 2 | 104 — top-level usage only; per-command help belongs to the help work package |

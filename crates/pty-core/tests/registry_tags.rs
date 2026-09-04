@@ -1,7 +1,8 @@
 //! Tag rules: reserved keys, filter matching, `--filter-tag` extraction, the
-//! `keep` tag, exit-time reap precedence, and gc bookkeeping stripping.
+//! `keep` tag and its retention window, exit-time reap precedence, and gc
+//! bookkeeping stripping.
 
-use pty_core::registry::{self, TagMap};
+use pty_core::registry::{self, SessionMetadata, TagMap};
 
 fn tags(pairs: &[(&str, &str)]) -> TagMap {
     pairs
@@ -116,6 +117,61 @@ fn keep_tag_semantics() {
             "{no:?}"
         );
     }
+}
+
+/// The retention window that bounds `keep` in `pty gc`'s sweep: the anchor
+/// precedence, the record that has no age, and the zero that sweeps
+/// everything.
+///
+/// node: src/sessions.ts:1084-1109
+#[test]
+fn keep_expiry_window() {
+    let day = 24 * 60 * 60 * 1000;
+    assert_eq!(registry::DEFAULT_KEEP_MAX_AGE_MS, 7 * day);
+    let now = registry::parse_iso8601_ms("2026-09-04T12:00:00.000Z").unwrap();
+    let at = |offset_days: i64| registry::iso8601_from_epoch_ms(now - offset_days * day);
+
+    // `exitedAt` wins over `createdAt`: created long ago, died just now.
+    let fresh_exit = SessionMetadata {
+        created_at: at(30),
+        exited_at: Some(at(2)),
+        ..Default::default()
+    };
+    assert!(!registry::is_keep_expired(Some(&fresh_exit), now, 7 * day));
+    assert!(registry::is_keep_expired(Some(&fresh_exit), now, day));
+
+    // No exit record (a vanished session): `createdAt` is the anchor.
+    let vanished = SessionMetadata {
+        created_at: at(30),
+        ..Default::default()
+    };
+    assert!(registry::is_keep_expired(Some(&vanished), now, 7 * day));
+
+    // Neither timestamp, or an unparseable one: no age, so never expired —
+    // retaining an unaged record is the recoverable failure.
+    let unaged = SessionMetadata::default();
+    assert!(!registry::is_keep_expired(Some(&unaged), now, 7 * day));
+    let bogus = SessionMetadata {
+        created_at: "not a timestamp".into(),
+        ..Default::default()
+    };
+    assert!(!registry::is_keep_expired(Some(&bogus), now, 7 * day));
+    assert!(!registry::is_keep_expired(None, now, 7 * day));
+
+    // Zero is the explicit "sweep the backlog now": every record expires,
+    // including the unaged ones and a session that died this instant.
+    for meta in [&fresh_exit, &vanished, &unaged, &bogus] {
+        assert!(registry::is_keep_expired(Some(meta), now, 0));
+    }
+    assert!(registry::is_keep_expired(None, now, 0));
+
+    // The boundary is inclusive: exactly the window old is expired.
+    let exactly = SessionMetadata {
+        created_at: at(0),
+        exited_at: Some(at(7)),
+        ..Default::default()
+    };
+    assert!(registry::is_keep_expired(Some(&exactly), now, 7 * day));
 }
 
 /// node: src/sessions.ts:1069-1089
