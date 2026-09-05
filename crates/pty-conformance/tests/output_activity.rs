@@ -1,7 +1,8 @@
 //! `lastOutputAtMs`: the daemon records when the child last printed.
 //!
-//! The Node tool grew this field in its PR #168, merged on 2026-08-29
-//! (`docs/vrs/requirements.md` R14, `docs/disk-layout.md`). The contract is:
+//! The Node tool grew this field in its PR #168, merged on 2026-08-29 (the
+//! Node pty repository's `docs/vrs/requirements.md` R14 and
+//! `docs/disk-layout.md`, not this repository's `docs/`). The contract is:
 //!
 //! - absent until the session produces output, and absent on a record an
 //!   older daemon wrote — never zero, and never a claim of idleness;

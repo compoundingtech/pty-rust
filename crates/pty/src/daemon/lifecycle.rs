@@ -104,7 +104,8 @@ pub(crate) struct Daemon {
 
 /// How long the activity write waits after the first chunk of a burst.
 ///
-/// node: src/server.ts `scheduleActivityPersist` (1 s), docs/vrs R14.
+/// node: src/server.ts `scheduleActivityPersist` (1 s), the Node pty
+/// repository's `docs/vrs` R14 (not this repository's `docs/vrs`).
 const ACTIVITY_PERSIST_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// 32 hex characters, Node's `randomBytes(16).toString("hex")`.
