@@ -107,6 +107,19 @@ reports undefined macOS system symbols. A newer Zig does not help, because the
 Ghostty build requires 0.15.2 and refuses 0.16.0. Fresh checkouts and fresh Zig
 caches give the same result. The Nix route builds and runs on the same machine.
 
+**If you have no Nix, use the Node implementation that this port tracks.** It
+runs on macOS and builds from a checkout in seconds:
+
+```sh
+git clone https://github.com/compoundingtech/pty && cd pty
+npm install && npm run build
+./bin/pty --version                         # 0.12.0+<short-sha>
+```
+
+Build it from the checkout. The package is not on npm, so `npm install -g`
+does not work. The two tools read and write the same on-disk session registry,
+so you can move between them later.
+
 The Cargo route is verified on Linux: measured on x86_64 at commit `5d0d674`
 with Zig 0.15.2.
 
