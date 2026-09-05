@@ -1,0 +1,111 @@
+name: Conformance
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  SHARDS: 4
+
+jobs:
+  # Each shard runs a slice of the conformance files against BOTH binaries.
+  # Slicing by file rather than by binary keeps the two sides on the same
+  # runner: the suite drives real processes through real PTYs and races under
+  # load, so adding a second binary's work to a shard's CPU is exactly what we
+  # do not want.
+  #
+  # Sharding is here because the cost is the tests, not the harness. Measured
+  # 2026-09-05: five files cost 10.48 s as five cargo invocations and 10.27 s
+  # as one, and the tests inside account for 10.21 s of it. The work is
+  # parallel across machines and not compressible on one.
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this list and SHARDS above in step. The combine job counts the
+        # results it receives and refuses if the two disagree.
+        index: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - uses: actions/setup-node@v4
+        with:
+          # Match the major the Node pty's own CI uses so the reference
+          # runtime does not skew.
+          node-version: 22
+
+      # The reference commit is pinned rather than tracked. A checkout seven
+      # commits behind produced eight false divergences on 2026-09-05, and
+      # every one was an artifact of the stale reference.
+      - name: Build the Node pty at the pinned commit
+        run: |
+          ref=$(cat crates/pty-conformance/node-ref)
+          echo "Node reference: $ref"
+          git clone --filter=blob:none https://github.com/compoundingtech/pty /tmp/node-pty
+          git -C /tmp/node-pty checkout --detach "$ref"
+          (cd /tmp/node-pty && npm ci --silent && npm run build --silent)
+          echo "node pty: $(/tmp/node-pty/bin/pty --version)"
+
+      - name: Build
+        run: nix develop --command cargo build --workspace --release
+
+      - name: Conformance, both binaries, shard ${{ matrix.index }}
+        env:
+          PTY_NODE_CHECKOUT: /tmp/node-pty
+        run: |
+          files=$(ls crates/pty-conformance/tests/*.rs \
+            | xargs -n1 basename | sed 's/\.rs$//' \
+            | awk "NR % $SHARDS == ${{ matrix.index }}" | tr '\n' ' ')
+          echo "shard ${{ matrix.index }} of $SHARDS: $files"
+          nix develop --command ./scripts/conformance-both.sh \
+            --node /tmp/node-pty/bin/pty \
+            --rust "$PWD/target/release/pty" \
+            --out "$PWD/target/conformance" $files | tail -60
+
+      - name: Keep this shard's differences
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-${{ matrix.index }}
+          path: target/conformance/red.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  gate:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: red-*
+          path: /tmp/red
+
+      # THE CHECK RUNS ONCE, OVER THE COMBINED SET. Do not move it into the
+      # shards. `check-divergences.py` fails in two directions, and the second
+      # one — a recorded divergence that no longer happens — can only be
+      # decided by knowing the divergence appeared in NO shard. A per-shard
+      # check sees a quarter of the tests, so every entry belonging to another
+      # shard looks stale to it, and the gate would fail every run for a reason
+      # that is not true.
+      - name: Combine and gate
+        run: |
+          # A missing shard is not a pass. If one shard died, its slice of the
+          # tests was never compared, and both halves of the check would then
+          # be wrong: an unrecorded divergence in that slice goes unseen, and
+          # every ledger entry belonging to it looks stale. Refuse instead.
+          n=$(ls -d /tmp/red/red-*/ 2>/dev/null | wc -l)
+          if [ "$n" -ne "$SHARDS" ]; then
+            echo "expected $SHARDS shard results, found $n — a shard failed."
+            echo "The gate needs every shard's result to judge either direction."
+            ls -R /tmp/red || true
+            exit 1
+          fi
+          cat /tmp/red/red-*/red.txt > /tmp/red/all.txt
+          echo "combined divergences from all $SHARDS shards:"
+          cat /tmp/red/all.txt
+          python3 scripts/check-divergences.py /tmp/red/all.txt

@@ -7,29 +7,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
-
-      - uses: actions/setup-node@v4
-        with:
-          # The Node pty is built here as the behaviour reference. Match the
-          # major its own CI uses so the reference runtime does not skew.
-          node-version: 22
-
-      # The conformance suite compares this build against the Node pty, so the
-      # reference commit is pinned rather than tracked. A checkout seven
-      # commits behind produced eight false divergences on 2026-09-05, and
-      # every one was an artifact of the stale reference.
-      - name: Build the Node pty at the pinned commit
-        run: |
-          ref=$(cat crates/pty-conformance/node-ref)
-          echo "Node reference: $ref"
-          git clone --filter=blob:none https://github.com/compoundingtech/pty /tmp/node-pty
-          git -C /tmp/node-pty checkout --detach "$ref"
-          (cd /tmp/node-pty && npm ci --silent && npm run build --silent)
-          echo "node pty: $(/tmp/node-pty/bin/pty --version)"
 
       # Reporting only. Neither passes on main today — 1093 fmt diffs and 50
       # clippy warnings, measured 2026-09-05 — so gating either one needs a
@@ -49,39 +30,3 @@ jobs:
 
       - name: Workspace tests
         run: nix develop --command ./scripts/ci-test-workspace.sh
-
-      - name: Conformance, both binaries
-        env:
-          PTY_NODE_CHECKOUT: /tmp/node-pty
-        run: |
-          nix develop --command ./scripts/conformance-both.sh \
-            --node /tmp/node-pty/bin/pty \
-            --rust "$PWD/target/release/pty" \
-            --out "$PWD/target/conformance" | tail -100
-
-      # Fails on a difference nobody has recorded, AND on a record that no
-      # longer happens. The suite races like any other, so a first failure
-      # re-runs the differing files before it counts.
-      - name: Gate on unrecorded divergence
-        env:
-          PTY_NODE_CHECKOUT: /tmp/node-pty
-        run: |
-          if python3 scripts/check-divergences.py target/conformance/red.txt; then
-            exit 0
-          fi
-          echo "::warning::re-running the differing files once before failing"
-          files=$(cut -d: -f1 target/conformance/red.txt | sort -u | tr '\n' ' ')
-          echo "re-running: $files"
-          nix develop --command ./scripts/conformance-both.sh \
-            --node /tmp/node-pty/bin/pty \
-            --rust "$PWD/target/release/pty" \
-            --out "$PWD/target/conformance-retry" $files | tail -40
-          python3 scripts/check-divergences.py target/conformance-retry/red.txt
-
-      - name: Keep the logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: conformance-logs
-          path: target/conformance*/
-          retention-days: 14
