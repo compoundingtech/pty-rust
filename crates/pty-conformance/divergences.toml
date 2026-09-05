@@ -1,0 +1,51 @@
+# Recorded divergences between the Node pty and pty-rust.
+#
+# `scripts/conformance-both.sh` runs the conformance suite against both
+# binaries and writes the tests whose result differs.
+# `scripts/check-divergences.py` compares that list against this file and
+# fails when the two disagree, in EITHER direction:
+#
+#   * a divergence that is not recorded here — nobody has judged it;
+#   * a record here that no longer happens — the entry has gone stale.
+#
+# The second rule is the one that keeps this file honest. A ledger that only
+# grows becomes a list of claims nobody re-reads, and its entries outlive their
+# reasons. Failing on a resolved entry forces this file to describe today.
+#
+# Fields:
+#   test    `<conformance file>::<test name>`, as it appears in red.txt.
+#   side    "node" = the test fails on the Node binary.
+#           "rust" = it passes on Node and fails on pty-rust. Treat any new
+#                    rust-red entry as a regression until proven otherwise.
+#   kind    "intended"    — a difference we chose; point at its decision record.
+#           "node-defect" — the Node reference is wrong and pty-rust is right.
+#   reason  What differs, how it was measured, and why it is recorded and not
+#           fixed here.
+#
+# Measured against Node 86dcc5eb7bbca73ab9635ea07ab1018ec43ede61 (the commit in
+# `crates/pty-conformance/node-ref`) on 2026-09-05: 660/660 on pty-rust,
+# 658/660 on the Node pty, and the two below are the whole difference.
+
+[[divergence]]
+test = "completions::matches_every_checked_in_completion_artifact"
+side = "node"
+kind = "node-defect"
+reason = """
+The Node binary truncates `pty completions fish` when stdout is a pipe. \
+Measured on 2026-09-05: 123 of 167 lines through a pipe, and all 167 when \
+redirected to a file. `pty completions zsh` truncates the same way; the test \
+asserts fish first and stops there. This is the Node exit-before-flush \
+behaviour on an asynchronous pipe, not a completions-content difference — the \
+checked-in artifacts and pty-rust's output are byte identical. Reported to the \
+Node pty owner on 2026-09-05. Remove this entry when their fix lands.
+"""
+
+[[divergence]]
+test = "completions::prints_fish_bash_zsh_to_stdout"
+side = "node"
+kind = "node-defect"
+reason = """
+The same truncation, seen from the other end: the test requires the fish \
+output to end with a newline and the Node binary's piped output ends mid-line. \
+One defect, two tests. Remove both entries together.
+"""

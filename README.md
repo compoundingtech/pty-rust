@@ -292,7 +292,19 @@ cargo build --release                        # target/release/pty
 ```sh
 cargo test --workspace                       # every crate's suite
 PTY_TEST_BIN=target/release/pty cargo test -p pty-conformance   # black-box, any binary
+./scripts/conformance-both.sh                # both binaries, side by side
+python3 scripts/check-divergences.py         # fail on an unrecorded difference
 ```
+
+`conformance-both.sh` runs every conformance file against both binaries and
+writes `target/conformance/red.txt`: the tests whose result differs.
+`check-divergences.py` compares that against
+[`crates/pty-conformance/divergences.toml`](crates/pty-conformance/divergences.toml)
+and fails both when a difference is unrecorded and when a record no longer
+happens, so the ledger cannot drift into a list of stale claims. CI runs both.
+The Node commit it compares against is pinned in
+[`crates/pty-conformance/node-ref`](crates/pty-conformance/node-ref); a stale
+reference invents differences that are not there.
 
 The workspace tests drive real programs through real PTYs and real daemons,
 with each test on its own `PTY_ROOT` under the temp dir. The conformance suite

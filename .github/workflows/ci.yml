@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Node pty is the behaviour reference. The commit is pinned so a run can
+  # be reproduced, and so a change of reference is a reviewable diff rather
+  # than a silent drift. A stale reference manufactures false divergences: a
+  # local checkout seven commits behind once produced eight of them, and every
+  # one was an artifact.
+  NODE_REF_FILE: crates/pty-conformance/node-ref
+
+jobs:
+  linux:
+    name: linux (build, lint, tests, conformance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      - name: Record the Node reference
+        run: |
+          echo "NODE_REF=$(cat "$NODE_REF_FILE")" >> "$GITHUB_ENV"
+          echo "Node reference: $(cat "$NODE_REF_FILE")"
+
+      - name: Build the Node pty at the pinned commit
+        run: |
+          git clone --filter=blob:none https://github.com/compoundingtech/pty /tmp/node-pty
+          git -C /tmp/node-pty checkout --detach "$NODE_REF"
+          (cd /tmp/node-pty && npm ci --silent && npm run build --silent)
+          echo "node pty: $(/tmp/node-pty/bin/pty --version)"
+
+      # Reporting only, deliberately. Neither is a gate yet, because main does
+      # not pass either one today: `cargo fmt --check` reports 1093 diffs and
+      # clippy reports 50 warnings (measured 2026-09-05). Turning either into a
+      # gate needs a cleanup commit first, and that is a separate decision from
+      # adding CI. Printing the counts on every run keeps the debt visible
+      # instead of letting a disabled check hide it.
+      - name: Formatting (reporting only)
+        run: |
+          n=$(nix develop --command cargo fmt --all -- --check 2>/dev/null | grep -c '^Diff in' || true)
+          echo "cargo fmt --check: $n diff(s)"
+          echo "### Formatting: $n diff(s), not gated" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clippy (reporting only)
+        run: |
+          nix develop --command cargo clippy --workspace --all-targets 2>&1 | tee /tmp/clippy.log || true
+          n=$(grep -c '^warning' /tmp/clippy.log || true)
+          echo "clippy: $n warning(s)"
+          echo "### Clippy: $n warning(s), not gated" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: nix develop --command cargo build --workspace --release
+
+      - name: Workspace tests
+        run: nix develop --command cargo test --workspace
+
+      - name: Conformance, both binaries
+        env:
+          PTY_NODE_CHECKOUT: /tmp/node-pty
+        run: |
+          set -o pipefail
+          nix develop --command ./scripts/conformance-both.sh \
+            --node /tmp/node-pty/bin/pty \
+            --rust "$PWD/target/release/pty" \
+            --out "$PWD/target/conformance" | tail -100
+
+      - name: Gate on unrecorded divergence
+        env:
+          PTY_NODE_CHECKOUT: /tmp/node-pty
+        run: |
+          # The suite drives real processes through real PTYs, and the README
+          # records that one test per whole-suite run can lose a race on a
+          # loaded machine. A flake would otherwise read as a divergence, so a
+          # first failure re-runs only the affected files before it counts.
+          if python3 scripts/check-divergences.py target/conformance/red.txt; then
+            exit 0
+          fi
+          echo "::warning::re-running the differing files once before failing"
+          files=$(cut -d: -f1 target/conformance/red.txt | sort -u | tr '\n' ' ')
+          echo "re-running: $files"
+          nix develop --command ./scripts/conformance-both.sh \
+            --node /tmp/node-pty/bin/pty \
+            --rust "$PWD/target/release/pty" \
+            --out "$PWD/target/conformance-retry" $files | tail -40
+          python3 scripts/check-divergences.py target/conformance-retry/red.txt
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-logs
+          path: target/conformance*/
+          retention-days: 14
+
+  macos:
+    name: macos (nix build, macOS-only code)
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      # Cargo cannot build this on current macOS: Ghostty pins Zig 0.15.2 and
+      # that Zig cannot link the macOS 26.5 SDK. Nix is the working route, and
+      # it is the one the README tells a macOS reader to use.
+      - name: Build
+        run: nix build --print-build-logs
+
+      - name: It runs
+        run: ./result/bin/pty --version
+
+      # `crates/pty-core/src/proctable.rs` carries a macOS process-table reader
+      # that no Linux job ever compiles: libproc, and a sysctl fallback with
+      # hand-declared struct offsets. Offsets are exactly the kind of thing a
+      # future macOS moves, and only a macOS job can notice.
+      - name: Tests
+        run: nix develop --command cargo test --workspace
