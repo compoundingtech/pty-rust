@@ -164,6 +164,31 @@ pub fn throughput_budget(base: Duration) -> Duration {
 
 /// Poll `cond` every 10 ms until it returns true or the default deadline
 /// passes. Panics with `what` on timeout.
+///
+/// # Wait on the thing, not on a sign of it
+///
+/// **A test may only wait on the condition it is about to assert. If the only
+/// available signal is a precursor, say so in a comment and explain why it is
+/// sufficient.**
+///
+/// The second sentence is the whole rule. There are legitimate precursors, and
+/// a rule with no way out gets ignored. Requiring the author to write down
+/// *why* the precursor is enough is the mechanism: usually they cannot, and
+/// that is the moment they go and find the direct signal — which is often
+/// already in hand. The rig knows every daemon's pid, and the tests that
+/// flaked were watching its socket file instead.
+///
+/// Four flakes on this project came from breaking it, and each looked like a
+/// slow machine on its own:
+///
+/// - waiting for the first `Screen` frame to mean the child had written its
+///   escapes, when attach publishes the current screen and it may be empty;
+/// - waiting for a losing `pty run` to notice its own daemon die, when the
+///   answer — somebody else has published this name — was already on disk;
+/// - waiting for a socket file to vanish to mean the daemon had finished,
+///   when it unlinks the socket and keeps working.
+///
+/// See [`wait_for_process_gone`] for the third.
 pub fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     wait_until_for(what, deadline(), &mut cond);
 }
@@ -207,6 +232,23 @@ pub fn pid_alive(pid: i32) -> bool {
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Wait until `pid` is gone: exited AND reaped, or exited and unreapable.
+///
+/// **This is the direct signal for "the daemon has finished".** A test that
+/// waits for the socket file to disappear is waiting on a precursor: the daemon
+/// unlinks its socket and then keeps going — it still flushes events and may
+/// touch the lock files a test is about to write. Under load that gap is wide
+/// enough to lose a race in.
+///
+/// `has_process_exited_for_reap` rather than `!pid_alive`: an unreaped child
+/// still answers `kill(pid, 0)`, so the cheap predicate would wait out the
+/// whole budget for a process that has already died.
+pub fn wait_for_process_gone(pid: i32) {
+    wait_until(&format!("process {pid} to exit"), || {
+        pid <= 0 || pty_core::registry::has_process_exited_for_reap(pid)
+    });
 }
 
 /// Send `sig` to `pid`, ignoring errors.

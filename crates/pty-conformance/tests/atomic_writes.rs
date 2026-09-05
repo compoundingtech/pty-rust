@@ -89,11 +89,18 @@ fn twenty_racing_taggers_leave_valid_json_with_some_updates() {
 #[test]
 fn rm_cannot_clean_through_a_live_metadata_lock_holder() {
     let rig = Rig::new();
-    rig.daemon("at3", &["true"], DaemonOpts::keep());
+    let daemon = rig.daemon("at3", &["true"], DaemonOpts::keep());
+    let daemon_pid = daemon.pid();
     rig.wait_for_exit("at3");
     let meta = rig.meta_path("at3");
     let events = rig.root().join("at3.events.jsonl");
-    wait_until("daemon to release the socket", || !rig.socket_path("at3").exists());
+    // **Wait for the daemon, not for its socket.** The socket vanishing is a
+    // precursor: the daemon unlinks it and then keeps going, flushing events
+    // and touching the very lock file this test is about to write. Under load
+    // that gap is wide enough that `pty rm` ran against a lock the daemon had
+    // already cleared, removed the session, and the test failed asserting the
+    // refusal.
+    wait_for_process_gone(daemon_pid);
     let meta_before = std::fs::read(&meta).unwrap();
     let events_before = std::fs::read(&events).unwrap();
     let lock = rig.root().join("at3.lock");
