@@ -59,17 +59,27 @@ jobs:
             | xargs -n1 basename | sed 's/\.rs$//' \
             | awk "NR % $SHARDS == ${{ matrix.index }}" | tr '\n' ' ')
           echo "shard ${{ matrix.index }} of $SHARDS: $files"
+          # Do NOT pipe this to `tail`. A pipe buffers everything until the
+          # command ends, and a command killed by the job timeout never ends,
+          # so the output that would name the hanging file is discarded. That
+          # happened on 2026-09-05: shard 2 printed its file list, then
+          # nothing for 41 minutes. Stream it, and keep a copy for the
+          # artifact.
+          set -o pipefail
           nix develop --command ./scripts/conformance-both.sh \
             --node /tmp/node-pty/bin/pty \
             --rust "$PWD/target/release/pty" \
-            --out "$PWD/target/conformance" $files | tail -60
+            --out "$PWD/target/conformance" $files 2>&1 \
+            | stdbuf -oL -eL tee target/conformance/shard.log
 
       - name: Keep this shard's differences
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: red-${{ matrix.index }}
-          path: target/conformance/red.txt
+          path: |
+            target/conformance/red.txt
+            target/conformance/shard.log
           if-no-files-found: error
           retention-days: 14
 
@@ -98,9 +108,12 @@ jobs:
           # tests was never compared, and both halves of the check would then
           # be wrong: an unrecorded divergence in that slice goes unseen, and
           # every ledger entry belonging to it looks stale. Refuse instead.
-          n=$(ls -d /tmp/red/red-*/ 2>/dev/null | wc -l)
+          # Count red.txt files, not directories. A shard that hangs still
+          # uploads its streamed log, so the directory exists while the result
+          # does not, and counting directories would call that a complete set.
+          n=$(ls /tmp/red/red-*/red.txt 2>/dev/null | wc -l)
           if [ "$n" -ne "$SHARDS" ]; then
-            echo "expected $SHARDS shard results, found $n — a shard failed."
+            echo "expected $SHARDS red.txt results, found $n — a shard failed or hung."
             echo "The gate needs every shard's result to judge either direction."
             ls -R /tmp/red || true
             exit 1
