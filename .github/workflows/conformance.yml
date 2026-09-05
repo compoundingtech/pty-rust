@@ -65,6 +65,11 @@ jobs:
           # happened on 2026-09-05: shard 2 printed its file list, then
           # nothing for 41 minutes. Stream it, and keep a copy for the
           # artifact.
+          # tee opens its file when the pipeline starts, which is before the
+          # script has created its --out directory. Without this mkdir it dies
+          # instantly with "No such file or directory", and pipefail then fails
+          # a shard whose work was perfect.
+          mkdir -p target/conformance
           set -o pipefail
           nix develop --command ./scripts/conformance-both.sh \
             --node /tmp/node-pty/bin/pty \
