@@ -2,9 +2,10 @@
 //! `--filter-tag` matching, the `keep` tag, exit-time reap precedence, and
 //! the gc bookkeeping keys a manual restart strips.
 //!
-//! node: src/tags.ts; src/sessions.ts:1020-1097; src/cli.ts:4081-4100
+//! node: src/tags.ts; src/sessions.ts:1020-1109; src/cli.ts:4081-4100
 
-use super::metadata::TagMap;
+use super::metadata::{SessionMetadata, TagMap};
+use super::time::parse_iso8601_ms;
 
 /// Keys pty itself treats as bookkeeping and hides from the default
 /// listing (`pty list --tags` shows them).
@@ -54,7 +55,9 @@ pub fn extract_filter_tags(args: &mut Vec<String>) -> Result<TagMap, String> {
     Ok(tags)
 }
 
-/// Tag key that exempts a session from every form of dead-session reaping.
+/// Tag key that exempts a session from the daemon's exit-time self-reap
+/// unconditionally, and from `pty gc`'s sweep for a bounded window
+/// ([`DEFAULT_KEEP_MAX_AGE_MS`]).
 ///
 /// node: src/sessions.ts:1020
 pub const KEEP_TAG: &str = "keep";
@@ -76,6 +79,47 @@ pub fn is_keep_requested(tags: Option<&TagMap>) -> bool {
     match tags.and_then(|t| t.get(KEEP_TAG)) {
         None => false,
         Some(raw) => !reads_as_no(raw),
+    }
+}
+
+/// How long `keep` holds a dead session against `pty gc`'s sweep, unless
+/// the operator overrides it with `pty gc --keep-max-age <dur>`. Seven days
+/// is long enough that "I killed it Friday, I'll look Monday" still works,
+/// and short enough that a fleet of agents tagging every session cannot
+/// grow the registry without bound.
+///
+/// node: src/sessions.ts:1084 (`DEFAULT_KEEP_MAX_AGE_MS`)
+pub const DEFAULT_KEEP_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Has a dead `keep`-tagged session outlived its retention window?
+///
+/// Age is anchored on `exitedAt` when the daemon wrote an exit record, else
+/// `createdAt` (a `vanished` session never wrote one) — the same anchor
+/// precedence `pty list --older-than` uses. Metadata carrying neither, or an
+/// unparseable timestamp, has no age and therefore never expires: retaining
+/// an unaged record is the recoverable failure, deleting it is not.
+///
+/// `max_age_ms <= 0` expires everything, including unaged records — that is
+/// the explicit "sweep the keep backlog now" request, not an inference from
+/// a timestamp. Callers must apply this to dead sessions only; a running
+/// session is never a sweep candidate regardless of its age.
+///
+/// node: src/sessions.ts:1098-1109 (`isKeepExpired`)
+pub fn is_keep_expired(metadata: Option<&SessionMetadata>, now_ms: i64, max_age_ms: i64) -> bool {
+    if max_age_ms <= 0 {
+        return true;
+    }
+    let Some(meta) = metadata else {
+        return false;
+    };
+    let anchor = meta
+        .exited_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(meta.created_at.as_str());
+    match parse_iso8601_ms(anchor) {
+        Some(ts) => now_ms - ts >= max_age_ms,
+        None => false,
     }
 }
 

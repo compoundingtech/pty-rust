@@ -1,4 +1,4 @@
-Usage: pty gc [-n] [--idle-days N] [--fast-fail-window=N] [--fast-fail-limit=N]
+Usage: pty gc [-n] [--idle-days N] [--keep-max-age <dur>] [--fast-fail-window=N] [--fast-fail-limit=N]
        pty gc --print-launchd-plist [--interval=N]
 
 One reconciliation pass: sweep exited/vanished, orphan-kill `parent=<name>` children,
@@ -6,11 +6,14 @@ reap abandoned permanents, respawn `strategy=permanent` sessions.
 
 Non-permanent sessions remove themselves as they exit, so the sweep is a backstop:
 it mainly catches `vanished` sessions, whose daemon was killed outright and so
-never ran its own cleanup. Sessions tagged `keep` are never swept.
+never ran its own cleanup. A session tagged `keep` is swept only once it has been
+dead longer than --keep-max-age; running sessions are never swept.
 
 Flags:
   -n, --dry-run           Preview without changing anything
   --idle-days N           Also reap permanents with no attach in N days
+  --keep-max-age <dur>    How long `keep` holds a DEAD session against the sweep
+                          (default 7d; 0 sweeps every dead keep session now)
   --fast-fail-window=N    Fast-fail window seconds (default 60; per-session tag wins)
   --fast-fail-limit=N     Consecutive fast fails before flapping (default 3; per-session tag wins)
   --print-launchd-plist   Print a macOS launchd plist that runs 'pty gc' on an interval
@@ -18,4 +21,5 @@ Flags:
 
 Examples:
   pty gc --dry-run
+  pty gc --keep-max-age 0
   pty gc --print-launchd-plist > ~/Library/LaunchAgents/com.compoundingtech.pty.gc.plist

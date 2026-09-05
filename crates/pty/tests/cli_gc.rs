@@ -22,22 +22,22 @@ fn sweeps_gone_sessions_and_keeps_kept_ones() {
     let out = rig.ok(&["gc", "-n"]);
     assert_eq!(
         out.stdout,
-        "Would remove: ex\nWould remove: van\nKept (keep tag): kept — remove the keep tag to reap it\nWould clean up 2 stale sessions. (Dry run — no changes made.)\n"
+        "Would remove: ex\nWould remove: van\nKept (keep tag): kept — swept once dead for 7d, or remove the keep tag to reap it now\nWould clean up 2 stale sessions. (Dry run — no changes made.)\n"
     );
     assert!(rig.exists("van.json") && rig.exists("ex.json"));
     let out = rig.ok(&["gc"]);
     assert_eq!(
         out.stdout,
-        "Removed: ex\nRemoved: van\nKept (keep tag): kept — remove the keep tag to reap it\nCleaned up 2 stale sessions.\n"
+        "Removed: ex\nRemoved: van\nKept (keep tag): kept — swept once dead for 7d, or remove the keep tag to reap it now\nCleaned up 2 stale sessions.\n"
     );
     assert!(!rig.exists("van.json") && !rig.exists("ex.json"));
     assert!(rig.exists("kept.json") && rig.exists("perm.json"));
     let out = rig.ok(&["gc"]);
-    assert_eq!(out.stdout, "Kept (keep tag): kept — remove the keep tag to reap it\nNothing to clean up.\n");
+    assert_eq!(out.stdout, "Kept (keep tag): kept — swept once dead for 7d, or remove the keep tag to reap it now\nNothing to clean up.\n");
     rig.write_meta("one", json!({}));
     assert_eq!(
         rig.ok(&["gc"]).stdout,
-        "Removed: one\nKept (keep tag): kept — remove the keep tag to reap it\nCleaned up 1 stale session.\n"
+        "Removed: one\nKept (keep tag): kept — swept once dead for 7d, or remove the keep tag to reap it now\nCleaned up 1 stale session.\n"
     );
 }
 
@@ -66,7 +66,7 @@ fn kills_orphan_children() {
     let out = rig.ok(&["gc", "--dry-run"]);
     assert_eq!(
         out.stdout,
-        "Would kill orphan child: child-dead (parent dead-parent dead)\nWould kill orphan child: child-missing (parent nonexistent-parent missing)\nWould remove: child-dead\nWould remove: child-missing\nKept (keep tag): dead-parent — remove the keep tag to reap it\nWould clean up 2 orphan children, 2 stale sessions. (Dry run — no changes made.)\n"
+        "Would kill orphan child: child-dead (parent dead-parent dead)\nWould kill orphan child: child-missing (parent nonexistent-parent missing)\nWould remove: child-dead\nWould remove: child-missing\nKept (keep tag): dead-parent — swept once dead for 7d, or remove the keep tag to reap it now\nWould clean up 2 orphan children, 2 stale sessions. (Dry run — no changes made.)\n"
     );
     assert!(rig.exists("child-dead.json"));
 
@@ -76,7 +76,7 @@ fn kills_orphan_children() {
     let out = rig.ok(&["gc"]);
     assert_eq!(
         out.stdout,
-        "Killed orphan child: child-dead (parent dead-parent dead)\nKilled orphan child: child-missing (parent nonexistent-parent missing)\nKept (keep tag): dead-parent — remove the keep tag to reap it\nCleaned up 2 orphan children.\n"
+        "Killed orphan child: child-dead (parent dead-parent dead)\nKilled orphan child: child-missing (parent nonexistent-parent missing)\nKept (keep tag): dead-parent — swept once dead for 7d, or remove the keep tag to reap it now\nCleaned up 2 orphan children.\n"
     );
     assert!(!rig.exists("child-dead.json") && !rig.exists("child-missing.json"));
     assert!(rig.exists("happy-child.json") && rig.exists("live-parent.json"));

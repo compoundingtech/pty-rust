@@ -1,6 +1,7 @@
-//! `pty gc [-n|--dry-run]`: reclaim registry debris, kill orphaned
-//! `parent=<id>` children, sweep exited/vanished sessions (honouring the
-//! `keep` tag), and prune dead `:l<pid>-<rand>` layout tags.
+//! `pty gc [-n|--dry-run] [--keep-max-age <dur>]`: reclaim registry debris,
+//! kill orphaned `parent=<id>` children, sweep exited/vanished sessions
+//! (honouring the `keep` tag until it expires), and prune dead
+//! `:l<pid>-<rand>` layout tags.
 //! `pty gc --print-launchd-plist [--interval N]` prints a launchd job.
 //!
 //! The permanent-respawn, flapping and abandoned-reap steps of Node's gc
@@ -8,22 +9,23 @@
 //! dead session out of the sweep. `--idle-days` and `--fast-fail-*` belonged
 //! to those steps: they are accepted and ignored.
 //!
-//! node: src/cli.ts:1411-1453 (parsing), 3089-3202 (`cmdGc`), 3224-3276
+//! node: src/cli.ts:1450-1500 (parsing), 3185-3316 (`cmdGc`), 3338-3390
 //! (`printLaunchdPlist`); src/sessions.ts:620-880 (raw debris, observed
-//! cleanup, `reapObservedSession`), 1521-1724 (`gc`), 2026-2075
-//! (`pruneOrphanLayoutTags`)
+//! cleanup, `reapObservedSession`), 1084-1109 (the keep window), 1596-1806
+//! (`gc`), 2140-2189 (`pruneOrphanLayoutTags`)
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use pty_core::duration::{format_duration, parse_duration};
 use pty_core::registry::{
-    self, DEFAULT_SOCKET_PROBE_BUDGET, SessionInfo, TagMap, cleanup_all_while_locked,
-    cleanup_socket, default_session_dir, events_path, has_process_exited_for_reap,
-    is_keep_requested, metadata_matches_observation, metadata_path, pid_alive,
-    probe_sockets_within_budget, read_metadata, read_pid, read_pid_with, recovery_revision_path,
-    session_dir, socket_path, update_tags, with_both_locks,
+    self, DEFAULT_KEEP_MAX_AGE_MS, DEFAULT_SOCKET_PROBE_BUDGET, SessionInfo, TagMap,
+    cleanup_all_while_locked, cleanup_socket, default_session_dir, events_path,
+    has_process_exited_for_reap, is_keep_expired, is_keep_requested, metadata_matches_observation,
+    metadata_path, now_epoch_ms, pid_alive, probe_sockets_within_budget, read_metadata, read_pid,
+    read_pid_with, recovery_revision_path, session_dir, socket_path, update_tags, with_both_locks,
 };
 
 use super::argv::js_parse_int;
@@ -36,6 +38,7 @@ pub fn run(gc_args: &[String]) -> CliResult {
     let dry_run = gc_args.iter().any(|a| a == "--dry-run" || a == "-n");
     let print_plist = gc_args.iter().any(|a| a == "--print-launchd-plist");
     let mut interval: i64 = 30;
+    let mut keep_max_age_ms = DEFAULT_KEEP_MAX_AGE_MS;
     let parse_positive = |flag: &str, raw: &str| -> Result<i64, CliError> {
         match js_parse_int(raw) {
             Some(v) if v > 0 => Ok(v),
@@ -43,6 +46,20 @@ pub fn run(gc_args: &[String]) -> CliResult {
                 "pty gc: {flag} expects a positive integer (got \"{raw}\")"
             ))),
         }
+    };
+    // Durations, unlike the integer flags, have a meaningful zero: `0` means
+    // "the keep exemption is over, sweep the backlog now". The unit-less
+    // spelling is accepted only for zero, since `--keep-max-age 7` would
+    // otherwise be ambiguous between seconds and days.
+    let parse_age = |flag: &str, raw: &str| -> Result<i64, CliError> {
+        if raw.trim() == "0" {
+            return Ok(0);
+        }
+        parse_duration(raw).ok_or_else(|| {
+            CliError(format!(
+                "pty gc: {flag} expects a duration like 12h, 7d, or 0 (got \"{raw}\")"
+            ))
+        })
     };
     // The dropped tuning flags: consumed with their value, never validated.
     const IGNORED: [&str; 3] = ["--idle-days", "--fast-fail-window", "--fast-fail-limit"];
@@ -54,6 +71,11 @@ pub fn run(gc_args: &[String]) -> CliResult {
             interval = parse_positive("--interval", &gc_args[i])?;
         } else if let Some(raw) = a.strip_prefix("--interval=") {
             interval = parse_positive("--interval", raw)?;
+        } else if a == "--keep-max-age" && i + 1 < gc_args.len() {
+            i += 1;
+            keep_max_age_ms = parse_age("--keep-max-age", &gc_args[i])?;
+        } else if let Some(raw) = a.strip_prefix("--keep-max-age=") {
+            keep_max_age_ms = parse_age("--keep-max-age", raw)?;
         } else if IGNORED.contains(&a) && i + 1 < gc_args.len() {
             i += 1;
         }
@@ -63,7 +85,7 @@ pub fn run(gc_args: &[String]) -> CliResult {
         print_launchd_plist(interval);
         return Ok(0);
     }
-    cmd_gc(dry_run)
+    cmd_gc(dry_run, keep_max_age_ms)
 }
 
 /// What one pass did (or would do).
@@ -71,6 +93,10 @@ pub fn run(gc_args: &[String]) -> CliResult {
 struct GcResult {
     removed: Vec<String>,
     kept: Vec<String>,
+    /// Dead sessions swept despite a `keep` tag because they outlived the
+    /// retention window. Disjoint from `removed`, which holds the untagged
+    /// sweep, so the two reasons are reported apart.
+    keep_expired: Vec<String>,
     killed_orphan_children: Vec<OrphanKill>,
     reap_skipped: Vec<ReapSkip>,
 }
@@ -99,9 +125,9 @@ struct PrunedTags {
 
 /// `cmdGc`.
 ///
-/// node: src/cli.ts:3089-3202
-fn cmd_gc(dry_run: bool) -> CliResult {
-    let result = gc(dry_run);
+/// node: src/cli.ts:3185-3316
+fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
+    let result = gc(dry_run, keep_max_age_ms);
     let pruned = prune_orphan_layout_tags(dry_run);
 
     let killed_verb = if dry_run { "Would kill orphan child" } else { "Killed orphan child" };
@@ -121,10 +147,21 @@ fn cmd_gc(dry_run: bool) -> CliResult {
     for name in &result.removed {
         println!("{remove_verb}: {name}");
     }
+    // Reported apart from the plain sweep above: an operator who tagged
+    // these sessions asked for them to survive, so the reason they went away
+    // anyway has to be visible rather than looking like the keep tag was
+    // ignored.
+    let window = format_duration(keep_max_age_ms);
+    for name in &result.keep_expired {
+        println!("{remove_verb} (keep expired after {window}): {name}");
+    }
     // A kept session is not an action; it is printed so "why is this dead
-    // session still listed?" has a visible answer.
+    // session still listed?" has a visible answer, naming the window it is
+    // counting down.
     for name in &result.kept {
-        println!("Kept (keep tag): {name} — remove the keep tag to reap it");
+        println!(
+            "Kept (keep tag): {name} — swept once dead for {window}, or remove the keep tag to reap it now"
+        );
     }
     for p in &pruned {
         println!(
@@ -142,6 +179,7 @@ fn cmd_gc(dry_run: bool) -> CliResult {
     let total_actions = result.killed_orphan_children.len()
         + result.reap_skipped.len()
         + result.removed.len()
+        + result.keep_expired.len()
         + total_tags;
     if total_actions == 0 {
         println!(
@@ -165,6 +203,10 @@ fn cmd_gc(dry_run: bool) -> CliResult {
     if n > 0 {
         parts.push(format!("{n} stale {}", plural(n, "session", "sessions")));
     }
+    let n = result.keep_expired.len();
+    if n > 0 {
+        parts.push(format!("{n} keep-expired {}", plural(n, "session", "sessions")));
+    }
     if total_tags > 0 {
         parts.push(format!(
             "{total_tags} orphan {}",
@@ -181,8 +223,8 @@ fn cmd_gc(dry_run: bool) -> CliResult {
 
 /// The pass.
 ///
-/// node: src/sessions.ts:1521-1724
-fn gc(dry_run: bool) -> GcResult {
+/// node: src/sessions.ts:1596-1806
+fn gc(dry_run: bool, keep_max_age_ms: i64) -> GcResult {
     let mut result = GcResult::default();
 
     // Raw debris: runtime files whose metadata is missing or malformed.
@@ -235,8 +277,10 @@ fn gc(dry_run: bool) -> GcResult {
     }
 
     // STEP 3: the historic sweep. Exited/vanished non-permanent sessions
-    // lose their metadata; `keep` exempts.
+    // lose their metadata; `keep` exempts them, but only until they have
+    // been dead longer than the retention window.
     let final_list = if dry_run { initial } else { registry::list_sessions() };
+    let now_ms = now_epoch_ms();
     for s in &final_list {
         if !s.is_gone() {
             continue;
@@ -245,12 +289,18 @@ fn gc(dry_run: bool) -> GcResult {
         if tags.and_then(|t| t.get("strategy")).map(String::as_str) == Some("permanent") {
             continue;
         }
-        if is_keep_requested(tags) {
+        let keep_requested = is_keep_requested(tags);
+        if keep_requested && !is_keep_expired(s.metadata.as_ref(), now_ms, keep_max_age_ms) {
             result.kept.push(s.name.clone());
             continue;
         }
         if dry_run || cleanup_observed_session(s) {
-            result.removed.push(s.name.clone());
+            let bucket = if keep_requested {
+                &mut result.keep_expired
+            } else {
+                &mut result.removed
+            };
+            bucket.push(s.name.clone());
         }
     }
     result

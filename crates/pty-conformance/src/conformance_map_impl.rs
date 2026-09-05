@@ -64,6 +64,7 @@ const SUITES: &[(&str, Kind, &str)] = &[
     ("gc-flap-clear-badge-root-len", Kind::Cli, "root-length half in pty_root.rs; badge and restart bookkeeping-strip halves in gc_badge.rs; the flapping machinery itself is dropped in docs/parity.md §12"),
     ("gc-flapping", Kind::NotPortable, "dropped in docs/parity.md §12 (gc flapping classifier)"),
     ("gc-generation-guard", Kind::NotPortable, "dropped in docs/parity.md §12 (gc permanent respawn)"),
+    ("gc-keep-expiry", Kind::Cli, "the keep-tag retention window in the sweep (Node PR #173)"),
     ("gc-parent-child", Kind::Cli, "the library reapSkipped case (:92) is left out"),
     ("gc-permanent", Kind::NotPortable, "dropped in docs/parity.md §12 (gc permanent respawn)"),
     ("gc", Kind::Cli, "debris, orphan tag prune, dry-run, launchd plist (with the plist half of pty-root.test.ts)"),
