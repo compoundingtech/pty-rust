@@ -13,13 +13,41 @@ meant as a drop-in: same commands, flags, texts, JSON shapes, exit codes, files
 under `$PTY_ROOT`, and socket protocol, so the two implementations can share a
 registry while a fleet migrates.
 
+## Where it stands
+
+**It is the daily driver on two machines** — an arm64 Mac and an x86_64 Linux
+box — and has been since 2026-09-02. That is the honest measure of "does it
+work": it is what those machines run, not a demo.
+
+**The documented command surface matches the Node tool exactly.** Both
+`pty help` outputs are 122 lines and every command appears in both. Three are
+deferred rather than missing — `pty recover`, `pty evidence` and `pty test`
+keep their help text and print
+`pty <cmd>: not available in this build. See docs/parity.md.`
+
+**1357 tests pass**, including a conformance suite that runs against *either*
+binary. That is the part worth knowing: the two implementations are held to the
+same assertions rather than compared by hand, so a behavioural difference fails
+a test instead of surfacing later on somebody's machine.
+
+**What is not finished** is written down rather than implied: the surface-by-
+surface state is in [docs/parity.md](docs/parity.md), the decisions where the
+two tools deliberately differ are in [docs/decisions/](docs/decisions/), and the
+limits worth knowing before you rely on it are
+[below](#one-known-defect-documented-rather-than-fixed).
+
+**There are no prebuilt binaries yet.** You build it — see
+[Install](#install) — and [Which systems it runs
+on](#which-systems-it-runs-on) says what a built binary needs.
+
 ## Direction: compatibility and embedding
 
 The long-term target is a behavior-compatible Rust implementation of the Node
 `pty`, plus a first-class Rust API for embedding a live terminal in clients such
 as Fractal. The Node implementation is the behavioral reference while the port
-converges. This README does not claim that the current experiment has reached
-full parity.
+converges. **This README does not claim full parity**, and
+[docs/parity.md](docs/parity.md) is where the remaining gaps are named surface by
+surface.
 
 Compatibility means that the same user-visible operations and wire messages have
 the same result. It does not require identical source code or internal design.
