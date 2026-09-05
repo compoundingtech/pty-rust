@@ -101,12 +101,36 @@ With Cargo (see the build requirements below):
 cargo install --path crates/pty
 ```
 
+**On macOS, use Nix instead.** The Cargo route fails on macOS 26.6 with the
+26.5 SDK. Ghostty pins Zig 0.15.2, and that Zig cannot link the 26.5 SDK: it
+reports undefined macOS system symbols. A newer Zig does not help, because the
+Ghostty build requires 0.15.2 and refuses 0.16.0. Fresh checkouts and fresh Zig
+caches give the same result. The Nix route builds and runs on the same machine.
+
+**If you have no Nix, use the Node implementation that this port tracks.** It
+runs on macOS and builds from a checkout in seconds:
+
+```sh
+git clone https://github.com/compoundingtech/pty && cd pty
+npm install && npm run build
+./bin/pty --version                         # 0.12.0+<short-sha>
+```
+
+Build it from the checkout. The package is not on npm, so `npm install -g`
+does not work. The two tools read and write the same on-disk session registry,
+so you can move between them later.
+
+The Cargo route is verified on Linux: measured on x86_64 at commit `5d0d674`
+with Zig 0.15.2.
+
 Shell completions ship in [`completions/`](completions/) and are also printed
 by `pty completions <fish|bash|zsh>`.
 
 ## Which systems it runs on
 
-**There are no prebuilt binaries yet.** Today you build it, with Nix or Cargo.
+**There are no prebuilt binaries yet.** Today you build it. Nix works on Linux
+and macOS. Cargo works on Linux; on macOS it fails, and the Install section
+above says why.
 This section says what a built binary needs, because that is the question a
 release has to answer.
 
@@ -250,7 +274,9 @@ A Cargo workspace of six crates under `crates/`:
 
 - Rust 1.88 or newer (edition 2024; `rust-version` is pinned in `Cargo.toml`).
 - Zig 0.15.2 on `PATH`, and `git`: the `libghostty-vt-sys` crate builds
-  Ghostty's terminal core from source with Zig.
+  Ghostty's terminal core from source with Zig. The version is exact. Ghostty
+  refuses 0.16.0, and 0.15.2 cannot link the macOS 26.5 SDK, so a source build
+  on current macOS needs Nix.
 - The first build clones Ghostty at the commit `libghostty-vt-sys` pins and
   lets Zig fetch Ghostty's own packages; both are cached under `target/` after
   that. To build without network, point `GHOSTTY_SOURCE_DIR` at a Ghostty
