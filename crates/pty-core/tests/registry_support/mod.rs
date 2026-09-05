@@ -10,6 +10,57 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Remove test directories under the temporary directory whose creating
+/// process is gone.
+///
+/// **Five rigs create these and they use three different name shapes** —
+/// `pty-<exe>-<pid>`, `pty-e2e-<pid>-<n>`, `pty-ptyfile-<tag>-<pid>-<n>` — so
+/// this matches on the pid wherever it appears rather than on any one shape.
+/// Whichever rig runs first cleans up after all of them.
+///
+/// **Only `ESRCH` counts as gone.** `EPERM` means the pid exists and is
+/// somebody else's, and a still-running test binary needs its directory.
+/// Leaving one behind is the safe error; deleting a live process's registry
+/// out from under it is not.
+///
+/// Measured on 2026-09-05: one full workspace run left 22 directories behind,
+/// and nothing ever removed them. Statics do not drop, and a test binary that
+/// is killed would not run a destructor anyway, so this cleans up on the way
+/// IN rather than on the way out.
+fn definitely_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks for existence and permission.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+fn reap_dead_roots(tmp: &Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    let me = std::process::id() as i32;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix("pty-") else {
+            continue;
+        };
+        // **The FIRST all-digit component, not any of them.** Every shape puts
+        // the pid there and some put a counter after it, and a counter that
+        // happened to equal a dead pid would otherwise delete a live test's
+        // directory.
+        let dead = rest
+            .split('-')
+            .find_map(|c| c.parse::<i32>().ok())
+            .is_some_and(|pid| pid > 0 && pid != me && definitely_gone(pid));
+        if dead {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// The registry root for this test process. The first call sets `PTY_ROOT`
 /// (and silences the legacy notices); every registry call must go through
 /// this first so the environment is settled before any thread reads it.
@@ -21,7 +72,23 @@ pub fn root() -> PathBuf {
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "t".to_string());
         let short: String = exe.chars().take(12).collect();
-        let dir = std::env::temp_dir().join(format!("pty-{short}-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // **Reap the roots of test processes that are gone.** A static never
+        // drops, and a test binary that is killed would not get to run a
+        // destructor anyway, so this cleans up on the way IN rather than on
+        // the way out. Without it every run of every test binary left a
+        // directory behind: measured on 2026-09-05, one full workspace run
+        // leaked 22.
+        reap_dead_roots(&tmp);
+        // **The pid comes first.** It used to trail the executable name, and
+        // `take(12)` can cut a cargo hash suffix mid-way and leave a digit
+        // standing alone: `pty-events_log-8-3021034` made `8` the first
+        // numeric component. Pid 8 is a kernel thread, `kill(8, 0)` returns
+        // EPERM rather than ESRCH, and the reaper below correctly refused to
+        // delete on a pid it could not prove dead -- so those directories
+        // accumulated forever. Putting the pid first removes the ambiguity
+        // rather than teaching the reaper to guess.
+        let dir = tmp.join(format!("pty-{}-{short}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create test root");
         // Private like Node's `ensureSessionDir`, so a Node daemon under it
