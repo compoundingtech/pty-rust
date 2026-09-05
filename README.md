@@ -13,13 +13,41 @@ meant as a drop-in: same commands, flags, texts, JSON shapes, exit codes, files
 under `$PTY_ROOT`, and socket protocol, so the two implementations can share a
 registry while a fleet migrates.
 
+## Where it stands
+
+**It is the daily driver on two machines** — an arm64 Mac and an x86_64 Linux
+box — and has been since 2026-09-02. That is the honest measure of "does it
+work": it is what those machines run, not a demo.
+
+**The documented command surface matches the Node tool exactly.** Both
+`pty help` outputs are 122 lines and every command appears in both. Three are
+deferred rather than missing — `pty recover`, `pty evidence` and `pty test`
+keep their help text and print
+`pty <cmd>: not available in this build. See docs/parity.md.`
+
+**1357 tests pass**, including a conformance suite that runs against *either*
+binary. That is the part worth knowing: the two implementations are held to the
+same assertions rather than compared by hand, so a behavioural difference fails
+a test instead of surfacing later on somebody's machine.
+
+**What is not finished** is written down rather than implied: the surface-by-
+surface state is in [docs/parity.md](docs/parity.md), the decisions where the
+two tools deliberately differ are in [docs/decisions/](docs/decisions/), and the
+limits worth knowing before you rely on it are
+[below](#one-known-defect-documented-rather-than-fixed).
+
+**There are no prebuilt binaries yet.** You build it — see
+[Install](#install) — and [Which systems it runs
+on](#which-systems-it-runs-on) says what a built binary needs.
+
 ## Direction: compatibility and embedding
 
 The long-term target is a behavior-compatible Rust implementation of the Node
 `pty`, plus a first-class Rust API for embedding a live terminal in clients such
 as Fractal. The Node implementation is the behavioral reference while the port
-converges. This README does not claim that the current experiment has reached
-full parity.
+converges. **This README does not claim full parity**, and
+[docs/parity.md](docs/parity.md) is where the remaining gaps are named surface by
+surface.
 
 Compatibility means that the same user-visible operations and wire messages have
 the same result. It does not require identical source code or internal design.
@@ -69,6 +97,59 @@ cargo install --path crates/pty
 
 Shell completions ship in [`completions/`](completions/) and are also printed
 by `pty completions <fish|bash|zsh>`.
+
+## Which systems it runs on
+
+**There are no prebuilt binaries yet.** Today you build it, with Nix or Cargo.
+This section says what a built binary needs, because that is the question a
+release has to answer.
+
+### Linux: glibc 2.34 or newer, and the floor depends on where you build
+
+A binary links against the glibc it was built with, and refuses to start on
+anything older:
+
+```
+$ ./pty --version
+./pty: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by ./pty)
+```
+
+**The floor is not set by this codebase.** It is set by two symbols the Rust
+standard library uses for process spawning, `pidfd_getpid` and `pidfd_spawnp`,
+which appear in any Rust program that calls `Command::status()`. Nothing here
+references them.
+
+That means the build host decides the floor, and the difference is large:
+
+| built on | floor | runs on |
+| --- | --- | --- |
+| glibc 2.43 (Ubuntu 25.10) | `GLIBC_2.39` | Ubuntu 24.04+, Debian 13+, Fedora 40+ |
+| glibc 2.36 (Debian 12) | `GLIBC_2.34` | the above, plus Ubuntu 22.04, Debian 12, RHEL 9, Rocky 9, Amazon Linux 2023 |
+
+Measured on 2026-09-05 by running the same binary in each distribution's
+container. **Build releases on the oldest glibc you intend to support**; no
+source change is involved.
+
+### macOS: it runs, and here is exactly what was tested
+
+**Gatekeeper does not refuse the binary.** Tested on **one** machine: arm64,
+macOS 26.6, build 25G72, Darwin 25.6.0, with Gatekeeper assessments enabled.
+
+The `com.apple.quarantine` attribute was written onto the real binary, confirmed
+present, and the binary ran and exited 0. The attribute was then removed and the
+run repeated with an identical result — **without that control the first run
+would prove nothing about the attribute.**
+
+Three conditions travel with that result:
+
+- **It is one macOS version.** A bare "Gatekeeper does not apply" would outlive
+  the release it was true of.
+- **The binary carried an ad-hoc linker signature**, which macOS applies
+  automatically on Apple silicon. That may be why it passed. A release built
+  somewhere that strips or omits it is a different case, and an untested one, so
+  **the release process must preserve it.**
+- **This result does not transfer to a published asset.** The same test, with
+  its removal control, has to run against the first one we ship.
 
 ## Usage
 

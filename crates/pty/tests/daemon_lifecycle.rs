@@ -633,4 +633,3 @@ fn node_attach_stream_against_the_rust_daemon() {
     assert!(String::from_utf8_lossy(&packets[1].payload).contains("LAUNCHER_READY"));
     assert_eq!(pty_core::protocol::decode_exit(&packets.last().unwrap().payload), 3);
 }
-
