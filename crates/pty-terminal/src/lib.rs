@@ -18,12 +18,21 @@
 //! - [`serialize`]: the ATTACH/PEEK replay (Node mode prefix + VT) and the
 //!   plain-text screen (viewport or full scrollback).
 //! - [`snapshot`]: [`CellGrid`], the typed cell grid for renderers.
+//! - [`graphics`]: the kitty graphics state — bounded image bytes,
+//!   placements, source crops, and where each placement sits in the window
+//!   that was read — plus the replay block that carries it through
+//!   ATTACH/PEEK.
+//! - [`input`]: the child input encoder — keys (kitty keyboard included),
+//!   mouse, focus, and paste, encoded from the terminal's own state so no
+//!   consumer needs a second encoder.
 //! - [`handle`]: [`TerminalHandle`], a `Send + Sync` handle over an actor
 //!   thread, either spawning a child or attaching to a session daemon.
 //! - [`screenshot`]: the testkit's [`Screenshot`] capture.
 
 pub mod actor;
+pub mod graphics;
 pub mod handle;
+pub mod input;
 pub mod queries;
 pub mod screenshot;
 pub mod serialize;
@@ -31,9 +40,14 @@ pub mod snapshot;
 pub mod strip;
 
 pub use actor::{Modes, Notification, Range, TerminalActor, TerminalEvent};
+pub use graphics::{
+    CellSize, Compression, GraphicsOptions, GraphicsState, ImageBytes, ImageDesc, PixelFormat,
+    PlaceholderRect, Placement, PlacementPosition, SourceRect,
+};
 pub use handle::{
     AttachOptions, AttemptId, HandleEvent, SessionRef, SpawnOptions, TerminalHandle,
 };
+pub use input::{Key, KeyAction, KeyEvent, KittyKeyFlags, Mods, MouseAction, MouseButton, MouseEvent};
 pub use screenshot::{Screenshot, capture, serialize_for_replay};
 pub use serialize::SerializeOpts;
 pub use snapshot::{CellGrid, CellSnap, ColorSnap, Wide};

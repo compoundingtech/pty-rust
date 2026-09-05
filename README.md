@@ -73,6 +73,12 @@ Where the port stands against the Node `pty`, surface by surface, is in
 [docs/parity.md](docs/parity.md); the work packages that close the gap are in
 [docs/parity-plan.md](docs/parity-plan.md).
 
+What must stay true of terminal images — the Kitty graphics protocol state a
+session holds and replays — is in
+[docs/vrs/01-images/requirements.md](docs/vrs/01-images/requirements.md); how
+the session meets it is in
+[docs/vrs/01-images/spec.md](docs/vrs/01-images/spec.md).
+
 ## Install
 
 With Nix (flakes), from a checkout or straight from GitHub:

@@ -20,11 +20,14 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use pty_core::protocol::{
-    MessageType, Packet, PacketReader, decode_exit, decode_size, encode_attach, encode_data, encode_peek,
-    encode_detach, encode_resize,
+    MessageType, Packet, PacketReader, decode_exit, decode_size, encode_attach,
+    encode_attach_with_cell, encode_data, encode_detach, encode_peek, encode_resize,
+    encode_resize_with_cell,
 };
 
 use crate::actor::{Modes, Notification, Range, TerminalActor, TerminalEvent};
+use crate::graphics::{CellSize, GraphicsOptions, GraphicsState, ImageBytes};
+use crate::input::{KeyEvent, MouseEvent};
 use crate::serialize::SerializeOpts;
 use crate::snapshot::CellGrid;
 
@@ -66,6 +69,10 @@ pub struct SpawnOptions {
     pub env: Vec<(String, String)>,
     /// Scrollback lines.
     pub scrollback: usize,
+    /// Kitty graphics: a bounded image storage and the cell metrics
+    /// placements are measured in. `None` leaves the protocol off, so a
+    /// child cannot make the terminal hold images nobody reads.
+    pub graphics: Option<GraphicsOptions>,
 }
 
 impl Default for SpawnOptions {
@@ -76,6 +83,7 @@ impl Default for SpawnOptions {
             cwd: None,
             env: Vec::new(),
             scrollback: 0,
+            graphics: None,
         }
     }
 }
@@ -92,6 +100,9 @@ pub struct AttachOptions {
     pub readonly: bool,
     /// Scrollback lines kept locally.
     pub scrollback: usize,
+    /// Kitty graphics, as in [`SpawnOptions::graphics`]. An attached client
+    /// needs it to hold the images the daemon's replay carries.
+    pub graphics: Option<GraphicsOptions>,
 }
 
 impl Default for AttachOptions {
@@ -101,6 +112,7 @@ impl Default for AttachOptions {
             cols: 80,
             readonly: false,
             scrollback: 0,
+            graphics: None,
         }
     }
 }
@@ -121,6 +133,19 @@ pub enum HandleEvent {
     Exited(i32),
     /// OSC 9 / 99 / 777.
     Notification(Notification),
+    /// The image storage changed (transmit, placement, or delete): the new
+    /// generation.
+    Graphics(u64),
+    /// The socket to the session daemon went away. The handle is still
+    /// alive and [`TerminalHandle::reconnect`] can be called; the session
+    /// itself did not exit — that is [`HandleEvent::Exited`]. A consumer
+    /// with a detached state hears this, rather than polling
+    /// [`TerminalHandle::connected`].
+    Disconnected,
+    /// A new socket is up under this attempt id, after
+    /// [`TerminalHandle::reconnect`]. The screen follows as the attempt's
+    /// first SCREEN, so `Connected` means "reattached", not "ready".
+    Connected(AttemptId),
 }
 
 enum Msg {
@@ -133,6 +158,22 @@ enum Msg {
     Snapshot { offset: usize, reply: Sender<(u64, CellGrid)> },
     Plain { range: Range, reply: Sender<String> },
     Serialize { opts: SerializeOpts, reply: Sender<String> },
+    Graphics { offset: usize, reply: Sender<GraphicsState> },
+    ImageBytes { id: u32, reply: Sender<Option<ImageBytes>> },
+    ClearGraphics,
+    CellSize(CellSize),
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+    Focus(bool),
+    Paste(String),
+    EncodeKey {
+        ev: KeyEvent,
+        reply: Sender<Vec<u8>>,
+    },
+    EncodeMouse {
+        ev: MouseEvent,
+        reply: Sender<Option<Vec<u8>>>,
+    },
     SetPalette(Vec<(u8, u8, u8)>),
     Reconnect { reply: Sender<io::Result<()>> },
     Close,
@@ -154,6 +195,9 @@ struct State {
     base_y: usize,
     len: usize,
     scrollback: usize,
+    /// The last published image-storage generation, so a consumer can tell
+    /// an image change from any other dirty frame without asking the actor.
+    graphics_generation: u64,
     snap_cache: Option<(u64, CellGrid)>,
 }
 
@@ -203,7 +247,8 @@ impl Core {
     /// fan out events.
     fn publish(&mut self) {
         let events = self.actor.take_events();
-        let rev = {
+        let generation = self.actor.graphics_generation();
+        let (rev, graphics_changed) = {
             let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
             st.rev += 1;
             st.snap_cache = None;
@@ -214,7 +259,9 @@ impl Core {
             st.title = self.actor.title();
             st.base_y = self.actor.base_y();
             st.len = self.actor.buffer_length();
-            st.rev
+            let changed = st.graphics_generation != generation;
+            st.graphics_generation = generation;
+            (st.rev, changed)
         };
         self.shared.cv.notify_all();
         for ev in events {
@@ -225,6 +272,9 @@ impl Core {
                 TerminalEvent::FocusRequest | TerminalEvent::CursorVisible => continue,
             };
             self.shared.emit(ev);
+        }
+        if graphics_changed {
+            self.shared.emit(HandleEvent::Graphics(generation));
         }
         self.shared.emit(HandleEvent::Dirty(rev));
     }
@@ -293,6 +343,7 @@ impl Core {
             *stream = None;
         }
         self.shared.cv.notify_all();
+        self.shared.emit(HandleEvent::Disconnected);
     }
 
     fn input(&mut self, data: &[u8]) {
@@ -330,7 +381,10 @@ impl Core {
                     return;
                 }
                 if let Some(s) = stream {
-                    let _ = s.write_all(&encode_resize(rows, cols));
+                    let _ = s.write_all(&match cell_pixels(opts) {
+                        Some((w, h)) => encode_resize_with_cell(rows, cols, w, h),
+                        None => encode_resize(rows, cols),
+                    });
                     let _ = s.flush();
                 }
                 // Applied locally as well: a daemon that speaks GEOMETRY will
@@ -372,6 +426,7 @@ impl Core {
             st.connected = true;
         }
         self.shared.cv.notify_all();
+        self.shared.emit(HandleEvent::Connected(self.attempt));
         Ok(())
     }
 
@@ -407,6 +462,68 @@ impl Core {
             }
             Msg::Serialize { opts, reply } => {
                 let _ = reply.send(self.actor.serialize(opts));
+            }
+            Msg::Graphics { offset, reply } => {
+                let _ = reply.send(self.actor.graphics_state(offset));
+            }
+            Msg::ImageBytes { id, reply } => {
+                let _ = reply.send(self.actor.image_bytes(id));
+            }
+            Msg::ClearGraphics => {
+                self.actor.clear_graphics();
+                self.publish();
+            }
+            Msg::CellSize(cell) => {
+                self.actor.set_cell_size(cell);
+                if let Backend::Attach { stream, opts, .. } = &mut self.backend
+                    && !opts.readonly
+                    && let Some(s) = stream
+                {
+                    // The daemon holds the session's terminal, so it needs
+                    // the metrics too: its own replay answers geometry for
+                    // every other client.
+                    if let Some(g) = &mut opts.graphics {
+                        g.cell = cell;
+                    }
+                    if let Some((w, h)) = cell_pixels(opts) {
+                        let _ = s.write_all(&encode_resize_with_cell(
+                            self.actor.rows(),
+                            self.actor.cols(),
+                            w,
+                            h,
+                        ));
+                        let _ = s.flush();
+                    }
+                }
+                self.publish();
+            }
+            Msg::Key(ev) => {
+                let bytes = self.actor.encode_key(&ev);
+                if !bytes.is_empty() {
+                    self.input(&bytes);
+                }
+            }
+            Msg::Mouse(ev) => {
+                if let Some(bytes) = self.actor.encode_mouse(&ev) {
+                    self.input(&bytes);
+                }
+            }
+            Msg::Focus(gained) => {
+                if let Some(bytes) = self.actor.encode_focus(gained) {
+                    self.input(&bytes);
+                }
+            }
+            Msg::Paste(text) => {
+                let bytes = self.actor.encode_paste(&text);
+                if !bytes.is_empty() {
+                    self.input(&bytes);
+                }
+            }
+            Msg::EncodeKey { ev, reply } => {
+                let _ = reply.send(self.actor.encode_key(&ev));
+            }
+            Msg::EncodeMouse { ev, reply } => {
+                let _ = reply.send(self.actor.encode_mouse(&ev));
             }
             Msg::SetPalette(colors) => {
                 self.actor.set_palette(&colors);
@@ -446,6 +563,15 @@ fn run(mut core: Core, rx: Receiver<Msg>) {
     core.shutdown();
 }
 
+/// The cell pixel size this client declares to the daemon, if any. Only a
+/// client that asked for graphics has a reason to: the metrics exist so the
+/// session can answer geometry for a placement that left its size implicit.
+fn cell_pixels(opts: &AttachOptions) -> Option<(u16, u16)> {
+    let cell = opts.graphics?.cell;
+    cell.is_declared()
+        .then(|| (cell.width.min(u16::MAX as u32) as u16, cell.height.min(u16::MAX as u32) as u16))
+}
+
 /// Connect to the daemon, send ATTACH, and start a reader thread that tags
 /// every packet with `attempt`.
 fn connect_and_attach(
@@ -460,7 +586,10 @@ fn connect_and_attach(
     let hello = if opts.readonly {
         encode_peek(false, false)
     } else {
-        encode_attach(opts.rows, opts.cols)
+        match cell_pixels(opts) {
+            Some((w, h)) => encode_attach_with_cell(opts.rows, opts.cols, w, h),
+            None => encode_attach(opts.rows, opts.cols),
+        }
     };
     (&stream).write_all(&hello)?;
     (&stream).flush()?;
@@ -497,6 +626,22 @@ fn exit_code(status: portable_pty::ExitStatus) -> i32 {
     } else {
         status.exit_code() as i32
     }
+}
+
+/// The actor both constructors build. Graphics have to be turned on here,
+/// on the actor thread: libghostty's PNG decoder is thread-local and the
+/// terminal is `!Send`.
+fn new_actor(
+    rows: u16,
+    cols: u16,
+    scrollback: usize,
+    graphics: Option<GraphicsOptions>,
+) -> TerminalActor {
+    let mut actor = TerminalActor::new(rows, cols, scrollback);
+    if let Some(opts) = graphics {
+        actor.enable_graphics(opts);
+    }
+    actor
 }
 
 /// A live terminal you can write to, resize, and read typed cells from.
@@ -587,11 +732,12 @@ impl TerminalHandle {
             });
         }
 
-        let (rows, cols, scrollback) = (opts.rows, opts.cols, opts.scrollback);
+        let (rows, cols, scrollback, gfx) =
+            (opts.rows, opts.cols, opts.scrollback, opts.graphics);
         let core_shared = shared.clone();
         std::thread::spawn(move || {
             let core = Core {
-                actor: TerminalActor::new(rows, cols, scrollback),
+                actor: new_actor(rows, cols, scrollback, gfx),
                 attempt,
                 shared: core_shared,
                 backend: Backend::Spawn { master, writer },
@@ -634,7 +780,7 @@ impl TerminalHandle {
         let core_tx = tx.clone();
         std::thread::spawn(move || {
             let core = Core {
-                actor: TerminalActor::new(opts.rows, opts.cols, opts.scrollback),
+                actor: new_actor(opts.rows, opts.cols, opts.scrollback, opts.graphics),
                 attempt,
                 shared: core_shared,
                 backend: Backend::Attach {
@@ -799,6 +945,138 @@ impl TerminalHandle {
             return String::new();
         }
         reply_rx.recv().unwrap_or_default()
+    }
+
+    /// The kitty graphics state for the window `scroll_offset` rows above
+    /// the live viewport — the same window [`TerminalHandle::snapshot`]
+    /// reads, so a grid and a graphics state taken with the same offset line
+    /// up cell for cell.
+    ///
+    /// Empty (and `enabled: false`) when the handle was built without
+    /// [`SpawnOptions::graphics`] / [`AttachOptions::graphics`].
+    pub fn graphics(&self, scroll_offset: usize) -> GraphicsState {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(Msg::Graphics {
+                offset: scroll_offset,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return GraphicsState::default();
+        }
+        reply_rx.recv().unwrap_or_default()
+    }
+
+    /// The pixels of one image. `None` when it is not stored (any more).
+    /// Cache the result on [`crate::graphics::ImageDesc::generation`]: it
+    /// changes whenever the pixels behind an id do.
+    pub fn image_bytes(&self, id: u32) -> Option<ImageBytes> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(Msg::ImageBytes { id, reply: reply_tx })
+            .is_err()
+        {
+            return None;
+        }
+        reply_rx.recv().unwrap_or(None)
+    }
+
+    /// The last published image-storage generation, without asking the
+    /// actor. Unchanged means the images and the set of placements are
+    /// identical; placement geometry can still have moved, so a dirty frame
+    /// still re-reads [`TerminalHandle::graphics`].
+    pub fn graphics_generation(&self) -> u64 {
+        self.state(|st| st.graphics_generation)
+    }
+
+    /// Drop every image and placement, keeping the protocol on: what a pane
+    /// does when it closes or is reused for something else.
+    pub fn clear_graphics(&self) {
+        let _ = self.tx.send(Msg::ClearGraphics);
+    }
+
+    /// Declare how big a cell is on the surface that draws this terminal.
+    ///
+    /// Only the client knows: the metrics come from its font, on its host. An
+    /// attached handle also tells the daemon (a RESIZE carrying the cell
+    /// size), because the session's own terminal is what answers geometry for
+    /// every other client and for the replay. Nothing about the bytes
+    /// changes; a placement that named `c=`/`r=` is unaffected, and one that
+    /// left its size implicit now gets the cell extent this surface will
+    /// actually draw.
+    ///
+    /// Until someone declares it, geometry uses
+    /// [`crate::graphics::CellSize::FALLBACK`] and
+    /// [`crate::graphics::GraphicsState::cell_declared`] is false.
+    pub fn set_cell_size(&self, width: u32, height: u32) {
+        let _ = self.tx.send(Msg::CellSize(CellSize { width, height }));
+    }
+
+    /// Send one key event to the child, encoded for the keyboard state the
+    /// child asked for. Ordered with [`TerminalHandle::write`] and the other
+    /// `send_*` methods; ignored by a read-only attach.
+    ///
+    /// A consumer that reserves keys for itself decides that before calling:
+    /// this encoder never swallows a key.
+    pub fn send_key(&self, ev: &KeyEvent) {
+        let _ = self.tx.send(Msg::Key(ev.clone()));
+    }
+
+    /// Send one mouse event, if the mode the child chose reports it. Use
+    /// [`TerminalHandle::encode_mouse`] first when the surface wants to keep
+    /// the event otherwise (a wheel notch the child would not hear).
+    pub fn send_mouse(&self, ev: &MouseEvent) {
+        let _ = self.tx.send(Msg::Mouse(*ev));
+    }
+
+    /// Report a focus change, if the child asked for focus events.
+    pub fn send_focus(&self, gained: bool) {
+        let _ = self.tx.send(Msg::Focus(gained));
+    }
+
+    /// Paste text, bracketed when the child asked for it. Check
+    /// [`crate::input::paste_is_safe`] first if the surface wants to confirm
+    /// a multi-line paste.
+    pub fn send_paste(&self, text: &str) {
+        let _ = self.tx.send(Msg::Paste(text.to_string()));
+    }
+
+    /// The bytes [`TerminalHandle::send_key`] would write, without writing
+    /// them. Empty for an event the child should not see.
+    pub fn encode_key(&self, ev: &KeyEvent) -> Vec<u8> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(Msg::EncodeKey {
+                ev: ev.clone(),
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.recv().unwrap_or_default()
+    }
+
+    /// The bytes [`TerminalHandle::send_mouse`] would write, or `None` when
+    /// the child's mode does not report this event — which is how a surface
+    /// learns it may keep the wheel for its own scrolling.
+    pub fn encode_mouse(&self, ev: &MouseEvent) -> Option<Vec<u8>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(Msg::EncodeMouse {
+                ev: *ev,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        reply_rx.recv().unwrap_or(None)
     }
 
     /// The current revision; bumps on every change.

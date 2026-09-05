@@ -489,7 +489,8 @@ looked.
 | Mixed-fleet rig (section 11) | M |
 | Packaging and completions (section 14) | M |
 
-Sources for this map: the Node source and its tests at `500eab2`, `docs/vrs`,
+Sources for this map: the Node source and its tests at `500eab2`, and — all in
+the `compoundingtech/pty` (Node) repository — its `docs/vrs`,
 `docs/disk-layout.md`, `docs/client.md`, `docs/testing.md`; this repository at
 `e4d6cda`; the `st2`, `pty-relay`, `deskset`, `ding`, `smalltalk`, and `evals`
 call sites; issues #1, #3, #4 here and the open issues and PRs on the Node

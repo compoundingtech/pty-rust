@@ -89,7 +89,8 @@ pub struct SessionMetadata {
     /// nothing to take; it is persisted at most once a second while output
     /// flows.
     ///
-    /// node: src/sessions.ts (`lastOutputAtMs`), docs/vrs/requirements.md R14
+    /// node: src/sessions.ts (`lastOutputAtMs`), the Node pty repository's
+    /// `docs/vrs/requirements.md` R14 (not this repository's `docs/vrs`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at_ms: Option<i64>,
     /// Every field this version does not model, round-tripped verbatim.
