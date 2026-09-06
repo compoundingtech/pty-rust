@@ -32,8 +32,14 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
       - uses: actions/setup-node@v4
         with:
-          # Match the major the Node pty's own CI uses so the reference
-          # runtime does not skew.
+          # The runtime is a pinned input, not a detail. It changes results.
+          # The Node binary truncates `pty completions fish` on a pipe under
+          # Node v24.18.0 — 123 lines of 167 — and does not under Node 22, on
+          # the same commit and the same test. Pinning only the reference
+          # COMMIT is not enough to make a comparison reproducible.
+          #
+          # 22 matches the major the Node pty's own CI uses. Changing it is a
+          # deliberate act: expect the divergence ledger to change with it.
           node-version: 22
 
       # The reference commit is pinned rather than tracked. A checkout seven

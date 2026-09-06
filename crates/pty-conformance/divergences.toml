@@ -22,30 +22,34 @@
 #   reason  What differs, how it was measured, and why it is recorded and not
 #           fixed here.
 #
-# Measured against Node 86dcc5eb7bbca73ab9635ea07ab1018ec43ede61 (the commit in
-# `crates/pty-conformance/node-ref`) on 2026-09-05: 660/660 on pty-rust,
-# 658/660 on the Node pty, and the two below are the whole difference.
+# TWO INPUTS DECIDE WHAT THIS FILE SHOULD SAY, AND BOTH ARE PINNED.
+#
+# The Node COMMIT is pinned in `node-ref`. A checkout seven commits behind
+# invented eight divergences on 2026-09-05, every one an artifact.
+#
+# The Node RUNTIME is pinned in the workflow, and it matters just as much. This
+# file first recorded the Node binary truncating `pty completions fish` on a
+# pipe, 123 lines of 167, measured on Node v24.18.0. CI runs Node 22 and does
+# not reproduce it at all: same commit, same test, different answer. The defect
+# is real and it is version-dependent, so the entries were removed rather than
+# kept as claims CI cannot see. Reported to the Node pty owner, who has a fix.
+# If the runtime here ever moves to 24, expect those two to come back.
+#
+# Measured against Node 86dcc5eb7bbca73ab9635ea07ab1018ec43ede61 on Node 22,
+# 2026-09-06: pty-rust 660/660, the Node pty 659/660.
 
 [[divergence]]
-test = "completions::matches_every_checked_in_completion_artifact"
+test = "spawn_options::pwd_is_the_directory_as_written_wherever_the_caller_stood"
 side = "node"
 kind = "node-defect"
 reason = """
-The Node binary truncates `pty completions fish` when stdout is a pipe. \
-Measured on 2026-09-05: 123 of 167 lines through a pipe, and all 167 when \
-redirected to a file. `pty completions zsh` truncates the same way; the test \
-asserts fish first and stops there. This is the Node exit-before-flush \
-behaviour on an asynchronous pipe, not a completions-content difference — the \
-checked-in artifacts and pty-rust's output are byte identical. Reported to the \
-Node pty owner on 2026-09-05. Remove this entry when their fix lands.
-"""
-
-[[divergence]]
-test = "completions::prints_fish_bash_zsh_to_stdout"
-side = "node"
-kind = "node-defect"
-reason = """
-The same truncation, seen from the other end: the test requires the fish \
-output to end with a newline and the Node binary's piped output ends mid-line. \
-One defect, two tests. Remove both entries together.
+pty-rust sets `PWD` in the child environment to the working directory as the \
+caller wrote it, following node-pty's own `env.PWD = cwd` in \
+`src/unixTerminal.ts`. The Node pty does not, so its child has no `PWD` at all \
+and the shell derives one from `getcwd()`. Where the directory is reached \
+through a symlink those disagree, and `pty run --cwd X` then answers one way \
+from inside X and another from anywhere else. pty-rust is the correct side. \
+This divergence was not written down anywhere before the gate found it: it is \
+in neither docs/parity.md nor a decision record. Remove this entry if the Node \
+pty adopts the same behaviour.
 """
