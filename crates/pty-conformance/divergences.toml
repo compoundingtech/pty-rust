@@ -29,11 +29,22 @@
 #
 # The Node RUNTIME is pinned in the workflow, and it matters just as much. This
 # file first recorded the Node binary truncating `pty completions fish` on a
-# pipe, 123 lines of 167, measured on Node v24.18.0. CI runs Node 22 and does
-# not reproduce it at all: same commit, same test, different answer. The defect
-# is real and it is version-dependent, so the entries were removed rather than
-# kept as claims CI cannot see. Reported to the Node pty owner, who has a fix.
-# If the runtime here ever moves to 24, expect those two to come back.
+# pipe, 123 lines of 167. That was measured on x86_64 Linux with Node v24.18.0,
+# where it reproduces every run. CI runs Node 22 and does not reproduce it at
+# all: same commit, same test, different answer.
+#
+# The boundary is NOT simply the Node major, and it would be wrong to record it
+# that way. The Node pty owner measured the same unfixed binary on arm64 macOS
+# and got the full 12138 bytes under BOTH Node 22.21.1 and Node 24.0.2. So the
+# unfixed failure depends on runtime, platform and scheduling together, and the
+# only honest summary is that it does not reproduce in the environment this
+# gate runs in.
+#
+# The defect is real: their forced delayed-write fixture, which does not rely
+# on natural scheduling, prints zero bytes against the old exit path and the
+# full 12138 against the fixed one, on Node 22 and 24 alike. A fix is in
+# progress there. These entries were removed because a ledger records what CI
+# can observe, not because the defect is not real.
 #
 # Measured against Node 86dcc5eb7bbca73ab9635ea07ab1018ec43ede61 on Node 22,
 # 2026-09-06: pty-rust 660/660, the Node pty 659/660.
