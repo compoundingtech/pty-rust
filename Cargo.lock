@@ -1157,6 +1157,7 @@ dependencies = [
  "libghostty-vt",
  "portable-pty",
  "pty-core",
+ "pty-spawn",
  "pty-terminal",
  "pty-testkit",
  "pty-tui",
@@ -1173,6 +1174,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "pty-core",
+ "pty-spawn",
  "pty-testkit",
  "regex",
  "serde_json",
@@ -1193,6 +1195,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pty-spawn"
+version = "0.13.0-rust"
+dependencies = [
+ "portable-pty",
+]
+
+[[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
 dependencies = [
@@ -1201,6 +1210,7 @@ dependencies = [
  "png",
  "portable-pty",
  "pty-core",
+ "pty-spawn",
  "serde_json",
 ]
 
@@ -1211,6 +1221,7 @@ dependencies = [
  "libghostty-vt",
  "portable-pty",
  "pty-core",
+ "pty-spawn",
  "pty-terminal",
 ]
 

@@ -1368,15 +1368,8 @@ impl TtyProc {
         rows: u16,
         cols: u16,
     ) -> TtyProc {
-        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
+        use portable_pty::CommandBuilder;
+        let pair = pty_spawn::open(rows, cols).expect("openpty");
         let mut cmd = CommandBuilder::new(bin);
         cmd.args(args);
         cmd.cwd(cwd);

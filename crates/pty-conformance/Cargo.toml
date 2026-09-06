@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+pty-spawn = { path = "../pty-spawn" }
 libc.workspace = true
 portable-pty.workspace = true
 pty-core.workspace = true

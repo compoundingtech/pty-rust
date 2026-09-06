@@ -18,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::MasterPty;
 use pty_core::events::{Event, EventWriter};
 use pty_core::protocol::{Packet, PacketReader, encode_data, encode_exit};
 use pty_core::registry::{
@@ -212,19 +212,9 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
 
     // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
     // lookups, shebangs and symlinks behave like a shell's.
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
+    let pair = pty_spawn::open(rows, cols)
         .map_err(|e| format!("Failed to open a PTY for session \"{name}\": {e}"))?;
-    let mut command = CommandBuilder::new("/bin/sh");
-    command.args(["-c", "exec \"$@\"", "sh"]);
-    command.arg(&cfg.command);
-    command.args(&cfg.args);
+    let mut command = pty_spawn::shell_exec(&cfg.command, &cfg.args);
     command.cwd(&cwd);
     command.env_clear();
     for (k, v) in &child_env {
