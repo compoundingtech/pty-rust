@@ -94,19 +94,49 @@ mod tests {
         assert_eq!(argv, vec!["/bin/sh", "-c", "exec \"$@\"", "sh", "echo", "a b", "c;d"]);
     }
 
+    /// **Read the master before waiting for the child, and never the other way
+    /// round.**
+    ///
+    /// An earlier version of this test called `child.wait()` first and then
+    /// read. That passes on Linux and DEADLOCKS on macOS, where closing the
+    /// slave waits for unread terminal output before the child becomes
+    /// waitable: the child cannot finish because nobody has drained it, and
+    /// nobody drains it because the test is blocked in `wait4`. Measured on
+    /// macOS 26.6 arm64, 2026-09-06 — the main thread sat in `wait4` with the
+    /// child parked in state `?Es` until it was killed.
+    ///
+    /// The read happens on another thread with a deadline, so a future
+    /// regression of this shape FAILS instead of hanging. A hanging test tells
+    /// you nothing and costs whoever hits it an afternoon.
     #[test]
     fn shell_exec_runs_the_program_through_a_real_pty() {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
         let pair = open(24, 80).expect("open");
         let mut child = pair
             .slave
             .spawn_command(shell_exec("printf", &["ok-%s".to_string(), "1".to_string()]))
             .expect("spawn");
+        // The slave must go before the reader can ever see end-of-file: the
+        // child holds the only other copy, so EOF arrives when it exits.
         drop(pair.slave);
+
         let mut reader = pair.master.try_clone_reader().expect("reader");
-        child.wait().expect("wait");
-        let mut out = String::new();
-        use std::io::Read;
-        let _ = reader.read_to_string(&mut out);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            // A pty master reports EIO rather than EOF once the last slave
+            // closes on Linux, so a read error here is an ordinary ending.
+            let _ = reader.read_to_end(&mut out);
+            let _ = tx.send(String::from_utf8_lossy(&out).into_owned());
+        });
+
+        let out = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the child's output should arrive; a timeout here means the read deadlocked");
         assert!(out.contains("ok-1"), "child output was {out:?}");
+        child.wait().expect("wait");
     }
 }
