@@ -14,10 +14,18 @@ jobs:
   # load, so adding a second binary's work to a shard's CPU is exactly what we
   # do not want.
   #
-  # Sharding is here because the cost is the tests, not the harness. Measured
-  # 2026-09-05: five files cost 10.48 s as five cargo invocations and 10.27 s
-  # as one, and the tests inside account for 10.21 s of it. The work is
-  # parallel across machines and not compressible on one.
+  # Sharding is here because the work parallelises across machines and does not
+  # compress on one. The long pole is COMPILING the seventy debug test
+  # binaries, not running them: measured 2026-09-05 across all 140 invocations,
+  # the reported test time totals 5.1 minutes and no single invocation exceeds
+  # 12.5 seconds, while the compile before the first result took about 26.
+  #
+  # Do not target test runtime here. An earlier version of this comment said
+  # the tests were the cost, from a five-file sample that happened to contain
+  # the one seven-second outlier. That sample was not representative and the
+  # claim was wrong. If someone wants a bigger win than sharding, it is in the
+  # compile: a shared cargo cache, or building the test binaries once and
+  # distributing them, rather than four runners each compiling the workspace.
   shard:
     runs-on: ubuntu-latest
     timeout-minutes: 45
