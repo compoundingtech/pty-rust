@@ -274,11 +274,32 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         }
         i += 1;
     }
-    if checkout.is_none() {
-        let default = PathBuf::from("/home/myobie/src/github.com/compoundingtech/pty");
-        if default.join("tests").is_dir() {
-            checkout = Some(default);
-        }
+    // No default, and no silent degrade.
+    //
+    // This used to fall back to an absolute path on one developer's machine,
+    // and `node_suites` falls back again to the compiled-in `SUITES` list when
+    // it has no checkout — so running this with the variable unset produced a
+    // checked-in document describing a Node tree nobody named, which looked
+    // exactly as authoritative as a correct one. That is how docs/conformance.md
+    // came to say `0.12.0+500eab2` while the pinned reference in `node-ref` was
+    // `86dcc5e`, and a stale map is what a stale comparison is built on.
+    //
+    // A test may skip when its reference is missing. A generator may not guess:
+    // it writes a file that outlives the run and carries no memory of what it
+    // was made from.
+    let Some(dir) = checkout.clone() else {
+        return Err("PTY_NODE_CHECKOUT is not set, and there is no default.\n\
+             This writes docs/conformance.md from a Node checkout, and a map \
+             built from an unnamed source is worse than no map.\n\
+             Set PTY_NODE_CHECKOUT to the commit in crates/pty-conformance/node-ref, \
+             or pass --checkout <path>."
+            .to_string());
+    };
+    if !dir.join("tests").is_dir() {
+        return Err(format!(
+            "PTY_NODE_CHECKOUT is {}, which has no tests/ directory.",
+            dir.display()
+        ));
     }
 
     let mapped = scan_tests(&manifest_dir().join("tests"))?;

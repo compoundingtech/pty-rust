@@ -22,10 +22,20 @@ fn which(bin: &str) -> Option<PathBuf> {
     if out.status.success() && !s.is_empty() { Some(PathBuf::from(s)) } else { None }
 }
 
+/// The Node checkout to compare against, or `None`.
+///
+/// **There is deliberately no fallback path.** This used to default to an
+/// absolute path on one developer's machine, which meant that when
+/// `PTY_NODE_CHECKOUT` was unset the test did not skip — it silently compared
+/// against whatever happened to be at that path. On a machine where that
+/// checkout was seven commits behind, it produced a confident failure about a
+/// completion entry that was not missing at all. CI never saw it, because the
+/// path does not exist on a runner, so there the filter returned `None` and the
+/// test skipped.
+///
+/// A test that cannot find its reference must say so. It must not guess.
 fn node_checkout_dir() -> Option<PathBuf> {
-    node_checkout()
-        .or_else(|| Some(PathBuf::from("/home/myobie/src/github.com/compoundingtech/pty")))
-        .filter(|p| p.join("completions").is_dir())
+    node_checkout().filter(|p| p.join("completions").is_dir())
 }
 
 /// node: tests/completions.test.ts:81
