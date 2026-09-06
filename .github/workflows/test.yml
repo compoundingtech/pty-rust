@@ -1,0 +1,32 @@
+name: Test
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      # Reporting only. Neither passes on main today — 1093 fmt diffs and 50
+      # clippy warnings, measured 2026-09-05 — so gating either one needs a
+      # cleanup commit first, which is a separate decision from adding CI.
+      # Printing the counts keeps the debt visible instead of hidden behind a
+      # check nobody enabled.
+      - name: Formatting and clippy (reporting only)
+        run: |
+          n=$(nix develop --command cargo fmt --all -- --check 2>/dev/null | grep -c '^Diff in' || true)
+          echo "cargo fmt --check: $n diff(s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          nix develop --command cargo clippy --workspace --all-targets 2>&1 | tee /tmp/clippy.log || true
+          w=$(grep -c '^warning' /tmp/clippy.log || true)
+          echo "clippy: $w warning(s)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: nix develop --command cargo build --workspace --release
+
+      - name: Workspace tests
+        run: nix develop --command ./scripts/ci-test-workspace.sh

@@ -38,6 +38,23 @@ fi
 
 cargo test -p pty-conformance --no-run -q 2>&1 | grep -v '^\s*$' | grep -iv 'warning' || true
 
+# One `cargo test` per file, on purpose.
+#
+# The obvious optimisation is to pass every `--test` to a single invocation.
+# It saves almost nothing and it can silently break the comparison.
+#
+# It saves almost nothing: measured 2026-09-05, five files cost 10.48 s as five
+# invocations and 10.27 s as one, and the tests inside account for 10.21 s of
+# that. Cargo overhead is about 0.05 s per file. The suite is slow because it
+# drives real processes through real PTYs and waits for them, not because of
+# how it is invoked.
+#
+# It can break the comparison: `cargo test` STOPS at the first failing target.
+# A single invocation that hits a failure never runs the remaining files, and
+# the failing files are exactly the ones this script exists to look at — a run
+# that stopped early reports fewer differences, which reads as agreement. Any
+# collapse of this loop needs `--no-fail-fast`, and even then it costs the
+# per-file logs the summary table is built from.
 run_side() {
   local label="$1" bin="$2"
   mkdir -p "$OUT/$label"

@@ -181,6 +181,24 @@ Three conditions travel with that result:
 - **This result does not transfer to a published asset.** The same test, with
   its removal control, has to run against the first one we ship.
 
+### CI is Linux only, on purpose
+
+Both workflows run on `ubuntu-latest`. Nothing in CI builds or tests this on a
+Mac.
+
+That matters more here than it usually would.
+[`crates/pty-core/src/proctable.rs`](crates/pty-core/src/proctable.rs) carries a
+macOS process-table reader that no Linux job ever compiles: libproc, plus a
+sysctl fallback with hand-declared `kinfo_proc` struct offsets. Offsets are
+exactly the kind of thing a new macOS moves. **So a change to that reader, or a
+macOS SDK change, breaks the Mac build and CI does not notice.**
+
+This is a decision, not an oversight. The tool runs on two Macs every day, so a
+broken Mac build surfaces immediately in use, and human use is the detection
+mechanism. That trade holds while the daily users are the affected users. If
+this ever ships to people who are not in the room, the trade changes and the
+macOS job comes back — via Nix, because Cargo cannot build it there.
+
 ## Usage
 
 ```sh
@@ -292,7 +310,19 @@ cargo build --release                        # target/release/pty
 ```sh
 cargo test --workspace                       # every crate's suite
 PTY_TEST_BIN=target/release/pty cargo test -p pty-conformance   # black-box, any binary
+./scripts/conformance-both.sh                # both binaries, side by side
+python3 scripts/check-divergences.py         # fail on an unrecorded difference
 ```
+
+`conformance-both.sh` runs every conformance file against both binaries and
+writes `target/conformance/red.txt`: the tests whose result differs.
+`check-divergences.py` compares that against
+[`crates/pty-conformance/divergences.toml`](crates/pty-conformance/divergences.toml)
+and fails both when a difference is unrecorded and when a record no longer
+happens, so the ledger cannot drift into a list of stale claims. CI runs both.
+The Node commit it compares against is pinned in
+[`crates/pty-conformance/node-ref`](crates/pty-conformance/node-ref); a stale
+reference invents differences that are not there.
 
 The workspace tests drive real programs through real PTYs and real daemons,
 with each test on its own `PTY_ROOT` under the temp dir. The conformance suite

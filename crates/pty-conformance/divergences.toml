@@ -1,0 +1,66 @@
+# Recorded divergences between the Node pty and pty-rust.
+#
+# `scripts/conformance-both.sh` runs the conformance suite against both
+# binaries and writes the tests whose result differs.
+# `scripts/check-divergences.py` compares that list against this file and
+# fails when the two disagree, in EITHER direction:
+#
+#   * a divergence that is not recorded here — nobody has judged it;
+#   * a record here that no longer happens — the entry has gone stale.
+#
+# The second rule is the one that keeps this file honest. A ledger that only
+# grows becomes a list of claims nobody re-reads, and its entries outlive their
+# reasons. Failing on a resolved entry forces this file to describe today.
+#
+# Fields:
+#   test    `<conformance file>::<test name>`, as it appears in red.txt.
+#   side    "node" = the test fails on the Node binary.
+#           "rust" = it passes on Node and fails on pty-rust. Treat any new
+#                    rust-red entry as a regression until proven otherwise.
+#   kind    "intended"    — a difference we chose; point at its decision record.
+#           "node-defect" — the Node reference is wrong and pty-rust is right.
+#   reason  What differs, how it was measured, and why it is recorded and not
+#           fixed here.
+#
+# TWO INPUTS DECIDE WHAT THIS FILE SHOULD SAY, AND BOTH ARE PINNED.
+#
+# The Node COMMIT is pinned in `node-ref`. A checkout seven commits behind
+# invented eight divergences on 2026-09-05, every one an artifact.
+#
+# The Node RUNTIME is pinned in the workflow, and it matters just as much. This
+# file first recorded the Node binary truncating `pty completions fish` on a
+# pipe, 123 lines of 167. That was measured on x86_64 Linux with Node v24.18.0,
+# where it reproduces every run. CI runs Node 22 and does not reproduce it at
+# all: same commit, same test, different answer.
+#
+# The boundary is NOT simply the Node major, and it would be wrong to record it
+# that way. The Node pty owner measured the same unfixed binary on arm64 macOS
+# and got the full 12138 bytes under BOTH Node 22.21.1 and Node 24.0.2. So the
+# unfixed failure depends on runtime, platform and scheduling together, and the
+# only honest summary is that it does not reproduce in the environment this
+# gate runs in.
+#
+# The defect is real: their forced delayed-write fixture, which does not rely
+# on natural scheduling, prints zero bytes against the old exit path and the
+# full 12138 against the fixed one, on Node 22 and 24 alike. A fix is in
+# progress there. These entries were removed because a ledger records what CI
+# can observe, not because the defect is not real.
+#
+# Measured against Node 86dcc5eb7bbca73ab9635ea07ab1018ec43ede61 on Node 22,
+# 2026-09-06: pty-rust 660/660, the Node pty 659/660.
+
+[[divergence]]
+test = "spawn_options::pwd_is_the_directory_as_written_wherever_the_caller_stood"
+side = "node"
+kind = "node-defect"
+reason = """
+pty-rust sets `PWD` in the child environment to the working directory as the \
+caller wrote it, following node-pty's own `env.PWD = cwd` in \
+`src/unixTerminal.ts`. The Node pty does not, so its child has no `PWD` at all \
+and the shell derives one from `getcwd()`. Where the directory is reached \
+through a symlink those disagree, and `pty run --cwd X` then answers one way \
+from inside X and another from anywhere else. pty-rust is the correct side. \
+This divergence was not written down anywhere before the gate found it: it is \
+in neither docs/parity.md nor a decision record. Remove this entry if the Node \
+pty adopts the same behaviour.
+"""
