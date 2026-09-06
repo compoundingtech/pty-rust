@@ -59,23 +59,36 @@ jobs:
             | xargs -n1 basename | sed 's/\.rs$//' \
             | awk "NR % $SHARDS == ${{ matrix.index }}" | tr '\n' ' ')
           echo "shard ${{ matrix.index }} of $SHARDS: $files"
-          # Do NOT pipe this to `tail`. A pipe buffers everything until the
-          # command ends, and a command killed by the job timeout never ends,
-          # so the output that would name the hanging file is discarded. That
-          # happened on 2026-09-05: shard 2 printed its file list, then
-          # nothing for 41 minutes. Stream it, and keep a copy for the
-          # artifact.
-          # tee opens its file when the pipeline starts, which is before the
-          # script has created its --out directory. Without this mkdir it dies
-          # instantly with "No such file or directory", and pipefail then fails
-          # a shard whose work was perfect.
+          # Write to a FILE, not through a pipe.
+          #
+          # A pipe makes this step's completion depend on end-of-file, which
+          # needs every write end closed — including any inherited by a process
+          # that outlives the run. This suite leaves daemons behind, and on
+          # 2026-09-05 shard 2 finished its work in 2m44s and then sat for 38
+          # more minutes until the job timeout, with the runner reporting
+          # "Terminate orphan process: pid (23143) (pty-daemon)" at cleanup.
+          # Three runs, three times, each stopping at exactly the timeout.
+          #
+          # A file has no such dependency, and it keeps the partial output when
+          # a step IS killed, which a pipe into `tail` did not.
           mkdir -p target/conformance
-          set -o pipefail
           nix develop --command ./scripts/conformance-both.sh \
             --node /tmp/node-pty/bin/pty \
             --rust "$PWD/target/release/pty" \
-            --out "$PWD/target/conformance" $files 2>&1 \
-            | stdbuf -oL -eL tee target/conformance/shard.log
+            --out "$PWD/target/conformance" $files \
+            > target/conformance/shard.log 2>&1 &
+          script=$!
+          # A heartbeat naming the most recent finished file, so a hang is
+          # visible while it happens rather than only in the post mortem.
+          while kill -0 "$script" 2>/dev/null; do
+            sleep 30
+            last=$(ls -t target/conformance/*/*.log 2>/dev/null | head -1)
+            echo "... still running; newest result: ${last:-none yet}"
+          done
+          wait "$script" || rc=$?
+          echo "===== conformance output ====="
+          cat target/conformance/shard.log
+          exit "${rc:-0}"
 
       - name: Keep this shard's differences
         if: always()
