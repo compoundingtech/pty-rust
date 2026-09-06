@@ -94,6 +94,33 @@ jobs:
           wait "$script" || rc=$?
           echo "===== conformance output ====="
           cat target/conformance/shard.log
+
+          # A difference has to survive a second look before it counts.
+          #
+          # This suite drives real processes through real PTYs and races under
+          # load. Both binaries can lose. Measured 2026-09-06: a run reported
+          # nesting_prevention::restart_force_restores_the_attach and
+          # up_down::down_stops_only_named_sessions as Node-side differences,
+          # and both files then passed 3 of 3 locally against the same Node
+          # binary. They were lost races, not divergences.
+          #
+          # The retry runs only the differing files, so contention is far lower
+          # than the full shard, and it rewrites red.txt. A file that was clean
+          # contributes nothing to red.txt either way, so re-running just the
+          # differing ones is a complete result for this shard. A real
+          # difference is reproducible and survives; a race has to lose twice.
+          if [ -s target/conformance/red.txt ]; then
+            again=$(cut -d: -f1 target/conformance/red.txt | sort -u | tr '\n' ' ')
+            echo "===== differences seen; re-running only: $again ====="
+            nix develop --command ./scripts/conformance-both.sh \
+              --node /tmp/node-pty/bin/pty \
+              --rust "$PWD/target/release/pty" \
+              --out "$PWD/target/conformance" $again \
+              > target/conformance/retry.log 2>&1 || rc=$?
+            cat target/conformance/retry.log
+            echo "===== differences that survived the retry ====="
+            cat target/conformance/red.txt
+          fi
           exit "${rc:-0}"
 
       - name: Keep this shard's differences
@@ -104,6 +131,7 @@ jobs:
           path: |
             target/conformance/red.txt
             target/conformance/shard.log
+            target/conformance/retry.log
           if-no-files-found: error
           retention-days: 14
 
