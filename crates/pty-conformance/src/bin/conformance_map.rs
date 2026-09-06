@@ -3,7 +3,7 @@
 //! comments in `tests/*.rs`), or the reason it is not portable.
 //!
 //! Usage: `cargo run -p pty-conformance --bin conformance-map [--node <checkout>] [--out <path>]`.
-//! Defaults: the checkout in `PTY_NODE_CHECKOUT` (or `/home/myobie/src/github.com/compoundingtech/pty`),
+//! Defaults: the checkout named by `PTY_NODE_CHECKOUT` (required; there is no default),
 //! output to `docs/conformance.md` at the workspace root.
 
 fn main() {
