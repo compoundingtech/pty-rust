@@ -18,7 +18,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty};
+use pty_spawn::PtySize;
 use pty_core::protocol::{
     MessageType, Packet, PacketReader, decode_exit, decode_size, encode_attach,
     encode_attach_with_cell, encode_data, encode_detach, encode_peek, encode_resize,
@@ -657,15 +658,7 @@ impl TerminalHandle {
     /// Spawn `cmd args` in a new PTY (`TERM=xterm-256color` unless `env`
     /// says otherwise) and track it.
     pub fn spawn(cmd: &str, args: &[&str], opts: SpawnOptions) -> io::Result<TerminalHandle> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: opts.rows,
-                cols: opts.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(io::Error::other)?;
+        let pair = pty_spawn::open(opts.rows, opts.cols)?;
         let mut command = CommandBuilder::new(cmd);
         command.args(args);
         if let Some(cwd) = &opts.cwd {

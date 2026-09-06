@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty};
+use pty_spawn::PtySize;
 
 use pty_core::keys::{resolve_key, KeyError};
 use pty_terminal::{Screenshot, TerminalActor};
@@ -119,15 +120,7 @@ impl Session {
         let actor = TerminalActor::new(rows, cols, pty_terminal::actor::DEFAULT_SCROLLBACK);
 
         // Real PTY + child process.
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(std::io::Error::other)?;
+        let pair = pty_spawn::open(rows, cols)?;
 
         let mut cmd = CommandBuilder::new(command);
         cmd.args(args);

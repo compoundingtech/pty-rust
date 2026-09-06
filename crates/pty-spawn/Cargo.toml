@@ -1,0 +1,9 @@
+[package]
+name = "pty-spawn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Allocate a pseudo-terminal and start a child in it. No terminal emulator, no Zig."
+
+[dependencies]
+portable-pty.workspace = true
