@@ -106,8 +106,16 @@ mod tests {
     /// child parked in state `?Es` until it was killed.
     ///
     /// The read happens on another thread with a deadline, so a future
-    /// regression of this shape FAILS instead of hanging. A hanging test tells
-    /// you nothing and costs whoever hits it an afternoon.
+    /// regression of this shape FAILS instead of hanging.
+    ///
+    /// **The deadline is not about this bug.** On 2026-09-05 a CI shard hung
+    /// three times, each for the full 45-minute job timeout, and left no
+    /// evidence at all: the instrumentation only produced its output when the
+    /// command ended, and a command killed by a timeout never ends. It took
+    /// most of a night to identify, and the cause turned out not even to be in
+    /// this repository. A test that hangs tells you nothing, and it costs
+    /// whoever hits it far more than a test that fails. Where a deadline can
+    /// turn the first into the second, it is worth the four lines.
     #[test]
     fn shell_exec_runs_the_program_through_a_real_pty() {
         use std::io::Read;
