@@ -1,6 +1,34 @@
 // Implementation of the `conformance-map` bin: reads the `/// node:` doc
 // comments in `tests/*.rs`, joins them with the fixed classification of
 // every Node suite below, and writes `docs/conformance.md`.
+//
+// ANYTHING THIS PRINTS AS FACT MUST BE READ FROM THE THING, NOT TYPED BESIDE
+// IT.
+//
+// That rule was earned three times over, by this file, in this file:
+//
+//   1. The Node checkout defaulted to an absolute path on one developer's
+//      machine, so running it elsewhere silently described a different tree.
+//   2. With no checkout, `node_suites` fell back to the compiled-in `SUITES`
+//      list, so it would write a complete-looking document from no source.
+//   3. The header named the checkout as "0.12.0+500eab2" from a string
+//      literal. It was true the day it was typed and wrong every day after,
+//      and regenerating could not fix it, because a constant cannot follow the
+//      thing it describes.
+//
+// The third is the worst of the three and the hardest to notice. The first two
+// produce a wrong document; the third produces a document that is right about
+// everything except what it was made from, which is the one claim a reader
+// uses to decide whether to trust the rest.
+//
+// A GENERATED DOCUMENT IS WHERE AN UNMEASURED CLAIM SURVIVES LONGEST, BECAUSE
+// NOBODY RE-READS WHAT A MACHINE WROTE. A human writing the same sentence by
+// hand would eventually notice it had gone stale. Nothing here will.
+//
+// So: derive it, or do not print it. If a value cannot be read from the input,
+// the generator should refuse rather than assert — which is what it now does
+// when `PTY_NODE_CHECKOUT` is unset, and what it does when the tests reference
+// a suite the checkout does not have.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
