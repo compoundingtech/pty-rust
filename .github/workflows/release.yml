@@ -77,8 +77,13 @@ jobs:
           mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
 
+      # `cut`, not ${GITHUB_SHA::7}. The container job runs `sh -e`, where that
+      # substring form is a bashism and fails with "Bad substitution"; the
+      # macOS runner uses bash and accepted it. That is the same asymmetry as
+      # the bug this step exists to fix, one layer up, so it is written to work
+      # in both shells rather than in the one that happened to be tested.
       - name: Short sha, to match the convention used everywhere else
-        run: echo "PTY_BUILD_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        run: echo "PTY_BUILD_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release -p pty
@@ -132,8 +137,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
+      # `cut`, not ${GITHUB_SHA::7}. The container job runs `sh -e`, where that
+      # substring form is a bashism and fails with "Bad substitution"; the
+      # macOS runner uses bash and accepted it. That is the same asymmetry as
+      # the bug this step exists to fix, one layer up, so it is written to work
+      # in both shells rather than in the one that happened to be tested.
       - name: Short sha, to match the convention used everywhere else
-        run: echo "PTY_BUILD_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        run: echo "PTY_BUILD_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_ENV"
 
       - run: nix build --print-build-logs
 
