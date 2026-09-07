@@ -45,6 +45,7 @@ fn too_old() -> bool {
     false
 }
 
+/// node: tests/output-activity.test.ts:132
 #[test]
 fn the_stamp_is_absent_until_the_child_prints() {
     if too_old() {
@@ -61,6 +62,7 @@ fn the_stamp_is_absent_until_the_child_prints() {
     );
 }
 
+/// node: tests/output-activity.test.ts:141
 #[test]
 fn the_stamp_appears_after_output_and_reads_as_now() {
     if too_old() {
@@ -81,6 +83,7 @@ fn the_stamp_appears_after_output_and_reads_as_now() {
     );
 }
 
+/// node: tests/output-activity.test.ts:159
 #[test]
 fn a_later_burst_moves_the_stamp_forward() {
     if too_old() {
@@ -103,6 +106,7 @@ fn a_later_burst_moves_the_stamp_forward() {
 
 /// The one that the debounce could lose: a child that prints and exits
 /// inside the same second never gets its own scheduled write.
+/// node: tests/output-activity.test.ts:179
 #[test]
 fn a_child_that_prints_and_exits_at_once_keeps_its_stamp() {
     if too_old() {
@@ -128,6 +132,9 @@ fn a_child_that_prints_and_exits_at_once_keeps_its_stamp() {
 }
 
 /// A busy session must not write its record once per chunk.
+/// No Node counterpart: the debounce is stated as a requirement (at most one
+/// write a second) rather than tested there, so this is a Rust-owned fixture
+/// for a promise the Node implementation makes and does not check.
 #[test]
 fn a_busy_session_writes_the_stamp_about_once_a_second() {
     if too_old() {
