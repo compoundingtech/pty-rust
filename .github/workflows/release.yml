@@ -31,6 +31,25 @@ env:
   # in any given environment.
   PTY_BUILD_SHA: ${{ github.sha }}
 
+# A JOB PASSING IS NOT EVIDENCE ABOUT THE JOB THAT FAILED.
+#
+# This workflow builds on two platforms, and twice in one afternoon a fix was
+# written for a failure on one of them, was itself platform-dependent, and
+# passed on the platform that had never had the original problem:
+#
+#   1. The Linux asset reported `0.13.0-rust+unknown` because git refused inside
+#      the container. macOS reported the real sha, so the green macOS job was
+#      taken as evidence the approach was sound. It was evidence about macOS.
+#
+#   2. The fix for that used `${GITHUB_SHA::7}`. The container runs `sh`, where
+#      that is a "Bad substitution"; the macOS runner uses bash and accepted it.
+#      A fix for a platform-dependent bug, failing platform-dependently.
+#
+# The rule is not "prefer cut over substring expansion". It is that a green job
+# on platform A says nothing about platform B, so a fix goes into BOTH jobs and
+# is verified in both shells, even when only one of them was broken. Otherwise
+# the next failure looks like a new bug rather than the same one.
+
 jobs:
   # ── Linux: cargo, NOT nix ────────────────────────────────────────────────
   #
