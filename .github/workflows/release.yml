@@ -9,10 +9,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-    # TEMPORARY, removed before merge: a workflow_dispatch-only workflow is not
-    # dispatchable until it exists on the default branch, and merging a release
-    # workflow nobody has run is exactly the wrong order.
-    branches: [feat/release-binaries]
   workflow_dispatch:
 
 permissions:
