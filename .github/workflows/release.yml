@@ -18,6 +18,23 @@ on:
 permissions:
   contents: write
 
+env:
+  # build.rs derives the version sha by running git in the checkout, and falls
+  # back to the string "unknown" when that fails. It DID fail in the Debian
+  # container: actions/checkout and the container disagree about directory
+  # ownership, so git refused, and the first Linux asset built here reported
+  # 0.13.0-rust+unknown while the macOS one reported the real sha.
+  #
+  # A release binary that cannot say which commit it is defeats the point of
+  # having releases. It is the exact failure that made this rollout necessary:
+  # a binary had been serving a machine for five days and nobody could tell
+  # which build it was without reading its version string.
+  #
+  # PTY_BUILD_SHA is build.rs's own escape hatch and it takes precedence over
+  # git, so setting it here makes the version independent of whether git works
+  # in any given environment.
+  PTY_BUILD_SHA: ${{ github.sha }}
+
 jobs:
   # ── Linux: cargo, NOT nix ────────────────────────────────────────────────
   #
@@ -60,6 +77,9 @@ jobs:
           mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
 
+      - name: Short sha, to match the convention used everywhere else
+        run: echo "PTY_BUILD_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
       - name: Build
         run: cargo build --release -p pty
 
@@ -75,7 +95,13 @@ jobs:
           floor=$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)
           echo "== glibc floor: $floor =="
           echo "glibc floor: \`$floor\`" >> "$GITHUB_STEP_SUMMARY"
-          "$bin" --version
+          v=$("$bin" --version)
+          echo "== version: $v =="
+          case "$v" in *unknown*)
+            echo "FAIL: the binary cannot say which commit it is."
+            echo "An asset reporting +unknown is unusable for deciding whether a machine is up to date."
+            exit 1 ;;
+          esac
 
       - name: Stage the asset
         run: |
@@ -106,6 +132,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Short sha, to match the convention used everywhere else
+        run: echo "PTY_BUILD_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
       - run: nix build --print-build-logs
 
       - name: Take it out of the store and cut it loose
@@ -151,7 +180,12 @@ jobs:
           fi
           echo "no /nix/store references remain"
           codesign --verify --verbose "$bin"
-          "$bin" --version
+          v=$("$bin" --version)
+          echo "== version: $v =="
+          case "$v" in *unknown*)
+            echo "FAIL: the binary cannot say which commit it is."
+            exit 1 ;;
+          esac
 
       - name: Stage the asset
         run: |
