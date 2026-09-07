@@ -1,6 +1,34 @@
 // Implementation of the `conformance-map` bin: reads the `/// node:` doc
 // comments in `tests/*.rs`, joins them with the fixed classification of
 // every Node suite below, and writes `docs/conformance.md`.
+//
+// ANYTHING THIS PRINTS AS FACT MUST BE READ FROM THE THING, NOT TYPED BESIDE
+// IT.
+//
+// That rule was earned three times over, by this file, in this file:
+//
+//   1. The Node checkout defaulted to an absolute path on one developer's
+//      machine, so running it elsewhere silently described a different tree.
+//   2. With no checkout, `node_suites` fell back to the compiled-in `SUITES`
+//      list, so it would write a complete-looking document from no source.
+//   3. The header named the checkout as "0.12.0+500eab2" from a string
+//      literal. It was true the day it was typed and wrong every day after,
+//      and regenerating could not fix it, because a constant cannot follow the
+//      thing it describes.
+//
+// The third is the worst of the three and the hardest to notice. The first two
+// produce a wrong document; the third produces a document that is right about
+// everything except what it was made from, which is the one claim a reader
+// uses to decide whether to trust the rest.
+//
+// A GENERATED DOCUMENT IS WHERE AN UNMEASURED CLAIM SURVIVES LONGEST, BECAUSE
+// NOBODY RE-READS WHAT A MACHINE WROTE. A human writing the same sentence by
+// hand would eventually notice it had gone stale. Nothing here will.
+//
+// So: derive it, or do not print it. If a value cannot be read from the input,
+// the generator should refuse rather than assert — which is what it now does
+// when `PTY_NODE_CHECKOUT` is unset, and what it does when the tests reference
+// a suite the checkout does not have.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,6 +102,7 @@ const SUITES: &[(&str, Kind, &str)] = &[
     ("integration", Kind::Protocol, "sync ordering, roles, malformed packets, geometry via stty, kitty replay, send, peek, stats; :618 injects an EXIT ahead of DATA through server internals and has no socket-level counterpart"),
     ("keys", Kind::Unit, "pty-core key resolver unit tests"),
     ("kill-releases-socket-command", Kind::Cli, "bin/pty-kill-releases-socket-test rewritten as a Rust test; the second binary is dropped in docs/parity.md §12"),
+    ("kill-report", Kind::Unit, "the report is pure logic over a process table; ported as cli/kill.rs unit tests, which is where the survivor and escalation cases live"),
     ("kill-wait", Kind::Cli, ""),
     ("list-filters", Kind::Cli, ""),
     ("list-live-session-race", Kind::Cli, ""),
@@ -85,10 +114,13 @@ const SUITES: &[(&str, Kind, &str)] = &[
     ("nesting-prevention", Kind::Cli, ""),
     ("nesting", Kind::Cli, ""),
     ("panel-footer-title", Kind::NotPortable, TUI),
+    ("output-activity", Kind::Cli, ""),
     ("parity-fixtures", Kind::Cli, "shared screens.json loader"),
     ("parity-node-reference", Kind::Cli, "resolveSeqDelayMs rounding (:238, :243) is a pty-core unit test"),
     ("parity-shapes", Kind::Cli, "shared shapes.json loader"),
     ("peek-wait", Kind::Cli, ""),
+    ("proc-table", Kind::Unit, "reading the process table is pure logic; ported as pty-core/src/proctable.rs unit tests, including the truncation guard and the layout self-check"),
+    ("process-groups", Kind::Unit, "group membership over an injected table; ported as daemon/tree.rs unit tests, which also cover the zombie the sweep must not count"),
     ("process-title", Kind::Cli, "Linux /proc comm"),
     ("process-tree", Kind::Cli, "only the TERM-then-KILL contract (:55) is observable; :10 and :33 are unit tests with injected process lists"),
     ("progress-bars", Kind::NotPortable, TUI),
@@ -121,6 +153,7 @@ const SUITES: &[(&str, Kind, &str)] = &[
     ("spawn-bundle-fallback", Kind::Cli, "only the run -d argv shape; spawn-strategy resolution (:59, :116, :139) is inside the Node library"),
     ("spawn-options", Kind::Cli, "CLI half; spawnDaemon(...) library cases stay in Node"),
     ("spawner-pid-watchdog", Kind::Cli, ""),
+    ("spawn-already-published", Kind::Unit, "is_published_by over an injected liveness predicate; ported as daemon/launch.rs unit tests, including the zombie case against a real corpse rather than a mock"),
     ("stats-cli", Kind::Cli, ""),
     ("tag-bulk", Kind::Cli, ""),
     ("tag-multi", Kind::Cli, ""),
@@ -237,6 +270,28 @@ fn scan_tests(tests_dir: &Path) -> Result<Vec<Mapped>, String> {
 }
 
 /// Node suites present in the checkout (or the fixed list when unavailable).
+/// How to name the Node checkout this map was generated from: its package
+/// version and the commit it is on, both read from the checkout itself.
+fn node_reference(dir: &Path) -> String {
+    let version = std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|s| {
+            s.split(r#""version""#).nth(1)?.split('"').nth(1).map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown-version".to_string());
+    let sha = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown-commit".to_string());
+    format!("{version}+{sha}")
+}
+
 fn node_suites(checkout: Option<&Path>) -> Vec<String> {
     if let Some(dir) = checkout
         && let Ok(rd) = std::fs::read_dir(dir.join("tests"))
@@ -340,7 +395,16 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     let mut md = String::new();
     md.push_str("# Conformance map\n\n");
     md.push_str("Generated by `cargo run -p pty-conformance --bin conformance-map`; do not edit by hand.\n\n");
-    md.push_str("One row per Node test file (`tests/*.test.ts` in the Node checkout, 0.12.0+500eab2). ");
+    // DERIVED, never typed. This line used to carry the literal
+    // "0.12.0+500eab2". It was true when it was written and silently wrong
+    // ever afterwards, because regenerating the document could not update a
+    // string that was not read from anything. A generated file asserting a
+    // fact it did not measure is the same defect as the hardcoded checkout
+    // path that used to sit above: it looks authoritative and ages badly.
+    md.push_str(&format!(
+        "One row per Node test file (`tests/*.test.ts` in the Node checkout, {}). ",
+        node_reference(&dir)
+    ));
     md.push_str("`kind` is how the suite is covered: `cli` (black-box through the binary), `protocol` (over the session socket), ");
     md.push_str("`unit` (pure logic, ported as crate unit tests), or `not-portable` (with the reason). ");
     md.push_str("A `cli`/`protocol` suite with no Rust file yet is still to do. ");
