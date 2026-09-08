@@ -56,7 +56,10 @@ impl Rig {
         assert!(
             longest.as_os_str().len() <= pty_core::registry::SUN_PATH_MAX,
             "the test root is too long for a unix socket path: {} bytes of {} at\n  {}\n  \
-             This is the test harness, not the software. Set a shorter TMPDIR (TMPDIR=/tmp works).",
+             This is the test harness, not the software. Point TMPDIR at a SHORTER path.\n  \
+             Shorter is the whole requirement, and a short path on a disk-backed \
+             filesystem is the safe answer: on some machines /tmp is a RAM disk \
+             shared with everything else on the box.",
             longest.as_os_str().len(),
             pty_core::registry::SUN_PATH_MAX,
             root.display()
