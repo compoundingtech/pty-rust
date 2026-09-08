@@ -30,6 +30,52 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$NODE_BIN" ] || { echo "node pty not found (use --node)"; exit 2; }
 [ -x "$RUST_BIN" ] || { echo "rust pty not found at $RUST_BIN (cargo build -p pty, or --rust)"; exit 2; }
+
+# Check that the reference binary is the Node tool, at the commit we pinned.
+#
+# The default reference is whatever `pty` is on PATH, and on a machine that has
+# the port installed that is a RUST build. Nothing here noticed: the run
+# compared Rust against Rust, labelled one column "node", printed a full row of
+# passes and wrote an empty red.txt. A run that measures nothing looks exactly
+# like a run that found perfect parity, and it is the more encouraging of the
+# two, so it is the one that gets believed.
+#
+# The two binaries name themselves apart. The port carries a `-rust` tag by
+# decision (`0.13.x-rust+<short-sha>`, docs/parity.md section 14); the Node tool
+# does not (`0.12.0+86dcc5e`).
+NODE_VERSION="$("$NODE_BIN" --version 2>/dev/null || true)"
+RUST_VERSION="$("$RUST_BIN" --version 2>/dev/null || true)"
+[ -n "$NODE_VERSION" ] || NODE_VERSION="unknown"
+[ -n "$RUST_VERSION" ] || RUST_VERSION="unknown"
+
+case "$NODE_VERSION" in
+  *-rust*)
+    echo "refusing: the reference binary is a build of this port, not the Node pty."
+    echo "  --node $NODE_BIN"
+    echo "  reports $NODE_VERSION"
+    echo "Comparing the port against itself reports perfect parity and measures nothing."
+    echo "Build the Node tool at the pinned commit and point --node at it:"
+    echo "  ref=\$(cat crates/pty-conformance/node-ref)"
+    echo "  git clone --filter=blob:none https://github.com/compoundingtech/pty /some/disk/path/node-pty"
+    echo "  git -C /some/disk/path/node-pty checkout --detach \$ref"
+    echo "  (cd /some/disk/path/node-pty && npm ci && npm run build)"
+    echo "  scripts/conformance-both.sh --node /some/disk/path/node-pty/bin/pty"
+    exit 2 ;;
+esac
+
+# Off the pinned commit is a warning and not a refusal: comparing against
+# another Node commit is a thing somebody may mean to do. Say it loudly, because
+# a reference seven commits stale invented eight divergences on 2026-09-05 and
+# every one was an artifact of the reference rather than a fact about the port.
+NODE_REF_SHORT="$(cut -c1-7 crates/pty-conformance/node-ref 2>/dev/null || true)"
+case "$NODE_VERSION" in
+  *"$NODE_REF_SHORT"*) ;;
+  *)
+    echo "WARNING: the reference binary is not at the pinned commit."
+    echo "  --node $NODE_BIN reports $NODE_VERSION"
+    echo "  crates/pty-conformance/node-ref pins $NODE_REF_SHORT"
+    echo "  Differences found in this run may belong to the reference, not to the port." ;;
+esac
 if [ ${#FILES[@]} -eq 0 ]; then
   for f in crates/pty-conformance/tests/*.rs; do
     FILES+=("$(basename "$f" .rs)")
@@ -64,8 +110,8 @@ run_side() {
   done
 }
 
-echo "node: $NODE_BIN"
-echo "rust: $RUST_BIN"
+echo "node: $NODE_BIN ($NODE_VERSION)"
+echo "rust: $RUST_BIN ($RUST_VERSION)"
 echo "logs: $OUT"
 run_side node "$NODE_BIN"
 run_side rust "$RUST_BIN"
