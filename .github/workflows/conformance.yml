@@ -40,14 +40,33 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
       - uses: actions/setup-node@v4
         with:
-          # The runtime is a pinned input, not a detail. It changes results.
-          # The Node binary truncates `pty completions fish` on a pipe under
-          # Node v24.18.0 — 123 lines of 167 — and does not under Node 22, on
-          # the same commit and the same test. Pinning only the reference
-          # COMMIT is not enough to make a comparison reproducible.
+          # The runtime is a pinned input, not a detail. It can change results,
+          # so pinning only the reference COMMIT is not enough to make a
+          # comparison reproducible.
           #
           # 22 matches the major the Node pty's own CI uses. Changing it is a
           # deliberate act: expect the divergence ledger to change with it.
+          #
+          # This comment used to say the Node binary truncates
+          # `pty completions fish` on a pipe under Node v24.18.0 and not under
+          # Node 22, and gave that as the reason for the pin. That was wrong.
+          # Measured on Linux x86_64 on 2026-09-08, at the same pinned commit
+          # 86dcc5e, with both runtimes:
+          #
+          #   node v22.23.2   fish piped 8192 bytes, to a file 12138
+          #   node v24.18.0   fish piped 8192 bytes, to a file 12138
+          #
+          # It truncates on both. The variable is the PIPE, not the major.
+          # Node's stdout is asynchronous to a pipe and synchronous to a file,
+          # and the old `completions` branch called `process.exit()` before the
+          # buffer drained, so output stopped at one 8192-byte pipe buffer.
+          # The three shells make that plain at the same commit: bash is 5275
+          # bytes and survives, zsh is 8327 and fish is 12138 and both stop at
+          # 8192. Node fixed it in pty#178 by setting `process.exitCode` and
+          # returning; that commit is one past this pin.
+          #
+          # The pin is still right, for the reason above it. The reason given
+          # for it was not.
           node-version: 22
 
       # The reference commit is pinned rather than tracked. A checkout seven
