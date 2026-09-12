@@ -1,7 +1,7 @@
-//! Node's file-lock protocol, implemented exactly so Rust and Node writers
-//! can share one `$PTY_ROOT`: `open(O_CREAT|O_EXCL, 0600)`, holder pid in
-//! the file, a dead or garbage holder is stolen with exactly one retry, and
-//! release is `unlink`.
+//! Node-compatible file locks: a no-replace claim, decimal holder pid,
+//! one stale steal, and release by unlink. Rust builds the 0600 owner inode
+//! under a sibling temporary name and hard-links it into place so the lock
+//! pathname is never visible before its pid content.
 //!
 //! Two locks per session: `<name>.lock` (creation/metadata) and
 //! `<name>.events.lock` (event log). Whenever both are taken the order is
@@ -9,37 +9,23 @@
 //!
 //! node: src/sessions.ts:2273-2336, 2374-2386; src/events.ts:224-249
 //!
-//! # These locks are not exclusive across a crash
+//! # Rust and Node lock contenders
 //!
-//! **A lock whose holder died is stolen, and two processes stealing the same
-//! stale lock can both end up holding it.** Measured on 2026-09-02: eight
-//! threads released together against one stale lock, over four hundred
-//! rounds, produced more than one winner in 386 of them.
+//! Rust publishes a complete 0600 owner inode with one no-replace hard link,
+//! so its lock pathname is never visible empty. When stealing a stale lock it
+//! takes an advisory lock on the inode it inspected and verifies that the
+//! pathname still names that inode before unlinking. A delayed Rust stealer
+//! therefore cannot remove a newer owner's lock.
 //!
-//! The steal is a read, a decision and then an unlink followed by a create,
-//! and nothing binds those together. A second process that made its decision
-//! from the same file unlinks what the first one has already put there. **The
-//! loser removes the winner's lock and then takes it**, and either one's
-//! release can remove the other's file.
-//!
-//! **The Node tool has the identical sequence and the identical defect**
-//! (`src/sessions.ts`, `acquireFileLock`), so a shared `$PTY_ROOT` is no
-//! worse than either implementation alone. This is not a difference between
-//! them.
-//!
-//! **So do not rely on these locks for correctness after a crash.** Taking
-//! one still keeps two live, healthy processes apart, which is what it is for
-//! in ordinary use. It does not settle a race between two processes tidying
-//! up after a daemon that died holding it.
-//!
-//! **A correct steal needs one exclusive create that only one process can
-//! win**, which means funnelling the steal through a second file — and that
-//! file lives in a directory both implementations read, so it is a change to
-//! a protocol they share and has to be agreed between them rather than added
-//! on one side. It is left undone deliberately. See `docs/hardening.md`,
-//! "Stealing a stale lock is not exclusive", for the interleaving in full.
+//! Node still creates the canonical file before writing its pid and steals
+//! with an unbound read-then-unlink sequence. Rust safely respects a live Node
+//! lock once its complete pid is visible, and Rust-only stale recovery is
+//! exclusive. If a concurrent stale-recovery path involves Node, however, a
+//! delayed Node contender can unlink a newer Rust or Node claim.
 
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -90,34 +76,96 @@ impl Drop for LockGuard {
     }
 }
 
+/// Publish a complete lock owner record without an empty-file window.
+///
+/// `open(O_CREAT|O_EXCL)` followed by `write(pid)` made the pathname visible
+/// before it named an owner. A racing acquirer read that empty file as stale,
+/// unlinked a live holder's lock, and entered the critical section with it.
+/// Build the 0600 inode under a unique temporary name and hard-link it into
+/// place: link creation is no-replace and the target is complete when it
+/// first exists.
 fn try_create(lock_path: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(lock_path)
-    {
-        Ok(mut f) => {
-            f.write_all(std::process::id().to_string().as_bytes())?;
-            Ok(true)
+
+    let tmp = super::atomic::tmp_path_for(lock_path);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(std::process::id().to_string().as_bytes())?;
+        drop(file);
+        match std::fs::hard_link(&tmp, lock_path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(e),
+    })();
+    let _ = std::fs::remove_file(tmp);
+    result
+}
+
+fn try_lock_exclusive(file: &std::fs::File) -> std::io::Result<bool> {
+    loop {
+        // SAFETY: `file` owns a valid descriptor for the duration of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => {}
+            std::io::ErrorKind::WouldBlock => return Ok(false),
+            _ => return Err(error),
+        }
     }
+}
+
+fn same_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+fn holder_is_alive(file: &std::fs::File) -> bool {
+    let mut contents = String::new();
+    let mut reader = file;
+    reader.read_to_string(&mut contents).is_ok()
+        && parse_leading_int(contents.trim()).is_some_and(pid_alive)
+}
+
+fn steal_opened_lock(lock_path: &Path, stale_inode: std::fs::File) -> std::io::Result<bool> {
+    if !try_lock_exclusive(&stale_inode)? {
+        return Ok(false);
+    }
+
+    let opened_metadata = stale_inode.metadata()?;
+    let current_metadata = match std::fs::metadata(lock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return try_create(lock_path);
+        }
+        Err(error) => return Err(error),
+    };
+    if !same_inode(&opened_metadata, &current_metadata) || holder_is_alive(&stale_inode) {
+        return Ok(false);
+    }
+
+    std::fs::remove_file(lock_path)?;
+    try_create(lock_path)
 }
 
 /// Acquire an exclusive file lock at `lock_path`. `Some(guard)` when
 /// acquired, `None` when another live process holds it. A lock whose holder
-/// pid is dead (or unreadable/garbage) is stolen: unlink, then retry the
-/// exclusive create exactly once — a racing stealer gets `None`.
+/// pid is dead (or unreadable/garbage) is stolen once.
+///
+/// Stale stealers take an advisory lock on the stale inode and verify that
+/// the pathname still names it before unlinking. This prevents a delayed
+/// stealer from removing the complete owner record another stealer has
+/// already published.
 ///
 /// I/O errors other than `EEXIST` are surfaced as `Err`, as Node rethrows
 /// them.
 ///
 /// node: src/sessions.ts:2293-2336
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGuard>> {
     ensure_session_dir()?;
     let guard = |path: &Path| LockGuard {
@@ -127,25 +175,51 @@ pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGua
     if try_create(lock_path)? {
         return Ok(Some(guard(lock_path)));
     }
-    let holder_alive = std::fs::read_to_string(lock_path)
-        .ok()
-        .and_then(|s| parse_leading_int(s.trim()))
-        .is_some_and(pid_alive);
-    if holder_alive {
-        return Ok(None);
+
+    let stale_inode = match std::fs::OpenOptions::new().read(true).open(lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(try_create(lock_path)?.then(|| guard(lock_path)));
+        }
+        Err(error) => return Err(error),
+    };
+    let acquired = steal_opened_lock(lock_path, stale_inode)?;
+    Ok(acquired.then(|| guard(lock_path)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delayed_stale_stealer_does_not_remove_a_new_owner() {
+        let dir = std::env::temp_dir().join(format!(
+            "pty-lock-steal-{}-{}",
+            std::process::id(),
+            super::super::atomic::random_hex16()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("session.lock");
+        std::fs::write(&path, "2147483646").unwrap();
+        let delayed_stealer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(try_create(&path).unwrap(), "new owner must publish");
+        assert!(
+            !steal_opened_lock(&path, delayed_stealer).unwrap(),
+            "decision made from the stale inode must not remove its replacement"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
-    match std::fs::remove_file(lock_path) {
-        Ok(()) => {}
-        // Somebody else got there first, which is fine: fall through and
-        // race them for the create.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        // Anything else is a registry this process cannot write. Returning
-        // "not acquired" here would report it as a busy lock and ask for a
-        // retry that can never work, which is the whole point of returning
-        // a result from this function.
-        Err(e) => return Err(e),
-    }
-    Ok(try_create(lock_path)?.then(|| guard(lock_path)))
 }
 
 /// [`try_acquire_file_lock`] with I/O errors folded into `None`.
@@ -154,8 +228,6 @@ pub fn try_acquire_file_lock(lock_path: &Path) -> std::io::Result<Option<LockGua
 /// to a caller wants [`lock_or_refusal`] instead: folding an I/O error into
 /// `None` turns a read-only registry into "the event log is busy, retry",
 /// which is untrue and sends the caller round a loop that cannot end.
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn acquire_file_lock(lock_path: &Path) -> Option<LockGuard> {
     try_acquire_file_lock(lock_path).ok().flatten()
 }
@@ -171,13 +243,11 @@ pub enum LockRefusal {
     /// error out of `acquireFileLock` rather than reporting "busy".
     Unavailable(String),
 }
-
 /// Take `lock_path` and say why when it refuses.
 ///
 /// node: src/sessions.ts:2293-2336 (`acquireFileLock` returns false only on
 /// `EEXIST` and rethrows every other error).
 ///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn lock_or_refusal(lock_path: &Path) -> Result<LockGuard, LockRefusal> {
     match try_acquire_file_lock(lock_path) {
         Ok(Some(guard)) => Ok(guard),
@@ -191,8 +261,6 @@ pub fn lock_or_refusal(lock_path: &Path) -> Result<LockGuard, LockRefusal> {
 
 /// Take `<name>.events.lock`, with Node's busy text when a live holder has
 /// it and the real cause when the file cannot be created.
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn take_event_lock(name: &str) -> Result<LockGuard, String> {
     lock_or_refusal(&event_lock_path(name)).map_err(|r| match r {
         LockRefusal::Busy => event_busy_message(name),
@@ -202,8 +270,6 @@ pub fn take_event_lock(name: &str) -> Result<LockGuard, String> {
 
 /// Take `<name>.lock`, with Node's busy text when a live holder has it and
 /// the real cause when the file cannot be created.
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn take_metadata_lock(name: &str) -> Result<LockGuard, String> {
     lock_or_refusal(&lock_path(name)).map_err(|r| match r {
         LockRefusal::Busy => metadata_busy_message(name),
@@ -235,8 +301,6 @@ pub(crate) fn parse_leading_int(s: &str) -> Option<i32> {
 }
 
 /// Acquire the creation/metadata lock `<name>.lock`.
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn acquire_lock(name: &str) -> Option<LockGuard> {
     acquire_file_lock(&lock_path(name))
 }
@@ -249,8 +313,6 @@ pub fn release_lock(name: &str) {
 /// Acquire the event lock `<name>.events.lock` without waiting.
 ///
 /// node: src/events.ts:228-230
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn acquire_event_lock(name: &str) -> Option<LockGuard> {
     acquire_file_lock(&event_lock_path(name))
 }
@@ -267,8 +329,6 @@ pub const EVENT_LOCK_WAIT: Duration = Duration::from_millis(5_000);
 /// Node's busy text when the deadline passes.
 ///
 /// node: src/events.ts:237-249
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn wait_for_event_lock(name: &str, wait: Duration) -> Result<LockGuard, String> {
     let deadline = Instant::now() + wait;
     let path = event_lock_path(name);
@@ -289,15 +349,16 @@ pub fn wait_for_event_lock(name: &str, wait: Duration) -> Result<LockGuard, Stri
     }
 }
 
-/// How long presentation patches (`metadata patch`, `rename`, `tag`) wait
-/// for the creation/metadata lock before reporting it busy.
+/// Total budget `metadata patch --id` shares between the event and
+/// creation/metadata locks before reporting either one busy.
 ///
-/// Mirrors [`EVENT_LOCK_WAIT`]: `pty run` holds `<name>.lock` across daemon
-/// spawn and publication, so a just-spawned attached child's first patch met
-/// a held lock and failed `metadata is busy` deterministically
-/// (compoundingtech/pty#180). A transient creation/attach holder clears
-/// quickly; a holder that outlives the budget still fails busy (fail-closed).
-pub const METADATA_LOCK_WAIT: Duration = Duration::from_millis(5_000);
+/// An attached child can run while `pty run` still holds `<name>.lock`;
+/// waiting here makes that creation window invisible without changing the
+/// historical fail-fast behavior of `rename`, `tag`, or other metadata
+/// writers. A holder that outlives the budget still fails closed.
+///
+/// node: src/sessions.ts `METADATA_PATCH_WAIT_MS`
+pub const METADATA_PATCH_LOCK_WAIT: Duration = Duration::from_millis(8_000);
 
 /// Acquire the creation/metadata lock `<name>.lock`, polling every 10 ms
 /// for up to `wait`.
@@ -306,8 +367,6 @@ pub const METADATA_LOCK_WAIT: Duration = Duration::from_millis(5_000);
 /// today's `metadata is busy` text) and `Unavailable` at once when the lock
 /// file cannot be created at all, as waiting cannot help — the same
 /// fail-closed contract as [`wait_for_event_lock`].
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn wait_for_metadata_lock(name: &str, wait: Duration) -> Result<LockGuard, LockRefusal> {
     let deadline = Instant::now() + wait;
     let path = lock_path(name);
@@ -327,6 +386,8 @@ pub fn wait_for_metadata_lock(name: &str, wait: Duration) -> Result<LockGuard, L
         std::thread::sleep(Duration::from_millis(10).min(deadline - now));
     }
 }
+
+/// Which lock refused a two-lock operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockBusy {
     /// `<name>.events.lock` is held by a live process.
@@ -353,8 +414,6 @@ impl LockBusy {
 /// creation/metadata lock. Neither waits.
 ///
 /// node: src/sessions.ts:2188-2202
-///
-/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
 pub fn with_both_locks<T>(name: &str, f: impl FnOnce() -> T) -> Result<T, LockBusy> {
     let events = lock_or_refusal(&event_lock_path(name)).map_err(|r| match r {
         LockRefusal::Busy => LockBusy::Events,
@@ -368,6 +427,17 @@ pub fn with_both_locks<T>(name: &str, f: impl FnOnce() -> T) -> Result<T, LockBu
     drop(metadata);
     drop(events);
     Ok(out)
+}
+
+/// Is `<name>.lock` currently held by a live process? Pure observation:
+/// never creates, removes, or steals the lock.
+///
+/// node: src/sessions.ts `isCreationLockHeld`
+pub fn is_creation_lock_held(name: &str) -> bool {
+    std::fs::read_to_string(lock_path(name))
+        .ok()
+        .and_then(|s| parse_leading_int(s.trim()))
+        .is_some_and(|pid| pid > 0 && pid_alive(pid))
 }
 
 /// Verify an explicitly delegated creation lock (`PTY_CREATION_LOCK_OWNER_PID`)

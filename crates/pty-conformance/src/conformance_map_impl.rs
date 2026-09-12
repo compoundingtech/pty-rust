@@ -67,6 +67,7 @@ const SUITES: &[(&str, Kind, &str)] = &[
     ("atomic-writes", Kind::Cli, "racing pty tag / emit / metadata patch writers and the lock files; the atomicWriteFileSync and appendEvent queueing loops are library-only"),
     ("attach-no-restart", Kind::Cli, ""),
     ("attach-stream", Kind::Cli, "fd 3 via a pipe; fake daemons behind a UnixListener; the reconnect cases (:495, :563) need attach --remote and are left with the remote suites"),
+    ("attach-window", Kind::Cli, "attached child observes the published owner sidecar and immediately patches metadata"),
     ("badge", Kind::NotPortable, TUI),
     ("breadcrumbs", Kind::NotPortable, TUI),
     ("buffer-palette", Kind::NotPortable, TUI),

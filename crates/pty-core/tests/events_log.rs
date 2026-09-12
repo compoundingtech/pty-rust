@@ -4,6 +4,7 @@
 
 mod registry_support;
 
+use std::io::Read;
 use std::time::Duration;
 
 use pty_core::events::{self, Event, EventWriter, event_type};
@@ -177,6 +178,75 @@ fn event_writer_truncates_when_exceeding_max_lines() {
     assert!(count > 0);
     let last = read_events(&name).pop().unwrap();
     assert_eq!(last["ts"], "2026-04-05T00:00:1049Z");
+}
+
+/// A raw reader that opened the old log before a concurrent append keeps one
+/// complete snapshot while the current path advances to the retained suffix.
+/// Opening and pausing after the first bytes makes the overlap deterministic:
+/// an in-place append changes the reader's inode and fails this assertion,
+/// whereas sibling-temp publication leaves it untouched.
+#[test]
+fn append_and_retention_publish_one_complete_snapshot_to_raw_readers() {
+    let _ = root();
+    let name = unique_name("snapshot");
+    let path = registry::events_path(&name);
+    let original = (0..1200)
+        .map(|i| {
+            json!({
+                "session": name,
+                "type": "user.prime",
+                "ts": "2026-04-05T00:00:00.000Z",
+                "data": {"i": i}
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&path, &original).unwrap();
+
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let (published_tx, published_rx) = std::sync::mpsc::channel();
+    let reader_path = path.clone();
+    let reader = std::thread::spawn(move || {
+        let mut file = std::fs::File::open(reader_path).unwrap();
+        let mut snapshot = vec![0; 64];
+        file.read_exact(&mut snapshot).unwrap();
+        opened_tx.send(()).unwrap();
+        published_rx.recv().unwrap();
+        file.read_to_end(&mut snapshot).unwrap();
+        snapshot
+    });
+
+    opened_rx.recv().unwrap();
+    events::append_event_sync(
+        &name,
+        &Event::user(
+            &name,
+            "user.published",
+            Some(json!({"marker": "last"})),
+            None,
+        )
+        .with_ts("2026-04-05T00:00:01.000Z"),
+    )
+    .unwrap();
+    published_tx.send(()).unwrap();
+
+    assert_eq!(reader.join().unwrap(), original.as_bytes());
+    let current = std::fs::read(&path).unwrap();
+    assert_eq!(current.last(), Some(&b'\n'));
+    let records: Vec<Value> = current
+        .split(|&byte| byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("complete JSONL record"))
+        .collect();
+    assert_eq!(records.len(), events::KEEP_LINES);
+    assert!(
+        current.len() < original.len(),
+        "one retained publication should shrink the over-cap snapshot"
+    );
+    assert_eq!(records.last().unwrap()["type"], "user.published");
+    assert_eq!(records.last().unwrap()["data"]["marker"], "last");
 }
 
 /// node: tests/events.test.ts:163-190
