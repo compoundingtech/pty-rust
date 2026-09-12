@@ -531,6 +531,9 @@ fn patch_fails_before_any_write_when_the_event_lock_is_held() {
 /// A held creation lock surfaces as the metadata-busy text.
 ///
 /// node: src/sessions.ts:547-549
+///
+/// A holder that outlives `METADATA_LOCK_WAIT` still fails busy: the wait is
+/// bounded and fail-closed. (This test takes the whole budget by design.)
 #[test]
 fn patch_reports_metadata_busy_when_the_creation_lock_is_held() {
     let _ = root();
@@ -542,6 +545,41 @@ fn patch_reports_metadata_busy_when_the_creation_lock_is_held() {
         err,
         format!("Session id \"{name}\" metadata is busy. Retry the operation.")
     );
+}
+
+/// A transient creation/attach holder is waited out instead of failing busy.
+///
+/// compoundingtech/pty#180: `pty run` holds `<name>.lock` across daemon
+/// spawn and publication, so a just-spawned attached child's first patch met
+/// a held lock and failed deterministically. The presentation path waits up
+/// to `METADATA_LOCK_WAIT`; a holder that clears quickly is invisible.
+#[test]
+fn patch_waits_for_a_transient_creation_lock() {
+    let _ = root();
+    let name = unique_name("transient");
+    plant(&name);
+    let holder = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            let _held = registry::acquire_lock(&name).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    });
+    // Let the holder take the lock first, so the patch really meets it held.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let patch = MetadataPatch::from_json(&json!({"tags": {"waited": "1"}})).unwrap();
+    let result = registry::patch_metadata_by_id(&name, &patch).unwrap();
+    assert!(result.changed);
+    assert_eq!(
+        result
+            .metadata
+            .tags
+            .as_ref()
+            .and_then(|t| t.get("waited"))
+            .map(String::as_str),
+        Some("1")
+    );
+    holder.join().unwrap();
 }
 
 /// node: tests/metadata-events.test.ts:420-476

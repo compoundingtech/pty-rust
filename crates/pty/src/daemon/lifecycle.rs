@@ -210,41 +210,19 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         return Err(invalid_cwd_error(&reason, &name, &cfg.command));
     }
 
-    // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
-    // lookups, shebangs and symlinks behave like a shell's.
+    // The PTY pair first: opening it fails before anything is published.
     let pair = pty_spawn::open(rows, cols)
         .map_err(|e| format!("Failed to open a PTY for session \"{name}\": {e}"))?;
-    let mut command = pty_spawn::shell_exec(&cfg.command, &cfg.args);
-    command.cwd(&cwd);
-    command.env_clear();
-    for (k, v) in &child_env {
-        command.env(k, v);
-    }
-    let child = pair.slave.spawn_command(command).map_err(|e| {
-        format!(
-            "Failed to spawn PTY shell \"/bin/sh\" for command \"{}\" in cwd \"{cwd}\": {e}",
-            cfg.command
-        )
-    })?;
-    drop(pair.slave);
-    let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
-    // The child is reaped by the waiter thread below, never through this handle.
-    std::mem::forget(child);
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("Failed to read the PTY for session \"{name}\": {e}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("Failed to write the PTY for session \"{name}\": {e}"))?;
 
-    let (tx, rx) = mpsc::channel::<Msg>();
-    spawn_pty_reader(reader, tx.clone());
-    spawn_child_waiter(child_pid, tx.clone());
-
-    // Publication: dir → clear events → stale socket → listen (umask 077,
-    // chmod 600) → pid → metadata → session_start.
+    // Publication before the child spawns: dir → clear events → stale
+    // socket → listen (umask 077, chmod 600) → pid → metadata →
+    // session_start. An attached child's first action runs after this block,
+    // so its session record — the `<name>.pid` owner sidecar, the metadata,
+    // and the `session_start` line `pty run` waits for — is already on disk
+    // when the child starts (compoundingtech/pty#180). Spawning first left
+    // the child racing publication: its immediate `metadata patch` met the
+    // creation lock its own `pty run` parent still held, and the sidecar
+    // could be unpublished when it first ran.
     registry::ensure_session_dir().map_err(|e| e.to_string())?;
     pty_core::events::clear_events(&name)?;
     let socket_path = registry::socket_path(&name);
@@ -286,6 +264,43 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
     registry::write_metadata_publication(&name, &metadata).map_err(|e| e.to_string())?;
     events.append(Event::session_start(&name, cfg.tags()));
     events.flush();
+
+    // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
+    // lookups, shebangs and symlinks behave like a shell's.
+    let mut command = pty_spawn::shell_exec(&cfg.command, &cfg.args);
+    command.cwd(&cwd);
+    command.env_clear();
+    for (k, v) in &child_env {
+        command.env(k, v);
+    }
+    let child = pair.slave.spawn_command(command).map_err(|e| {
+        // Published above but never started: withdraw the liveness signals
+        // so the name reads as gone rather than running. The metadata and
+        // events stay, as they do for the other post-publication failures,
+        // and the next `run` recreates over them.
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_file(registry::pid_path(&name));
+        format!(
+            "Failed to spawn PTY shell \"/bin/sh\" for command \"{}\" in cwd \"{cwd}\": {e}",
+            cfg.command
+        )
+    })?;
+    drop(pair.slave);
+    let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
+    // The child is reaped by the waiter thread below, never through this handle.
+    std::mem::forget(child);
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to read the PTY for session \"{name}\": {e}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to write the PTY for session \"{name}\": {e}"))?;
+
+    let (tx, rx) = mpsc::channel::<Msg>();
+    spawn_pty_reader(reader, tx.clone());
+    spawn_child_waiter(child_pid, tx.clone());
 
     let listener_fd = listener.as_raw_fd();
     spawn_acceptor(listener, tx.clone());
