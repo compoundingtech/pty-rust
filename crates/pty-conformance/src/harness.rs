@@ -860,10 +860,14 @@ impl Rig {
         pids
     }
 
-    /// SIGTERM every recorded pid, wait up to 2 s, SIGKILL survivors.
+    /// Stop every recorded daemon PID except PID 1 and the test process.
     pub fn teardown_daemons(&self) {
         let me = std::process::id() as i32;
-        let pids: Vec<i32> = self.recorded_pids().into_iter().filter(|&p| p != me).collect();
+        let pids: Vec<i32> = self
+            .recorded_pids()
+            .into_iter()
+            .filter(|&p| p > 1 && p != me)
+            .collect();
         for &pid in &pids {
             kill_pid(pid, libc::SIGTERM);
         }
