@@ -91,6 +91,50 @@ fn publication_order_and_shapes() {
     }
 }
 
+/// The owner record is published before the child starts.
+///
+/// compoundingtech/pty#180: the daemon spawned its child before publishing,
+/// so an attached child's first action could run with `<name>.pid`
+/// unpublished and the metadata missing. The child's first action here is a
+/// marker file; the moment it appears, the owner sidecar, the metadata, and
+/// the `session_start` line the spawner waits for must already be on disk.
+#[test]
+fn owner_record_is_published_before_the_child_starts() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("pubfirst");
+    let marker = root.join(format!("{name}.started"));
+    let cfg = config(
+        &name,
+        "sh",
+        &[
+            "-c",
+            &format!("touch '{}'; exec sleep 30", marker.display()),
+        ],
+    );
+    // Spawn without waiting: the child's marker is the readiness signal.
+    let d = Daemon::spawn(&root, cfg, &[]);
+    assert!(
+        wait_until(T, || marker.exists()),
+        "child of session {name} never started"
+    );
+    let pid: i32 = std::fs::read_to_string(root.join(format!("{name}.pid")))
+        .expect("owner sidecar published before the child starts")
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(pid, d.pid);
+    let m = d
+        .meta()
+        .expect("metadata published before the child starts");
+    assert_eq!(m["daemonPid"], d.pid);
+    assert!(
+        !d.events("session_start").is_empty(),
+        "session_start published before the child starts"
+    );
+}
+
 /// What `ps` and `top` call a process, read the way each machine offers it.
 ///
 /// **This used to read `/proc` and nothing else, so on a Mac it panicked with

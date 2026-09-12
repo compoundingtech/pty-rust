@@ -37,10 +37,11 @@ pub use list::{
     socket_reachable, wait_for_process_exit,
 };
 pub use lock::{
-    EVENT_LOCK_WAIT, LockBusy, LockGuard, LockRefusal, acquire_event_lock, acquire_file_lock,
-    acquire_lock, event_busy_message, is_lock_owned_by_pid, lock_or_refusal,
+    EVENT_LOCK_WAIT, LockBusy, LockGuard, LockRefusal, METADATA_LOCK_WAIT, acquire_event_lock,
+    acquire_file_lock, acquire_lock, event_busy_message, is_lock_owned_by_pid, lock_or_refusal,
     metadata_busy_message, release_event_lock, release_file_lock, release_lock, take_event_lock,
-    take_metadata_lock, try_acquire_file_lock, wait_for_event_lock, with_both_locks,
+    take_metadata_lock, try_acquire_file_lock, wait_for_event_lock, wait_for_metadata_lock,
+    with_both_locks,
 };
 pub use metadata::{
     EnvMap, SESSION_EXIT_LAST_LINES_LIMIT, SessionMetadata, TagMap, apply_metadata_diff,
@@ -50,8 +51,8 @@ pub use metadata::{
 pub use mutate::{
     MetadataChangeSnapshot, MetadataPatch, MetadataPatchEvent, MetadataPatchResult, MutateOptions,
     MutateStatus, apply_metadata_patch_by_id, metadata_matches_observation,
-    mutate_metadata_under_lock, mutate_metadata_under_lock_with, patch_metadata_by_id,
-    set_display_name, update_tags,
+    mutate_metadata_under_lock, mutate_metadata_under_lock_with,
+    mutate_metadata_under_lock_with_wait, patch_metadata_by_id, set_display_name, update_tags,
 };
 pub use names::{
     SESSION_ID_ALPHABET, SESSION_ID_ATTEMPTS, auto_display_name, generate_id, random_session_name,

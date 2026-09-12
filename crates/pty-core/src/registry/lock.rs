@@ -289,7 +289,44 @@ pub fn wait_for_event_lock(name: &str, wait: Duration) -> Result<LockGuard, Stri
     }
 }
 
-/// Which of the two locks refused.
+/// How long presentation patches (`metadata patch`, `rename`, `tag`) wait
+/// for the creation/metadata lock before reporting it busy.
+///
+/// Mirrors [`EVENT_LOCK_WAIT`]: `pty run` holds `<name>.lock` across daemon
+/// spawn and publication, so a just-spawned attached child's first patch met
+/// a held lock and failed `metadata is busy` deterministically
+/// (compoundingtech/pty#180). A transient creation/attach holder clears
+/// quickly; a holder that outlives the budget still fails busy (fail-closed).
+pub const METADATA_LOCK_WAIT: Duration = Duration::from_millis(5_000);
+
+/// Acquire the creation/metadata lock `<name>.lock`, polling every 10 ms
+/// for up to `wait`.
+///
+/// Returns `Busy` when a live holder outlives the budget (the caller keeps
+/// today's `metadata is busy` text) and `Unavailable` at once when the lock
+/// file cannot be created at all, as waiting cannot help — the same
+/// fail-closed contract as [`wait_for_event_lock`].
+///
+/// **Stealing a stale lock is not exclusive.** See the [module docs](self).
+pub fn wait_for_metadata_lock(name: &str, wait: Duration) -> Result<LockGuard, LockRefusal> {
+    let deadline = Instant::now() + wait;
+    let path = lock_path(name);
+    loop {
+        match lock_or_refusal(&path) {
+            Ok(guard) => return Ok(guard),
+            // The lock file cannot be made at all. Waiting out the budget
+            // to say so would be time spent on an answer that will not
+            // change.
+            Err(refusal @ LockRefusal::Unavailable(_)) => return Err(refusal),
+            Err(LockRefusal::Busy) => {}
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(LockRefusal::Busy);
+        }
+        std::thread::sleep(Duration::from_millis(10).min(deadline - now));
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockBusy {
     /// `<name>.events.lock` is held by a live process.

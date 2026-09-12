@@ -8,7 +8,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::lock::{acquire_lock, metadata_busy_message, take_event_lock};
+use super::lock::{
+    LockRefusal, METADATA_LOCK_WAIT, metadata_busy_message, take_event_lock, wait_for_metadata_lock,
+};
 use super::metadata::{
     SessionMetadata, TagMap, apply_metadata_diff, read_metadata_map, write_metadata_map,
 };
@@ -90,8 +92,39 @@ pub fn mutate_metadata_under_lock_with(
     options: &MutateOptions,
     on_published: impl FnOnce(&SessionMetadata),
 ) -> MutateStatus {
-    let Some(_lock) = acquire_lock(name) else {
-        return MutateStatus::Busy;
+    mutate_metadata_under_lock_with_wait(
+        name,
+        mutate,
+        options,
+        on_published,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// [`mutate_metadata_under_lock_with`] that waits up to `wait` for
+/// `<name>.lock` instead of reporting `Busy` at once.
+///
+/// compoundingtech/pty#180: `pty run` holds the creation lock across daemon
+/// spawn and publication, so a just-spawned attached child's first metadata
+/// write met a held lock. Transient creation/attach holders clear quickly;
+/// a holder that outlives the budget still reports `Busy` (fail-closed), and
+/// a lock file that cannot be created at all reports `Busy` at once, exactly
+/// as the fail-fast path does today.
+pub fn mutate_metadata_under_lock_with_wait(
+    name: &str,
+    mutate: impl FnOnce(&mut SessionMetadata) -> bool,
+    options: &MutateOptions,
+    on_published: impl FnOnce(&SessionMetadata),
+    wait: std::time::Duration,
+) -> MutateStatus {
+    let _lock = match wait_for_metadata_lock(name, wait) {
+        Ok(guard) => guard,
+        // `Unavailable` folds into `Busy` here, as `acquire_lock` folds
+        // every I/O error into "not taken" today. The presentation path
+        // takes the event lock first and surfaces its cause, so this arm
+        // is nearly unreachable through it; daemon-internal callers keep
+        // their existing `Busy` handling either way.
+        Err(LockRefusal::Busy) | Err(LockRefusal::Unavailable(_)) => return MutateStatus::Busy,
     };
     let Some(raw) = read_metadata_map(name) else {
         return MutateStatus::Missing;
@@ -270,7 +303,15 @@ pub fn apply_metadata_patch_by_id(
     }
     let state = std::cell::RefCell::new(PatchState::default());
 
-    let result = mutate_metadata_under_lock_with(
+    // Wait out a transient creation/attach holder instead of failing busy:
+    // `pty run` holds `<id>.lock` across daemon spawn and publication, so a
+    // just-spawned attached child's first patch would otherwise fail
+    // deterministically (compoundingtech/pty#180). The event lock is already
+    // held here, which keeps Node's event-then-creation order, and the daemon
+    // publishes before spawning its child, so nothing it needs at startup
+    // waits behind this side. A holder that outlives the budget still fails
+    // with today's busy text (fail-closed).
+    let result = mutate_metadata_under_lock_with_wait(
         id,
         |metadata| {
             let mut st = state.borrow_mut();
@@ -356,6 +397,7 @@ pub fn apply_metadata_patch_by_id(
             };
             let _ = append_event_locked(id, &ev);
         },
+        METADATA_LOCK_WAIT,
     );
 
     let mutation_error = state.into_inner().error;
