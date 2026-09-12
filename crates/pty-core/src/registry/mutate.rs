@@ -4,12 +4,15 @@
 //!
 //! node: src/sessions.ts:330-593, 740-752
 
+use std::time::{Duration, Instant};
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::lock::{
-    LockRefusal, METADATA_LOCK_WAIT, metadata_busy_message, take_event_lock, wait_for_metadata_lock,
+    LockRefusal, METADATA_PATCH_LOCK_WAIT, is_creation_lock_held, metadata_busy_message,
+    take_event_lock, wait_for_event_lock, wait_for_metadata_lock,
 };
 use super::metadata::{
     SessionMetadata, TagMap, apply_metadata_diff, read_metadata_map, write_metadata_map,
@@ -280,18 +283,32 @@ pub enum MetadataPatchEvent {
     TagsChange,
 }
 
-/// The core of `metadata patch` / `rename` / `tag`: event lock, then the
-/// creation lock, mutate, publish, append exactly one event when something
-/// changed.
+/// The fail-fast core used by `rename` / `tag` and direct callers: event
+/// lock, then the creation lock, mutate, publish, append exactly one event
+/// when something changed.
 ///
-/// node: src/sessions.ts:444-557
+/// node: src/sessions.ts:478-595
 pub fn apply_metadata_patch_by_id(
     id: &str,
     patch: &MetadataPatch,
     event: MetadataPatchEvent,
 ) -> Result<MetadataPatchResult, String> {
+    apply_metadata_patch_by_id_with_wait(id, patch, event, Duration::ZERO)
+}
+
+fn apply_metadata_patch_by_id_with_wait(
+    id: &str,
+    patch: &MetadataPatch,
+    event: MetadataPatchEvent,
+    wait: Duration,
+) -> Result<MetadataPatchResult, String> {
     patch.validate()?;
-    let _event_lock = take_event_lock(id)?;
+    let deadline = Instant::now() + wait;
+    let _event_lock = if wait.is_zero() {
+        take_event_lock(id)?
+    } else {
+        wait_for_event_lock(id, wait)?
+    };
 
     #[derive(Default)]
     struct PatchState {
@@ -303,14 +320,11 @@ pub fn apply_metadata_patch_by_id(
     }
     let state = std::cell::RefCell::new(PatchState::default());
 
-    // Wait out a transient creation/attach holder instead of failing busy:
-    // `pty run` holds `<id>.lock` across daemon spawn and publication, so a
-    // just-spawned attached child's first patch would otherwise fail
-    // deterministically (compoundingtech/pty#180). The event lock is already
-    // held here, which keeps Node's event-then-creation order, and the daemon
-    // publishes before spawning its child, so nothing it needs at startup
-    // waits behind this side. A holder that outlives the budget still fails
-    // with today's busy text (fail-closed).
+    // `metadata patch --id` waits out a transient creation/attach holder.
+    // Its event-lock acquisition above and the creation lock share one
+    // bounded budget. Direct callers, `rename`, and `tag` pass zero and keep
+    // their historical fail-fast behavior. A holder that outlives the budget
+    // still fails closed with today's busy text.
     let result = mutate_metadata_under_lock_with_wait(
         id,
         |metadata| {
@@ -397,7 +411,7 @@ pub fn apply_metadata_patch_by_id(
             };
             let _ = append_event_locked(id, &ev);
         },
-        METADATA_LOCK_WAIT,
+        deadline.saturating_duration_since(Instant::now()),
     );
 
     let mutation_error = state.into_inner().error;
@@ -423,18 +437,36 @@ pub fn apply_metadata_patch_by_id(
 
 /// Atomically merge presentation metadata for one exact stable id (no
 /// displayName fallback), emitting `metadata_change` with only the touched
-/// keys.
+/// keys. A missing record is waited for only while a live creation lock proves
+/// that publication is in flight; genuinely unknown ids still fail fast.
 ///
-/// node: src/sessions.ts:559-567
+/// node: src/sessions.ts `patchMetadataById`
 pub fn patch_metadata_by_id(
     id: &str,
     patch: &MetadataPatch,
 ) -> Result<MetadataPatchResult, String> {
     patch.validate()?;
-    if !super::root::metadata_path(id).is_file() {
-        return Err(format!("Session id \"{id}\" not found."));
+    let path = super::root::metadata_path(id);
+    let deadline = Instant::now() + METADATA_PATCH_LOCK_WAIT;
+    while !path.is_file() {
+        if !is_creation_lock_held(id) {
+            if path.is_file() {
+                break;
+            }
+            return Err(format!("Session id \"{id}\" not found."));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!("Session id \"{id}\" not found."));
+        }
+        std::thread::sleep(Duration::from_millis(25).min(deadline - now));
     }
-    apply_metadata_patch_by_id(id, patch, MetadataPatchEvent::MetadataChange)
+    apply_metadata_patch_by_id_with_wait(
+        id,
+        patch,
+        MetadataPatchEvent::MetadataChange,
+        deadline.saturating_duration_since(Instant::now()),
+    )
 }
 
 /// Set or clear (`None` or `""`) the display name, emitting

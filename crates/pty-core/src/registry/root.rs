@@ -8,9 +8,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Largest `sockaddr_un.sun_path` the tool guarantees to fit (Darwin/BSD =
-/// 104; Linux = 108). The smaller one so the same name works everywhere.
-pub const SUN_PATH_MAX: usize = 104;
+/// Largest pathname, excluding its trailing NUL, that the supported platform
+/// can represent in `sockaddr_un.sun_path`.
+pub const SUN_PATH_MAX: usize = if cfg!(target_os = "macos") { 103 } else { 104 };
 
 static WARNED_LEGACY_ROOT_ENV: AtomicBool = AtomicBool::new(false);
 static WARNED_ROOT_MASKS_LEGACY: AtomicBool = AtomicBool::new(false);

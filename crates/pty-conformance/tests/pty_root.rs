@@ -193,7 +193,7 @@ fn too_long_root_fails_at_startup() {
     expect_failure(&out);
     let err = out.stderr();
     expect_regex(&err, "PTY_ROOT is too long");
-    expect_regex(&err, "104-byte kernel limit");
+    expect_regex(&err, "10[34]-byte kernel limit");
     expect_regex(&err, "Shorten the root");
 }
 
@@ -213,7 +213,7 @@ fn too_long_root_fails_before_dispatch() {
 #[test]
 fn root_at_the_usable_threshold_is_allowed() {
     let rig = Rig::new();
-    let usable = 104 - (1 + 8 + 5);
+    let usable = pty_core::registry::SUN_PATH_MAX - (1 + 8 + 5);
     let ok_root = format!("/tmp/{}", "c".repeat(usable - 5));
     assert_eq!(ok_root.len(), usable);
     std::fs::create_dir_all(&ok_root).unwrap();

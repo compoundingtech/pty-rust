@@ -8,10 +8,10 @@
 //! `<path>.tmp.<pid>.<16 hex>` + rename; readers skip names containing
 //! `.tmp.`.
 //!
-//! **The two lock files are not exclusive across a crash.** A lock whose
-//! holder died is stolen, and two processes stealing the same stale lock can
-//! both end up holding it. Both this implementation and the Node one share
-//! the defect. See [`lock`] before you build anything on them.
+//! Rust publishes complete lock owner records atomically and serializes stale
+//! stealing between Rust contenders. Node retains an empty-publication window
+//! and an unbound stale read-then-unlink that can defeat a newer Rust claim;
+//! see [`lock`] for the mixed-registry boundary.
 
 pub mod atomic;
 pub mod cleanup;
@@ -37,11 +37,11 @@ pub use list::{
     socket_reachable, wait_for_process_exit,
 };
 pub use lock::{
-    EVENT_LOCK_WAIT, LockBusy, LockGuard, LockRefusal, METADATA_LOCK_WAIT, acquire_event_lock,
-    acquire_file_lock, acquire_lock, event_busy_message, is_lock_owned_by_pid, lock_or_refusal,
-    metadata_busy_message, release_event_lock, release_file_lock, release_lock, take_event_lock,
-    take_metadata_lock, try_acquire_file_lock, wait_for_event_lock, wait_for_metadata_lock,
-    with_both_locks,
+    EVENT_LOCK_WAIT, LockBusy, LockGuard, LockRefusal, METADATA_PATCH_LOCK_WAIT,
+    acquire_event_lock, acquire_file_lock, acquire_lock, event_busy_message, is_creation_lock_held,
+    is_lock_owned_by_pid, lock_or_refusal, metadata_busy_message, release_event_lock,
+    release_file_lock, release_lock, take_event_lock, take_metadata_lock, try_acquire_file_lock,
+    wait_for_event_lock, wait_for_metadata_lock, with_both_locks,
 };
 pub use metadata::{
     EnvMap, SESSION_EXIT_LAST_LINES_LIMIT, SessionMetadata, TagMap, apply_metadata_diff,

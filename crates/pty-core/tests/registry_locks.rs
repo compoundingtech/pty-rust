@@ -1,5 +1,5 @@
-//! Node's file-lock protocol: `O_CREAT|O_EXCL`, holder pid, one stale steal,
-//! release by unlink; the event lock's waiting variant and busy texts; the
+//! Node-compatible file-lock contract: no-replace claim, complete holder pid,
+//! one stale steal, release by unlink; plus event-lock waiting and the
 //! event-then-metadata order of `with_both_locks` / `cleanup_all`.
 
 mod registry_support;
@@ -51,6 +51,27 @@ fn steals_a_stale_lock_whose_holder_is_dead() {
     assert!(!lock_path.exists(), "drop releases (unlinks) the lock");
 }
 
+/// A stale owner record only needs to be readable; replacement must not
+/// require write access to the stale inode.
+#[test]
+fn steals_a_read_only_stale_lock() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = root();
+    let name = unique_name("readonly-stale");
+    let lock_path = root.join(format!("{name}.lock"));
+    std::fs::write(&lock_path, DEAD_PID.to_string()).unwrap();
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    let guard = registry::acquire_lock(&name).expect("read-only stale lock must be stolen");
+    assert_eq!(
+        std::fs::read_to_string(&lock_path).unwrap(),
+        std::process::id().to_string()
+    );
+    drop(guard);
+    assert!(!lock_path.exists());
+}
+
 /// node: tests/security-fixes.test.ts:67-71
 #[test]
 fn garbage_lock_content_is_stale() {
@@ -80,7 +101,7 @@ fn only_one_of_two_sequential_steals_wins() {
     assert_eq!(a.is_some() as u8 + b.is_some() as u8, 1);
 }
 
-/// The file is created `0600` and holds only the decimal pid.
+/// The atomically published file is `0600` and holds only the decimal pid.
 ///
 /// node: src/sessions.ts:2298-2310
 #[test]

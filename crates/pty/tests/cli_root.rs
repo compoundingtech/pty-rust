@@ -94,13 +94,15 @@ fn root_flag_pins_the_registry() {
 /// node: tests/gc-flap-clear-badge-root-len.test.ts:163-230
 #[test]
 fn root_length_backstop() {
+    let socket_path_limit = pty_core::registry::SUN_PATH_MAX;
+    let usable_root = socket_path_limit - (1 + 8 + 5);
     let long_root = format!("/tmp/{}", "a".repeat(95));
     let out = scrubbed(&["list"], &[("PTY_ROOT", &long_root)]);
     assert_ne!(out.code, 0);
     assert_eq!(
         out.stderr,
         format!(
-            "pty: PTY_ROOT is too long — 100 bytes; must be ≤ 90 bytes for the socket path to fit the 104-byte kernel limit.\n  root: {long_root}\n  Shorten the root (or use `pty --root <shorter-path>` for a one-off).\n"
+            "pty: PTY_ROOT is too long — 100 bytes; must be ≤ {usable_root} bytes for the socket path to fit the {socket_path_limit}-byte kernel limit.\n  root: {long_root}\n  Shorten the root (or use `pty --root <shorter-path>` for a one-off).\n"
         )
     );
 
@@ -110,13 +112,19 @@ fn root_length_backstop() {
     assert!(out.stderr.contains("PTY_ROOT is too long"));
     assert!(!out.stderr.contains("Unknown command"));
 
-    // Exactly 90 bytes is fine.
-    let root90 = format!("/tmp/{}", "c".repeat(85));
-    std::fs::create_dir_all(&root90).unwrap();
-    let out = scrubbed(&["list", "--json"], &[("PTY_ROOT", &root90), ("PTY_ROOT_LEGACY_SILENT", "1")]);
+    // The longest root that leaves room for `/xxxxxxxx.sock` is accepted.
+    let fitting_root = format!("/tmp/{}", "c".repeat(usable_root - 5));
+    std::fs::create_dir_all(&fitting_root).unwrap();
+    let out = scrubbed(
+        &["list", "--json"],
+        &[
+            ("PTY_ROOT", &fitting_root),
+            ("PTY_ROOT_LEGACY_SILENT", "1"),
+        ],
+    );
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(out.stdout.trim(), "[]");
-    let _ = std::fs::remove_dir(&root90);
+    let _ = std::fs::remove_dir(&fitting_root);
 
     // `--root <short>` overrides an over-long env root before the check.
     let rig = Rig::new();
