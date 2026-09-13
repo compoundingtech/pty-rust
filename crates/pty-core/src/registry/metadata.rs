@@ -187,7 +187,13 @@ impl SessionMetadata {
         if let Some(env) = &self.env {
             m.insert("env".into(), string_map_value(env));
         }
-        for key in ["exitCode", "exitedAt", "lastLines", "lastAttachAt", "lastOutputAtMs"] {
+        for key in [
+            "exitCode",
+            "exitedAt",
+            "lastLines",
+            "lastAttachAt",
+            "lastOutputAtMs",
+        ] {
             if let Some(v) = self.to_map().get(key) {
                 m.insert(key.into(), v.clone());
             }
@@ -215,18 +221,27 @@ pub fn pretty_json(map: &Map<String, Value>) -> String {
 /// Read `<name>.json` as a raw JSON object, `None` when missing, unreadable
 /// or not an object.
 pub fn read_metadata_map(name: &str) -> Option<Map<String, Value>> {
-    let bytes = std::fs::read(metadata_path(name)).ok()?;
+    read_metadata_map_at(&metadata_path(name))
+}
+
+fn read_metadata_map_at(path: &std::path::Path) -> Option<Map<String, Value>> {
+    let bytes = std::fs::read(path).ok()?;
     match serde_json::from_slice::<Value>(&bytes).ok()? {
         Value::Object(map) => Some(map),
         _ => None,
     }
 }
 
+/// Read session metadata from an already-resolved registry path.
+pub(crate) fn read_metadata_at(path: &std::path::Path) -> Option<SessionMetadata> {
+    SessionMetadata::from_map(read_metadata_map_at(path)?)
+}
+
 /// Read session metadata, `None` when it does not exist or cannot be parsed.
 ///
 /// node: src/sessions.ts:595-602
 pub fn read_metadata(name: &str) -> Option<SessionMetadata> {
-    SessionMetadata::from_map(read_metadata_map(name)?)
+    read_metadata_at(&metadata_path(name))
 }
 
 /// Write a raw metadata object atomically as pretty JSON.

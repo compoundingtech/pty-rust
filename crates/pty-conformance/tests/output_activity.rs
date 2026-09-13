@@ -13,10 +13,8 @@
 //! - carried into the exit record even when that once-a-second write was
 //!   still pending, so the last thing a child printed is never lost.
 //!
-//! **These tests cannot be checked against the Node binary on this machine.**
-//! It is 0.12.0, which predates the field, so it would fail all of them for
-//! the right reason. They are skipped there and say so, rather than passing
-//! quietly on a binary that was never asked the question.
+//! The pinned Node reference includes this field even though its package
+//! version remains 0.12.0, so these are cross-binary contract tests.
 
 use pty_conformance::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,25 +30,9 @@ fn stamp(rig: &Rig, id: &str) -> Option<i64> {
     rig.meta(id)?.get("lastOutputAtMs")?.as_i64()
 }
 
-/// True when the binary under test is too old to have the field at all.
-fn too_old() -> bool {
-    if is_node() {
-        eprintln!(
-            "skipped: the Node binary under test is {}, which predates \
-             lastOutputAtMs (its PR #168, merged 2026-08-29)",
-            pty_version()
-        );
-        return true;
-    }
-    false
-}
-
 /// node: tests/output-activity.test.ts:132
 #[test]
 fn the_stamp_is_absent_until_the_child_prints() {
-    if too_old() {
-        return;
-    }
     let rig = Rig::new();
     rig.daemon("act-silent", &["cat"], DaemonOpts::no_display_name());
     // Long enough that a write would have happened if one were coming.
@@ -65,9 +47,6 @@ fn the_stamp_is_absent_until_the_child_prints() {
 /// node: tests/output-activity.test.ts:141
 #[test]
 fn the_stamp_appears_after_output_and_reads_as_now() {
-    if too_old() {
-        return;
-    }
     let rig = Rig::new();
     rig.daemon("act-print", &["cat"], DaemonOpts::no_display_name());
     let before = now_ms();
@@ -86,9 +65,6 @@ fn the_stamp_appears_after_output_and_reads_as_now() {
 /// node: tests/output-activity.test.ts:159
 #[test]
 fn a_later_burst_moves_the_stamp_forward() {
-    if too_old() {
-        return;
-    }
     let rig = Rig::new();
     rig.daemon("act-again", &["cat"], DaemonOpts::no_display_name());
     rig.pty(&["send", "act-again", "--seq", "first", "--seq", "key:return"]);
@@ -109,9 +85,6 @@ fn a_later_burst_moves_the_stamp_forward() {
 /// node: tests/output-activity.test.ts:179
 #[test]
 fn a_child_that_prints_and_exits_at_once_keeps_its_stamp() {
-    if too_old() {
-        return;
-    }
     let rig = Rig::new();
     let before = now_ms();
     rig.daemon(
@@ -137,9 +110,6 @@ fn a_child_that_prints_and_exits_at_once_keeps_its_stamp() {
 /// for a promise the Node implementation makes and does not check.
 #[test]
 fn a_busy_session_writes_the_stamp_about_once_a_second() {
-    if too_old() {
-        return;
-    }
     let rig = Rig::new();
     // Print steadily for about three seconds.
     rig.daemon(

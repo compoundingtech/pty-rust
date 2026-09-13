@@ -27,9 +27,9 @@ use pty_core::registry::{
 };
 use pty_terminal::{TerminalActor, serialize};
 
+use super::DaemonConfig;
 use super::clients::{Client, Out, REDRAW_SETTLE};
 use super::daemon_warn;
-use super::config::DaemonConfig;
 use super::env::{build_child_env, describe_invalid_cwd, invalid_cwd_error};
 use super::tree::{
     KILL_WAIT, ProcessIdentity, TERM_WAIT, signal_process_identities,
@@ -42,9 +42,17 @@ pub(crate) enum Msg {
     PtyEof,
     /// The raw `waitpid` status, `None` when the wait itself failed.
     ChildExited(Option<i32>),
-    Connect { id: u64, tx: Sender<Out> },
-    Packet { id: u64, packet: Packet },
-    Closed { id: u64 },
+    Connect {
+        id: u64,
+        tx: Sender<Out>,
+    },
+    Packet {
+        id: u64,
+        packet: Packet,
+    },
+    Closed {
+        id: u64,
+    },
     /// SIGTERM, SIGINT, or the spawner watchdog.
     ExternalKill,
 }
@@ -176,7 +184,10 @@ pub fn reap_at_exit(
     if external_kill && !ephemeral {
         return false;
     }
-    let tags = metadata.as_ref().and_then(|m| m.tags.as_ref()).or(config_tags);
+    let tags = metadata
+        .as_ref()
+        .and_then(|m| m.tags.as_ref())
+        .or(config_tags);
     registry::should_reap_at_exit(tags, ephemeral, registry::reap_on_exit_default())
 }
 
@@ -195,7 +206,10 @@ fn kill(pid: i32, signal: i32) {
 
 /// Run the daemon for `cfg` to completion; the return value is the process
 /// exit status (the child's code after a natural exit, 0 after a kill).
-pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
+pub(crate) fn run(
+    cfg: DaemonConfig,
+    readiness: super::ReadyNotifier,
+) -> Result<i32, String> {
     let name = cfg.name.clone();
     let generation = cfg
         .generation
@@ -210,41 +224,19 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         return Err(invalid_cwd_error(&reason, &name, &cfg.command));
     }
 
-    // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
-    // lookups, shebangs and symlinks behave like a shell's.
+    // The PTY pair first: opening it fails before anything is published.
     let pair = pty_spawn::open(rows, cols)
         .map_err(|e| format!("Failed to open a PTY for session \"{name}\": {e}"))?;
-    let mut command = pty_spawn::shell_exec(&cfg.command, &cfg.args);
-    command.cwd(&cwd);
-    command.env_clear();
-    for (k, v) in &child_env {
-        command.env(k, v);
-    }
-    let child = pair.slave.spawn_command(command).map_err(|e| {
-        format!(
-            "Failed to spawn PTY shell \"/bin/sh\" for command \"{}\" in cwd \"{cwd}\": {e}",
-            cfg.command
-        )
-    })?;
-    drop(pair.slave);
-    let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
-    // The child is reaped by the waiter thread below, never through this handle.
-    std::mem::forget(child);
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("Failed to read the PTY for session \"{name}\": {e}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("Failed to write the PTY for session \"{name}\": {e}"))?;
 
-    let (tx, rx) = mpsc::channel::<Msg>();
-    spawn_pty_reader(reader, tx.clone());
-    spawn_child_waiter(child_pid, tx.clone());
-
-    // Publication: dir → clear events → stale socket → listen (umask 077,
-    // chmod 600) → pid → metadata → session_start.
+    // Publication before the child spawns: dir → clear events → stale
+    // socket → listen (umask 077, chmod 600) → pid → metadata →
+    // session_start. An attached child's first action runs after this block,
+    // so its session record — the `<name>.pid` owner sidecar, the metadata,
+    // and the `session_start` line `pty run` waits for — is already on disk
+    // when the child starts (compoundingtech/pty#180). Spawning first left
+    // the child racing publication: its immediate `metadata patch` met the
+    // creation lock its own `pty run` parent still held, and the sidecar
+    // could be unpublished when it first ran.
     registry::ensure_session_dir().map_err(|e| e.to_string())?;
     pty_core::events::clear_events(&name)?;
     let socket_path = registry::socket_path(&name);
@@ -285,7 +277,47 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
     };
     registry::write_metadata_publication(&name, &metadata).map_err(|e| e.to_string())?;
     events.append(Event::session_start(&name, cfg.tags()));
+    if cfg.respawn {
+        events.append(Event::session_respawn(&name));
+    }
     events.flush();
+
+    // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
+    // lookups, shebangs and symlinks behave like a shell's.
+    let mut command = pty_spawn::shell_exec(&cfg.command, &cfg.args);
+    command.cwd(&cwd);
+    command.env_clear();
+    for (k, v) in &child_env {
+        command.env(k, v);
+    }
+    let child = pair.slave.spawn_command(command).map_err(|e| {
+        // Published above but never started: withdraw the liveness signals
+        // so the name reads as gone rather than running. The metadata and
+        // events stay, as they do for the other post-publication failures,
+        // and the next `run` recreates over them.
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_file(registry::pid_path(&name));
+        format!(
+            "Failed to spawn PTY shell \"/bin/sh\" for command \"{}\" in cwd \"{cwd}\": {e}",
+            cfg.command
+        )
+    })?;
+    drop(pair.slave);
+    let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
+    // The child is reaped by the waiter thread below, never through this handle.
+    std::mem::forget(child);
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to read the PTY for session \"{name}\": {e}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to write the PTY for session \"{name}\": {e}"))?;
+
+    let (tx, rx) = mpsc::channel::<Msg>();
+    spawn_pty_reader(reader, tx.clone());
+    spawn_child_waiter(child_pid, tx.clone());
 
     let listener_fd = listener.as_raw_fd();
     spawn_acceptor(listener, tx.clone());
@@ -319,6 +351,7 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         activity_persist_at: None,
         listener_fd,
     };
+    readiness.notify();
     Ok(daemon.serve())
 }
 
@@ -493,9 +526,10 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<Msg>) {
 ///
 /// node: src/server.ts:1598-1603
 fn spawn_signal_listener(tx: Sender<Msg>) {
-    let Ok(mut signals) =
-        signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT])
-    else {
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ]) else {
         return;
     };
     std::thread::spawn(move || {
@@ -512,7 +546,10 @@ fn spawn_signal_listener(tx: Sender<Msg>) {
 ///
 /// node: src/server.ts:1439-1456
 fn install_spawner_watchdog(tx: Sender<Msg>) {
-    let Some(raw) = std::env::var("PTY_SPAWNER_PID").ok().filter(|r| !r.is_empty()) else {
+    let Some(raw) = std::env::var("PTY_SPAWNER_PID")
+        .ok()
+        .filter(|r| !r.is_empty())
+    else {
         return;
     };
     let Some(pid) = raw
@@ -730,7 +767,8 @@ impl Daemon {
             MutateStatus::Busy | MutateStatus::Stale
         ) {
             let now = Instant::now();
-            self.exit_meta_retry = Some((now + Duration::from_millis(10), now + EXIT_METADATA_RETRY));
+            self.exit_meta_retry =
+                Some((now + Duration::from_millis(10), now + EXIT_METADATA_RETRY));
         }
         if self.shutdown_code.is_none() {
             self.exit_shutdown_at = Some(Instant::now() + EXIT_GRACE);

@@ -1,14 +1,16 @@
 //! Spawning a session daemon and waiting for it to publish, the way Node's
 //! `spawnDaemon` does: one detached child (`<self> __daemon`), the config as
 //! JSON on inherited fd 3 (never argv), stderr collected for the early-exit
-//! message, then the socket, then `daemonPid == child.pid` plus a
-//! `session_start` line stamped at or after `createdAt`.
+//! message, then the socket, matching metadata plus `session_start`, and the
+//! daemon's post-child-spawn readiness acknowledgement.
 //!
 //! node: src/spawn.ts:129-260
 
+use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use pty_core::registry::{self, EnvMap, TagMap};
@@ -18,8 +20,14 @@ use super::config::DaemonConfig;
 /// `DEFAULT_START_TIMEOUT_MS`.
 pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Inherited descriptor on which the daemon acknowledges that its child and
+/// serving threads have started. Kept out of the public session registry: the
+/// owner record and `session_start` must still precede the attached child.
+pub const READY_FD_ENV: &str = "PTY_DAEMON_READY_FD";
+
 /// Node's `SpawnDaemonOptions`, minus the launcher/server-module knobs.
 /// `command` is already resolved absolute (`pty_core::spawn::resolve_command`).
+/// The launcher executable is supplied separately to [`spawn_daemon`].
 #[derive(Debug, Clone, Default)]
 pub struct SpawnParams {
     pub name: String,
@@ -49,6 +57,64 @@ pub struct SpawnParams {
     pub bind_to_spawner_lifetime: bool,
     /// Override of the 30 s start budget.
     pub start_timeout: Option<Duration>,
+    /// Ask the daemon to publish `session_respawn` with `session_start`.
+    pub respawn: bool,
+}
+
+impl SpawnParams {
+    /// Parameters for `command` with the caller's terminal size (or 24×80).
+    pub fn new(name: &str, command: &str, args: &[String]) -> Self {
+        let (rows, cols) = pty_core::client::tty::size_or_default(libc::STDOUT_FILENO);
+        Self {
+            name: name.to_string(),
+            command: command.to_string(),
+            args: args.to_vec(),
+            display_command: std::iter::once(command.to_string())
+                .chain(args.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" "),
+            cwd: std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "/".to_string()),
+            rows,
+            cols,
+            ..Self::default()
+        }
+    }
+}
+/// Carry a session's launch-time settings into its replacement. Older
+/// records simply have fewer of them.
+///
+/// node: src/cli.ts:3874-3884 (`persistedLaunchOptions`)
+pub fn apply_persisted_launch_options(
+    params: &mut SpawnParams,
+    meta: &registry::SessionMetadata,
+) {
+    if let Some(rows) = meta.rows {
+        params.rows = rows;
+    }
+    if let Some(cols) = meta.cols {
+        params.cols = cols;
+    }
+    if let Some(ephemeral) = meta.ephemeral {
+        params.ephemeral = ephemeral;
+    }
+    if meta.isolate_env == Some(true) {
+        params.isolate_env = true;
+    }
+    if let Some(extra) = &meta.extra_env
+        && !extra.is_empty()
+    {
+        params.extra_env = extra.clone();
+    }
+    if let Some(unset) = &meta.unset_env
+        && !unset.is_empty()
+    {
+        params.unset_env = unset.clone();
+    }
+    if let Some(env) = &meta.env {
+        params.env = Some(env.clone());
+    }
 }
 
 /// What a successful spawn learned about the daemon it started.
@@ -63,11 +129,12 @@ pub struct SpawnedDaemon {
 pub enum SpawnError {
     /// `env` together with `isolate_env` / `extra_env` / `unset_env`.
     EnvExclusive,
-    /// The daemon process died before publishing.
+    /// The daemon process died before becoming ready.
     DaemonExited { code: Option<i32>, stderr: String },
     /// No socket within the budget.
     SocketTimeout { name: String },
-    /// A socket, but no matching metadata + `session_start` within the budget.
+    /// A socket, but no matching publication and readiness acknowledgement
+    /// within the budget.
     PublicationTimeout { name: String },
     /// The session was published, by somebody else. This attempt cannot win,
     /// so there is nothing to wait for.
@@ -85,7 +152,9 @@ impl std::fmt::Display for SpawnError {
                  Use env for verbatim control, or inherited environment policy options — not both."
             ),
             SpawnError::DaemonExited { code, stderr } => {
-                let code = code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+                let code = code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let msg = format!("Daemon process exited immediately (code {code}).");
                 if stderr.is_empty() {
                     write!(f, "{msg} Is the command valid?")
@@ -128,15 +197,13 @@ pub fn config_for(params: &SpawnParams) -> DaemonConfig {
         cols: Some(params.cols),
         ephemeral: params.ephemeral,
         tags: (!params.tags.is_empty()).then(|| params.tags.clone()),
-        display_name: params
-            .display_name
-            .clone()
-            .filter(|d| !d.is_empty()),
+        display_name: params.display_name.clone().filter(|d| !d.is_empty()),
         isolate_env: params.isolate_env.then_some(true),
         extra_env: (!params.extra_env.is_empty()).then(|| params.extra_env.clone()),
         unset_env: (!params.unset_env.is_empty()).then(|| params.unset_env.clone()),
         env: params.env.clone(),
         generation: None,
+        respawn: params.respawn,
     }
 }
 
@@ -204,22 +271,50 @@ pub fn has_published_session_start(name: &str, created_at: &str) -> bool {
     })
 }
 
-/// Has the daemon at `pid` published `name`? Metadata `daemonPid` must be
-/// this pid and a `session_start` stamped at or after its `createdAt` must
-/// be on disk.
-///
-/// node: src/spawn.ts:225-236
-pub fn is_published_by(name: &str, pid: u32) -> bool {
-    let Some(meta) = registry::read_metadata(name) else {
-        return false;
-    };
-    meta.daemon_pid == Some(pid as i32) && has_published_session_start(name, &meta.created_at)
+/// Return the generation from the metadata snapshot whose daemon pid and
+/// `session_start` publication match the process we spawned.
+fn published_generation_by(name: &str, pid: u32) -> Option<String> {
+    let meta = registry::read_metadata(name)?;
+    (meta.daemon_pid == Some(pid as i32) && has_published_session_start(name, &meta.created_at))
+        .then(|| meta.generation.unwrap_or_default())
+}
+
+/// The daemon side of the launcher's one-byte readiness pipe.
+pub struct ReadyNotifier(Option<File>);
+
+impl ReadyNotifier {
+    pub fn from_process() -> Self {
+        let Some(fd) = std::env::var(READY_FD_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<RawFd>().ok())
+            .filter(|fd| *fd >= 0)
+        else {
+            return Self(None);
+        };
+        // The launcher names an inherited descriptor. Validate it before
+        // taking ownership, then keep it out of the session child.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Self(None);
+        }
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            Self(Some(File::from_raw_fd(fd)))
+        }
+    }
+
+    pub fn notify(mut self) {
+        if let Some(mut pipe) = self.0.take() {
+            let _ = pipe.write_all(&[1]);
+        }
+    }
 }
 
 struct ChildWatch {
     child: std::process::Child,
     stderr: std::sync::Arc<std::sync::Mutex<String>>,
     exit_code: Option<Option<i32>>,
+    readiness: Receiver<bool>,
 }
 
 impl ChildWatch {
@@ -230,19 +325,29 @@ impl ChildWatch {
             self.exit_code = Some(status.code());
         }
         if let Some(code) = self.exit_code {
-            let stderr = self.stderr.lock().map(|s| s.trim().to_string()).unwrap_or_default();
+            let stderr = self
+                .stderr
+                .lock()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
             return Err(SpawnError::DaemonExited { code, stderr });
         }
         Ok(())
     }
 }
 
-/// Spawn `<current_exe> __daemon` detached and wait until it has published
-/// the session. On any failure after the process started (and it has not
-/// already exited) the daemon is sent SIGTERM.
+/// Spawn `<daemon_executable> __daemon` detached and wait until it has
+/// published the session. On any failure after the process started (and it has
+/// not already exited) the daemon is sent SIGTERM.
+///
+/// The executable is explicit so a library caller's own `current_exe` is never
+/// assumed to implement the private `__daemon` entrypoint.
 ///
 /// node: src/spawn.ts:164-243
-pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
+pub fn spawn_daemon(
+    daemon_executable: &std::path::Path,
+    params: SpawnParams,
+) -> Result<SpawnedDaemon, SpawnError> {
     if params.env.is_some()
         && (params.isolate_env || !params.extra_env.is_empty() || !params.unset_env.is_empty())
     {
@@ -252,8 +357,6 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
     let timeout = params.start_timeout.unwrap_or(DEFAULT_START_TIMEOUT);
     let config = serde_json::to_string(&config_for(&params))
         .map_err(|e| SpawnError::Io(format!("cannot encode daemon config: {e}")))?;
-    let exe = std::env::current_exe()
-        .map_err(|e| SpawnError::Io(format!("cannot find own executable: {e}")))?;
 
     // The config travels on a pipe the child inherits as fd 3.
     let mut fds = [0i32; 2];
@@ -274,7 +377,29 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
 
-    let mut cmd = Command::new(exe);
+    // A second pipe distinguishes registry publication from a daemon that is
+    // actually ready. Publication intentionally happens before the session
+    // child starts; the daemon writes this pipe only after that spawn and the
+    // serving threads succeed.
+    let mut ready_fds = [0i32; 2];
+    // SAFETY: pipe(2) fills two descriptors.
+    if unsafe { libc::pipe(ready_fds.as_mut_ptr()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: the config read descriptor is still owned by this process.
+        unsafe {
+            libc::close(read_fd);
+        }
+        return Err(SpawnError::Io(format!("cannot create readiness pipe: {error}")));
+    }
+    let (ready_read_fd, ready_write_fd) = (ready_fds[0], ready_fds[1]);
+    // SAFETY: both descriptors are freshly created and owned here.
+    let ready_read = unsafe { File::from_raw_fd(ready_read_fd) };
+    // The daemon needs only the write end.
+    unsafe {
+        libc::fcntl(ready_read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+
+    let mut cmd = Command::new(daemon_executable);
     cmd.arg("__daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -283,6 +408,7 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
     for key in &params.scrub_env {
         cmd.env_remove(key);
     }
+    cmd.env(READY_FD_ENV, ready_write_fd.to_string());
     if params.bind_to_spawner_lifetime {
         cmd.env("PTY_SPAWNER_PID", std::process::id().to_string());
     }
@@ -313,9 +439,11 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         });
     }
     let spawned = cmd.spawn();
-    // SAFETY: the parent's copy of the read end is closed here regardless.
+    // SAFETY: the parent's copies of the inherited descriptors close here
+    // regardless of whether spawning succeeded.
     unsafe {
         libc::close(read_fd);
+        libc::close(ready_write_fd);
     }
     let mut child = match spawned {
         Ok(c) => c,
@@ -329,6 +457,14 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         let _ = write_end.write_all(&config_bytes);
         let _ = write_end.flush();
         drop(write_end);
+    });
+
+    let (ready_tx, ready_rx) = channel();
+    std::thread::spawn(move || {
+        let mut ready_read = ready_read;
+        let mut byte = [0u8; 1];
+        let ready = ready_read.read_exact(&mut byte).is_ok() && byte == [1];
+        let _ = ready_tx.send(ready);
     });
 
     let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -353,8 +489,8 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         child,
         stderr: stderr_buf,
         exit_code: None,
+        readiness: ready_rx,
     };
-
     let outcome = wait_for_publication(&name, pid, timeout, &mut watch);
     if let Err(err) = &outcome
         && !matches!(err, SpawnError::DaemonExited { .. })
@@ -364,9 +500,11 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
             libc::kill(pid as i32, libc::SIGTERM);
         }
     }
-    // Leave the daemon unreaped: it is detached (its own session) and
-    // outlives this process; a dead one is reaped by init.
-    std::mem::forget(watch.child);
+    // Keep a waiter alive for this direct child. Detaching changes its session,
+    // not its parent; without waitpid an embedding process accumulates zombies.
+    std::thread::spawn(move || {
+        let _ = watch.child.wait();
+    });
     outcome
 }
 
@@ -379,20 +517,19 @@ fn wait_for_publication(
     let started = Instant::now();
     wait_for_socket(name, timeout, || watch.check_early_exit())?;
     loop {
-        if is_published_by(name, pid) {
-            let generation = registry::read_metadata(name)
-                .and_then(|m| m.generation)
-                .unwrap_or_default();
+        if let Some(generation) = published_generation_by(name, pid)
+            && matches!(watch.readiness.try_recv(), Ok(true))
+        {
             return Ok(SpawnedDaemon { pid, generation });
         }
         // **Read the fact that is already there before waiting for one that is
         // not.** If somebody else has published this name, this attempt can
-        // never win: `is_published_by` compares against our own pid and will be
-        // false for the rest of the budget. The only other way out of this loop
-        // is noticing our own daemon die, so when that is slow — a loaded
-        // machine, a daemon still starting up — the loop spends the whole
-        // `DEFAULT_START_TIMEOUT` and then reports a timeout, when the true
-        // answer was on disk in the first iteration.
+        // never win: `published_generation_by` compares against our own pid
+        // and will be false for the rest of the budget. The only other way out
+        // of this loop is noticing our own daemon die, so when that is slow —
+        // a loaded machine, a daemon still starting up — the loop spends the
+        // whole `DEFAULT_START_TIMEOUT` and then reports a timeout, when the
+        // true answer was on disk in the first iteration.
         //
         // Measured on a Mac by `Silber.pty` on 2026-09-03: the losing
         // `pty run` took 30.06 s against a 30 s budget and said
@@ -595,6 +732,10 @@ mod tests {
             json,
             r#"{"name":"n","command":"/bin/sh","args":["-c","true"],"displayCommand":"sh -c true","cwd":"/tmp","rows":24,"cols":80,"ephemeral":false,"tags":{"k":"v"}}"#
         );
+        let mut respawn = params;
+        respawn.respawn = true;
+        let json = serde_json::to_string(&config_for(&respawn)).unwrap();
+        assert!(json.ends_with(r#","respawn":true}"#));
     }
 
     #[test]
@@ -605,6 +746,9 @@ mod tests {
             isolate_env: true,
             ..Default::default()
         };
-        assert_eq!(spawn_daemon(params).unwrap_err(), SpawnError::EnvExclusive);
+        assert_eq!(
+            spawn_daemon(std::path::Path::new("/not-used"), params).unwrap_err(),
+            SpawnError::EnvExclusive
+        );
     }
 }

@@ -85,7 +85,7 @@ Two facts from this table shape the plan:
 | `kill` | partial (S) | Exit 1 when not running (`not running` / `not found`), strip `strategy` on permanent, 7 s wait text, `Session "<n>" killed.`, ptyfile note. |
 | `recover` | deferred | Full authenticated rebind of a live daemon. Documented as absent. Section 12. |
 | `rm` / `remove` | partial (S) | Refuse when running, 7 s wait, generation check, `Session "<n>" removed.` / `not found`. |
-| `gc` | missing (M) | Debris, orphan kill, sweep, tag prune, dry-run, footer text, `--print-launchd-plist`. Permanent respawn, flapping, and abandoned reap are dropped. Section 12. |
+| `gc` | parity | Debris/orphan/abandoned/permanent-respawn/flapping/sweep ordering, `keep`, layout-tag pruning, dry-run, lifecycle tuning flags, footer text, and `--print-launchd-plist` are implemented. Concurrent permanent reconciliation is serialized by the existing event/creation locks. |
 | `tag` | missing (S) | Show, set, `--rm`, ordering rules, `tags_change` event, ptyfile warning. |
 | `tag-multi` | missing (M) | Selectors `<ref>...`, `--filter-tag`, `--all --yes`; `--json`; own help. |
 | `emit` | missing (S) | `user.*` validation, `--json`, `--text`, default ref from `PTY_SESSION`. |
@@ -330,7 +330,7 @@ Decided on 2026-08-29. Each row records the decision.
 | `pty-kill-releases-socket-test` second binary | S | Dropped. The case becomes a Rust test. |
 | `remote-serve --socket <path>` | S | Dropped. `--stdio` stays. The Node docs mark the socket form transitional. **`pty remote-serve --help` still describes `--socket`**, because the help texts are vendored from the Node tool byte for byte so the help test can compare them. Passing `--socket` prints a usage line naming only `--stdio` and exits 1. Checked 2026-09-02. |
 | Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
-| `gc`: permanent respawn, flapping classifier, abandoned reap | L | Dropped. `st2` supervises agents now. Node PR #60 (July, held) planned this removal. Kept: debris, orphan kill, sweep, `keep` and its `--keep-max-age` retention window, tag prune, dry-run, footer, `--print-launchd-plist`. `strategy=permanent` stays as a preserve flag. Their tuning flags `--idle-days`, `--fast-fail-window`, `--fast-fail-limit` (both `--flag N` and `--flag=N`) are accepted with their value and ignored, never rejected, so scripts written for Node keep working. |
+| `gc`: permanent respawn, flapping classifier, abandoned reap | L | Kept for the shared-input/SCG reconciler contract. `gc` respawns stopped `strategy=permanent` sessions under their stable id, re-reads bound `pty.toml` definitions with last-known-good fallback, persists the Node-compatible fast-fail tags/events and flapping stop, and reaps cwd-gone or opt-in idle permanents before respawn. The accepted tuning flags are active and validated. |
 | `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite, so `recovery.metadataRevision` goes stale for a session a Rust binary writes to — accepted, decision 0005. |
 | `evidence snapshot` / `remove` | M | Deferred and documented as absent. Its user is not known. |
 | `--attach-stream-fd-v1` | M | Kept. An eval cell and relays use it. |

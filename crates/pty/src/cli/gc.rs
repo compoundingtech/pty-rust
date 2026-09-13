@@ -1,44 +1,37 @@
-//! `pty gc [-n|--dry-run] [--keep-max-age <dur>]`: reclaim registry debris,
-//! kill orphaned `parent=<id>` children, sweep exited/vanished sessions
-//! (honouring the `keep` tag until it expires), and prune dead
-//! `:l<pid>-<rand>` layout tags.
+//! `pty gc [-n|--dry-run] [--idle-days N] [--keep-max-age <dur>]
+//! [--fast-fail-window N] [--fast-fail-limit N]`: reclaim registry debris,
+//! kill orphaned `parent=<id>` children, reap abandoned permanent sessions,
+//! respawn stopped permanent sessions with crash-loop protection, sweep
+//! exited/vanished sessions (honouring `keep` until it expires), and prune
+//! dead `:l<pid>-<rand>` layout tags.
 //! `pty gc --print-launchd-plist [--interval N]` prints a launchd job.
 //!
-//! The permanent-respawn, flapping and abandoned-reap steps of Node's gc
-//! are not ported (docs/parity.md §12); `strategy=permanent` still keeps a
-//! dead session out of the sweep. `--idle-days` and `--fast-fail-*` belonged
-//! to those steps: they are accepted and ignored.
-//!
-//! node: src/cli.ts:1450-1500 (parsing), 3185-3316 (`cmdGc`), 3338-3390
-//! (`printLaunchdPlist`); src/sessions.ts:620-880 (raw debris, observed
-//! cleanup, `reapObservedSession`), 1084-1109 (the keep window), 1596-1806
-//! (`gc`), 2140-2189 (`pruneOrphanLayoutTags`)
+//! node: src/cli.ts:1234-1275 (parsing), 2544-2641 (`cmdGc`), 2643-2695
+//! (`printLaunchdPlist`); src/sessions.ts:487-897 (`gc` and classifiers),
+//! 899-982 (`respawnPermanent`), 1596-1806 (raw debris and observed cleanup),
+//! 2140-2189 (`pruneOrphanLayoutTags`)
 
-use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use pty_core::duration::{format_duration, parse_duration};
-use pty_core::registry::{
-    self, DEFAULT_KEEP_MAX_AGE_MS, DEFAULT_SOCKET_PROBE_BUDGET, SessionInfo, TagMap,
-    cleanup_all_while_locked, cleanup_socket, default_session_dir, events_path,
-    has_process_exited_for_reap, is_keep_expired, is_keep_requested, metadata_matches_observation,
-    metadata_path, now_epoch_ms, pid_alive, probe_sockets_within_budget, read_metadata, read_pid,
-    read_pid_with, recovery_revision_path, session_dir, socket_path, update_tags, with_both_locks,
-};
+use pty_core::events::AbandonReason;
+use pty_core::registry::{DEFAULT_KEEP_MAX_AGE_MS, default_session_dir, session_dir};
+use pty_lifecycle::{GcOptions, gc, prune_orphan_layout_tags};
 
 use super::argv::js_parse_int;
 use super::{CliError, CliResult};
 
 /// Parse and run.
 ///
-/// node: src/cli.ts:1411-1453
+/// node: src/cli.ts:1234-1275
 pub fn run(gc_args: &[String]) -> CliResult {
     let dry_run = gc_args.iter().any(|a| a == "--dry-run" || a == "-n");
     let print_plist = gc_args.iter().any(|a| a == "--print-launchd-plist");
     let mut interval: i64 = 30;
     let mut keep_max_age_ms = DEFAULT_KEEP_MAX_AGE_MS;
+    let mut idle_days = None;
+    let mut fast_fail_window = None;
+    let mut fast_fail_limit = None;
     let parse_positive = |flag: &str, raw: &str| -> Result<i64, CliError> {
         match js_parse_int(raw) {
             Some(v) if v > 0 => Ok(v),
@@ -61,8 +54,6 @@ pub fn run(gc_args: &[String]) -> CliResult {
             ))
         })
     };
-    // The dropped tuning flags: consumed with their value, never validated.
-    const IGNORED: [&str; 3] = ["--idle-days", "--fast-fail-window", "--fast-fail-limit"];
     let mut i = 0;
     while i < gc_args.len() {
         let a = gc_args[i].as_str();
@@ -76,8 +67,21 @@ pub fn run(gc_args: &[String]) -> CliResult {
             keep_max_age_ms = parse_age("--keep-max-age", &gc_args[i])?;
         } else if let Some(raw) = a.strip_prefix("--keep-max-age=") {
             keep_max_age_ms = parse_age("--keep-max-age", raw)?;
-        } else if IGNORED.contains(&a) && i + 1 < gc_args.len() {
+        } else if a == "--idle-days" && i + 1 < gc_args.len() {
             i += 1;
+            idle_days = Some(parse_positive("--idle-days", &gc_args[i])?);
+        } else if let Some(raw) = a.strip_prefix("--idle-days=") {
+            idle_days = Some(parse_positive("--idle-days", raw)?);
+        } else if a == "--fast-fail-window" && i + 1 < gc_args.len() {
+            i += 1;
+            fast_fail_window = Some(parse_positive("--fast-fail-window", &gc_args[i])?);
+        } else if let Some(raw) = a.strip_prefix("--fast-fail-window=") {
+            fast_fail_window = Some(parse_positive("--fast-fail-window", raw)?);
+        } else if a == "--fast-fail-limit" && i + 1 < gc_args.len() {
+            i += 1;
+            fast_fail_limit = Some(parse_positive("--fast-fail-limit", &gc_args[i])?);
+        } else if let Some(raw) = a.strip_prefix("--fast-fail-limit=") {
+            fast_fail_limit = Some(parse_positive("--fast-fail-limit", raw)?);
         }
         i += 1;
     }
@@ -85,60 +89,100 @@ pub fn run(gc_args: &[String]) -> CliResult {
         print_launchd_plist(interval);
         return Ok(0);
     }
-    cmd_gc(dry_run, keep_max_age_ms)
-}
-
-/// What one pass did (or would do).
-#[derive(Debug, Default)]
-struct GcResult {
-    removed: Vec<String>,
-    kept: Vec<String>,
-    /// Dead sessions swept despite a `keep` tag because they outlived the
-    /// retention window. Disjoint from `removed`, which holds the untagged
-    /// sweep, so the two reasons are reported apart.
-    keep_expired: Vec<String>,
-    killed_orphan_children: Vec<OrphanKill>,
-    reap_skipped: Vec<ReapSkip>,
-}
-
-#[derive(Debug)]
-struct OrphanKill {
-    name: String,
-    parent: String,
-    reason: &'static str,
-}
-
-#[derive(Debug)]
-struct ReapSkip {
-    name: String,
-    operation: &'static str,
-    reason: &'static str,
-    signalled: bool,
-}
-
-/// One session whose tags were (or would be) pruned.
-#[derive(Debug)]
-struct PrunedTags {
-    name: String,
-    removed_keys: Vec<String>,
+    cmd_gc(
+        dry_run,
+        keep_max_age_ms,
+        idle_days,
+        fast_fail_window,
+        fast_fail_limit,
+    )
 }
 
 /// `cmdGc`.
 ///
-/// node: src/cli.ts:3185-3316
-fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
-    let result = gc(dry_run, keep_max_age_ms);
+/// node: src/cli.ts:2544-2641
+fn cmd_gc(
+    dry_run: bool,
+    keep_max_age_ms: i64,
+    idle_days: Option<i64>,
+    fast_fail_window: Option<i64>,
+    fast_fail_limit: Option<i64>,
+) -> CliResult {
+    let result = gc(GcOptions {
+        dry_run,
+        keep_max_age_ms,
+        idle_days,
+        fast_fail_window,
+        fast_fail_limit,
+        daemon_executable: std::env::current_exe().ok(),
+    });
     let pruned = prune_orphan_layout_tags(dry_run);
 
-    let killed_verb = if dry_run { "Would kill orphan child" } else { "Killed orphan child" };
+    let killed_verb = if dry_run {
+        "Would kill orphan child"
+    } else {
+        "Killed orphan child"
+    };
+    let abandon_verb = if dry_run {
+        "Would abandon"
+    } else {
+        "Abandoned"
+    };
+    let respawn_verb = if dry_run {
+        "Would respawn"
+    } else {
+        "Respawned"
+    };
+    let flap_verb = if dry_run { "Would flap" } else { "Flapping" };
     let remove_verb = if dry_run { "Would remove" } else { "Removed" };
     let pruned_verb = if dry_run { "Would prune" } else { "Pruned" };
 
     for k in &result.killed_orphan_children {
-        println!("{killed_verb}: {} (parent {} {})", k.name, k.parent, k.reason);
+        println!(
+            "{killed_verb}: {} (parent {} {})",
+            k.name, k.parent, k.reason
+        );
+    }
+    for a in &result.abandoned {
+        if a.reason == AbandonReason::Idle {
+            println!(
+                "{abandon_verb}: {} (idle {}d)",
+                a.name,
+                a.idle_days.unwrap_or(0)
+            );
+        } else {
+            println!("{abandon_verb}: {} ({})", a.name, a.reason.as_str());
+        }
+    }
+    for r in &result.respawned {
+        println!(
+            "{respawn_verb}: {}{}",
+            r.name,
+            if r.ptyfile_reread {
+                " (pty.toml re-read)"
+            } else {
+                ""
+            }
+        );
+    }
+    for f in &result.respawn_failed {
+        println!("Respawn failed: {} — {}", f.name, f.error);
+    }
+    for f in &result.flapped {
+        println!(
+            "{flap_verb}: {} ({} fast-fails in {}s, limit {})",
+            f.name, f.counter, f.window, f.limit
+        );
+    }
+    for name in &result.flapping_skipped {
+        println!("Skipped (flapping): {name} — remove strategy.status tag to retry");
     }
     for s in &result.reap_skipped {
-        let phase = if s.signalled { "after signalling" } else { "before signalling" };
+        let phase = if s.signalled {
+            "after signalling"
+        } else {
+            "before signalling"
+        };
         println!(
             "Skipped {} reap: {} ({}, {phase})",
             s.operation, s.name, s.reason
@@ -151,16 +195,16 @@ fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
     // these sessions asked for them to survive, so the reason they went away
     // anyway has to be visible rather than looking like the keep tag was
     // ignored.
-    let window = format_duration(keep_max_age_ms);
+    let keep_window = format_duration(keep_max_age_ms);
     for name in &result.keep_expired {
-        println!("{remove_verb} (keep expired after {window}): {name}");
+        println!("{remove_verb} (keep expired after {keep_window}): {name}");
     }
     // A kept session is not an action; it is printed so "why is this dead
     // session still listed?" has a visible answer, naming the window it is
     // counting down.
     for name in &result.kept {
         println!(
-            "Kept (keep tag): {name} — swept once dead for {window}, or remove the keep tag to reap it now"
+            "Kept (keep tag): {name} — swept once dead for {keep_window}, or remove the keep tag to reap it now"
         );
     }
     for p in &pruned {
@@ -177,6 +221,11 @@ fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
 
     let total_tags: usize = pruned.iter().map(|p| p.removed_keys.len()).sum();
     let total_actions = result.killed_orphan_children.len()
+        + result.abandoned.len()
+        + result.respawned.len()
+        + result.respawn_failed.len()
+        + result.flapped.len()
+        + result.flapping_skipped.len()
         + result.reap_skipped.len()
         + result.removed.len()
         + result.keep_expired.len()
@@ -184,16 +233,46 @@ fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
     if total_actions == 0 {
         println!(
             "{}",
-            if dry_run { "Nothing would be cleaned up." } else { "Nothing to clean up." }
+            if dry_run {
+                "Nothing would be cleaned up."
+            } else {
+                "Nothing to clean up."
+            }
         );
         return Ok(0);
     }
 
-    let plural = |n: usize, one: &str, many: &str| if n == 1 { one.to_string() } else { many.to_string() };
+    let plural = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            one.to_string()
+        } else {
+            many.to_string()
+        }
+    };
     let mut parts: Vec<String> = Vec::new();
     let n = result.killed_orphan_children.len();
     if n > 0 {
         parts.push(format!("{n} orphan {}", plural(n, "child", "children")));
+    }
+    let n = result.abandoned.len();
+    if n > 0 {
+        parts.push(format!("{n} abandoned"));
+    }
+    let n = result.respawned.len();
+    if n > 0 {
+        parts.push(format!("{n} {}", plural(n, "respawn", "respawns")));
+    }
+    let n = result.respawn_failed.len();
+    if n > 0 {
+        parts.push(format!("{n} respawn {}", plural(n, "failure", "failures")));
+    }
+    let n = result.flapped.len();
+    if n > 0 {
+        parts.push(format!("{n} flapping"));
+    }
+    let n = result.flapping_skipped.len();
+    if n > 0 {
+        parts.push(format!("{n} skipped-flapping"));
     }
     let n = result.reap_skipped.len();
     if n > 0 {
@@ -205,7 +284,10 @@ fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
     }
     let n = result.keep_expired.len();
     if n > 0 {
-        parts.push(format!("{n} keep-expired {}", plural(n, "session", "sessions")));
+        parts.push(format!(
+            "{n} keep-expired {}",
+            plural(n, "session", "sessions")
+        ));
     }
     if total_tags > 0 {
         parts.push(format!(
@@ -214,380 +296,16 @@ fn cmd_gc(dry_run: bool, keep_max_age_ms: i64) -> CliResult {
         ));
     }
     if dry_run {
-        println!("Would clean up {}. (Dry run — no changes made.)", parts.join(", "));
+        println!(
+            "Would clean up {}. (Dry run — no changes made.)",
+            parts.join(", ")
+        );
     } else {
         println!("Cleaned up {}.", parts.join(", "));
     }
     Ok(0)
 }
 
-/// The pass.
-///
-/// node: src/sessions.ts:1596-1806
-fn gc(dry_run: bool, keep_max_age_ms: i64) -> GcResult {
-    let mut result = GcResult::default();
-
-    // Raw debris: runtime files whose metadata is missing or malformed.
-    let raw_candidates = inventory_raw_cleanup_candidates(None);
-    if dry_run {
-        result.removed.extend(raw_candidates.iter().cloned());
-    } else {
-        for name in &raw_candidates {
-            if cleanup_raw_candidate_guarded(name) {
-                result.removed.push(name.clone());
-            }
-        }
-    }
-    let initial = registry::list_sessions();
-
-    // STEP 1: orphan children, in name order so cycles resolve
-    // deterministically.
-    let mut with_parent: Vec<&SessionInfo> = initial
-        .iter()
-        .filter(|s| parent_of(s).is_some())
-        .collect();
-    with_parent.sort_by(|a, b| a.name.cmp(&b.name));
-    for s in with_parent {
-        let parent = parent_of(s).unwrap_or_default();
-        let parent_meta = read_metadata(&parent);
-        let parent_pid = parent_meta
-            .as_ref()
-            .and_then(|m| read_pid_with(&parent, Some(m)));
-        let parent_alive = parent_meta.is_some() && parent_pid.is_some_and(pid_alive);
-        if parent_alive {
-            continue;
-        }
-        let reason = if parent_meta.is_some() { "dead" } else { "missing" };
-        if !dry_run
-            && let Reap::Skipped { reason, signalled } = reap_observed_session(s)
-        {
-            result.reap_skipped.push(ReapSkip {
-                name: s.name.clone(),
-                operation: "orphan",
-                reason,
-                signalled,
-            });
-            continue;
-        }
-        result.killed_orphan_children.push(OrphanKill {
-            name: s.name.clone(),
-            parent,
-            reason,
-        });
-    }
-
-    // STEP 3: the historic sweep. Exited/vanished non-permanent sessions
-    // lose their metadata; `keep` exempts them, but only until they have
-    // been dead longer than the retention window.
-    let final_list = if dry_run { initial } else { registry::list_sessions() };
-    let now_ms = now_epoch_ms();
-    for s in &final_list {
-        if !s.is_gone() {
-            continue;
-        }
-        let tags = s.metadata.as_ref().and_then(|m| m.tags.as_ref());
-        if tags.and_then(|t| t.get("strategy")).map(String::as_str) == Some("permanent") {
-            continue;
-        }
-        let keep_requested = is_keep_requested(tags);
-        if keep_requested && !is_keep_expired(s.metadata.as_ref(), now_ms, keep_max_age_ms) {
-            result.kept.push(s.name.clone());
-            continue;
-        }
-        if dry_run || cleanup_observed_session(s) {
-            let bucket = if keep_requested {
-                &mut result.keep_expired
-            } else {
-                &mut result.removed
-            };
-            bucket.push(s.name.clone());
-        }
-    }
-    result
-}
-
-fn parent_of(s: &SessionInfo) -> Option<String> {
-    s.metadata
-        .as_ref()
-        .and_then(|m| m.tags.as_ref())
-        .and_then(|t| t.get("parent"))
-        .filter(|p| !p.is_empty())
-        .cloned()
-}
-
-/// Registry debris that `list_sessions` cannot represent: `.sock`/`.pid`
-/// with a dead pid and missing/malformed metadata (socket unreachable), or
-/// malformed metadata with no runtime files at all.
-///
-/// node: src/sessions.ts:643-705
-fn inventory_raw_cleanup_candidates(only: Option<&str>) -> Vec<String> {
-    let Ok(dir) = std::fs::read_dir(session_dir()) else {
-        return Vec::new();
-    };
-    let entries: BTreeSet<String> = dir
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
-    let mut names: BTreeSet<String> = BTreeSet::new();
-    for entry in &entries {
-        let name = entry
-            .strip_suffix(".events.jsonl")
-            .or_else(|| entry.strip_suffix(".sock"))
-            .or_else(|| entry.strip_suffix(".pid"))
-            .or_else(|| entry.strip_suffix(".json"));
-        if let Some(name) = name
-            && only.is_none_or(|o| o == name)
-        {
-            names.insert(name.to_string());
-        }
-    }
-
-    struct Candidate {
-        name: String,
-        has_socket: bool,
-        has_pid: bool,
-        has_metadata: bool,
-        pid_dead: bool,
-    }
-    let candidates: Vec<Candidate> = names
-        .into_iter()
-        .filter_map(|name| {
-            let has_socket = entries.contains(&format!("{name}.sock"));
-            let has_pid = entries.contains(&format!("{name}.pid"));
-            let has_metadata = entries.contains(&format!("{name}.json"));
-            if has_metadata && !metadata_is_malformed(&name) {
-                return None;
-            }
-            let pid = if has_pid { read_pid(&name) } else { None };
-            let pid_dead = pid.is_some_and(|p| !pid_alive(p));
-            Some(Candidate {
-                name,
-                has_socket,
-                has_pid,
-                has_metadata,
-                pid_dead,
-            })
-        })
-        .collect();
-
-    let to_probe: Vec<PathBuf> = candidates
-        .iter()
-        .filter(|c| c.has_socket && c.pid_dead)
-        .map(|c| socket_path(&c.name))
-        .collect();
-    let reachability: HashMap<PathBuf, bool> =
-        probe_sockets_within_budget(&to_probe, DEFAULT_SOCKET_PROBE_BUDGET);
-
-    candidates
-        .into_iter()
-        .filter(|c| {
-            if c.pid_dead {
-                return !c.has_socket || reachability.get(&socket_path(&c.name)) == Some(&false);
-            }
-            c.has_metadata && !c.has_pid && !c.has_socket
-        })
-        .map(|c| c.name)
-        .collect()
-}
-
-/// "malformed": the file exists but is not a JSON object (an unreadable
-/// file is retained, as Node does).
-///
-/// node: src/sessions.ts:620-634
-fn metadata_is_malformed(name: &str) -> bool {
-    match std::fs::read(metadata_path(name)) {
-        Ok(bytes) => !matches!(
-            serde_json::from_slice::<serde_json::Value>(&bytes),
-            Ok(serde_json::Value::Object(_))
-        ),
-        Err(_) => false,
-    }
-}
-
-/// Remove one raw candidate while owning both locks, re-inventorying under
-/// the lock so a generation that appeared meanwhile is left alone.
-///
-/// node: src/sessions.ts:707-753
-fn cleanup_raw_candidate_guarded(name: &str) -> bool {
-    with_both_locks(name, || {
-        if !inventory_raw_cleanup_candidates(Some(name))
-            .iter()
-            .any(|n| n == name)
-        {
-            return false;
-        }
-        cleanup_socket(name);
-        let _ = std::fs::remove_file(metadata_path(name));
-        let _ = std::fs::remove_file(events_path(name));
-        let _ = std::fs::remove_file(recovery_revision_path(name));
-        true
-    })
-    .unwrap_or(false)
-}
-
-/// Generation-CAS cleanup of an observed session.
-///
-/// node: src/sessions.ts:769-790
-fn cleanup_observed_session(session: &SessionInfo) -> bool {
-    let Some(observed) = &session.metadata else {
-        return false;
-    };
-    with_both_locks(&session.name, || {
-        match read_metadata(&session.name) {
-            Some(current) if metadata_matches_observation(observed, &current) => {
-                cleanup_all_while_locked(&session.name);
-                true
-            }
-            _ => false,
-        }
-    })
-    .unwrap_or(false)
-}
-
-enum Reap {
-    Reaped,
-    Skipped { reason: &'static str, signalled: bool },
-}
-
-/// SIGTERM a session (when running), wait for its daemon, then remove its
-/// files — every step under both locks with the observation re-checked.
-///
-/// node: src/sessions.ts:821-880
-fn reap_observed_session(session: &SessionInfo) -> Reap {
-    let Some(observed) = &session.metadata else {
-        return Reap::Skipped {
-            reason: "stale",
-            signalled: false,
-        };
-    };
-    let name = &session.name;
-    let mut signalled = false;
-    let mut signal_failed = false;
-    let first = with_both_locks(name, || {
-        match read_metadata(name) {
-            Some(current) if metadata_matches_observation(observed, &current) => {}
-            _ => return false,
-        }
-        if session.is_running()
-            && let Some(pid) = session.pid
-        {
-            // SAFETY: signalling a pid read from the registry.
-            let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-            if rc == 0 {
-                signalled = true;
-            } else {
-                signal_failed = pid_alive(pid);
-            }
-        }
-        true
-    });
-    match first {
-        Err(_) => {
-            return Reap::Skipped {
-                reason: "busy",
-                signalled: false,
-            };
-        }
-        Ok(false) => {
-            return Reap::Skipped {
-                reason: "stale",
-                signalled: false,
-            };
-        }
-        Ok(true) => {}
-    }
-    if signal_failed {
-        return Reap::Skipped {
-            reason: "signal-failed",
-            signalled: false,
-        };
-    }
-    if signalled && let Some(pid) = session.pid {
-        let deadline = Instant::now() + Duration::from_secs(7);
-        while Instant::now() < deadline && !has_process_exited_for_reap(pid) {
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if !has_process_exited_for_reap(pid) {
-            return Reap::Skipped {
-                reason: "shutdown-timeout",
-                signalled: true,
-            };
-        }
-    }
-    let second = with_both_locks(name, || {
-        match read_metadata(name) {
-            Some(current) if metadata_matches_observation(observed, &current) => {}
-            _ => return false,
-        }
-        cleanup_all_while_locked(name);
-        true
-    });
-    match second {
-        Err(_) => Reap::Skipped {
-            reason: "busy",
-            signalled,
-        },
-        Ok(false) => Reap::Skipped {
-            reason: "stale",
-            signalled,
-        },
-        Ok(true) => Reap::Reaped,
-    }
-}
-
-/// `:l<pid>-<rand>` → the pid, when the key has that shape.
-///
-/// node: src/sessions.ts:2026 (`ORPHAN_LAYOUT_TAG_RE`)
-fn orphan_layout_tag_pid(key: &str) -> Option<Option<i64>> {
-    let rest = key.strip_prefix(":l")?;
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    if digits == 0 {
-        return None;
-    }
-    let tail = rest[digits..].strip_prefix('-')?;
-    if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
-        return None;
-    }
-    Some(rest[..digits].parse::<i64>().ok())
-}
-
-/// Drop layout tags whose owning pid is dead on every running session.
-///
-/// node: src/sessions.ts:2042-2074
-fn prune_orphan_layout_tags(dry_run: bool) -> Vec<PrunedTags> {
-    let mut out = Vec::new();
-    for s in registry::list_sessions() {
-        if !s.is_running() {
-            continue;
-        }
-        let Some(tags) = s.metadata.as_ref().and_then(|m| m.tags.as_ref()) else {
-            continue;
-        };
-        let to_remove: Vec<String> = tags
-            .keys()
-            .filter(|key| match orphan_layout_tag_pid(key) {
-                None => false,
-                Some(None) => true,
-                Some(Some(pid)) => {
-                    pid <= 0 || i32::try_from(pid).map(pid_alive).unwrap_or(false) == false
-                }
-            })
-            .cloned()
-            .collect();
-        if to_remove.is_empty() {
-            continue;
-        }
-        if !dry_run && update_tags(&s.name, &TagMap::new(), &to_remove).is_err() {
-            // The metadata disappeared between listing and update.
-            continue;
-        }
-        out.push(PrunedTags {
-            name: s.name,
-            removed_keys: to_remove,
-        });
-    }
-    out
-}
 
 /// `path.basename(root)` with `[^A-Za-z0-9._-]+` → `-` and edge dashes
 /// stripped.
@@ -608,7 +326,9 @@ fn label_basename_from_root(root: &str) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A launchd plist that runs `pty gc` every `interval` seconds. Node lists
@@ -630,7 +350,8 @@ fn print_launchd_plist(interval: i64) {
     let pty_bin = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "pty".to_string());
-    let env_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string());
+    let env_path =
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string());
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -677,17 +398,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_tag_shape() {
-        assert_eq!(orphan_layout_tag_pid(":l1234-abc"), Some(Some(1234)));
-        assert_eq!(orphan_layout_tag_pid(":layout"), None);
-        assert_eq!(orphan_layout_tag_pid(":l12-"), None);
-        assert_eq!(orphan_layout_tag_pid(":l-abc"), None);
-        assert_eq!(orphan_layout_tag_pid(":l12-ABC"), None);
-    }
-
-    #[test]
     fn label_basename() {
         assert_eq!(label_basename_from_root("/tmp/x/my-network"), "my-network");
+
         assert_eq!(
             label_basename_from_root("/tmp/weird name with spaces"),
             "weird-name-with-spaces"

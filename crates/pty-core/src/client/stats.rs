@@ -2,13 +2,14 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::protocol::{MessageType, PacketReader, encode_status};
 use crate::registry;
 use crate::stats::StatsResult;
 
-use super::{ClientError, GoneSet, connect_session_with, dropping_connection_line, map_io_error};
+use super::{ClientError, GoneSet, connect_session_at, dropping_connection_line, map_io_error};
 
 /// `queryStats` budget (`client.ts:344`).
 pub const STATS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -20,19 +21,46 @@ pub fn query_stats(name: &str) -> Result<StatsResult, ClientError> {
 
 /// [`query_stats`] with an explicit budget.
 pub fn query_stats_with_timeout(name: &str, timeout: Duration) -> Result<StatsResult, ClientError> {
-    let json = query_status_json(name, timeout)?;
+    let path = registry::socket_path(name);
+    query_stats_at(&path, name, timeout)
+}
+
+/// Query live stats from `root/<name>.sock` (2 s budget).
+pub fn query_stats_in(root: &Path, name: &str) -> Result<StatsResult, ClientError> {
+    query_stats_in_with_timeout(root, name, STATS_TIMEOUT)
+}
+
+/// [`query_stats_in`] with an explicit budget.
+pub fn query_stats_in_with_timeout(
+    root: &Path,
+    name: &str,
+    timeout: Duration,
+) -> Result<StatsResult, ClientError> {
+    query_stats_at(&root.join(format!("{name}.sock")), name, timeout)
+}
+
+fn query_stats_at(
+    socket_path: &Path,
+    name: &str,
+    timeout: Duration,
+) -> Result<StatsResult, ClientError> {
+    let json = query_status_json_at(socket_path, name, timeout)?;
     serde_json::from_str(&json).map_err(|_| ClientError::InvalidStats(name.to_string()))
 }
 
 /// The raw STATUS payload (the daemon's JSON, verbatim — what `stats --json`
 /// prints). Not-found uses the strict gone set (ENOENT/ECONNREFUSED only).
 pub fn query_status_json(name: &str, timeout: Duration) -> Result<String, ClientError> {
-    let deadline = Instant::now() + timeout;
-    let mut socket = connect_session_with(name, GoneSet::Strict)?;
     let path = registry::socket_path(name);
+    query_status_json_at(&path, name, timeout)
+}
+
+fn query_status_json_at(path: &Path, name: &str, timeout: Duration) -> Result<String, ClientError> {
+    let deadline = Instant::now() + timeout;
+    let mut socket = connect_session_at(path, name, GoneSet::Strict)?;
     socket
         .write_all(&encode_status())
-        .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(&path), &e))?;
+        .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(path), &e))?;
     let mut reader = PacketReader::new();
     let mut buf = [0u8; 8192];
     loop {

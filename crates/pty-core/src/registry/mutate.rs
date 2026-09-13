@@ -4,11 +4,16 @@
 //!
 //! node: src/sessions.ts:330-593, 740-752
 
+use std::time::{Duration, Instant};
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::lock::{acquire_lock, metadata_busy_message, take_event_lock};
+use super::lock::{
+    LockRefusal, METADATA_PATCH_LOCK_WAIT, is_creation_lock_held, metadata_busy_message,
+    take_event_lock, wait_for_event_lock, wait_for_metadata_lock,
+};
 use super::metadata::{
     SessionMetadata, TagMap, apply_metadata_diff, read_metadata_map, write_metadata_map,
 };
@@ -90,8 +95,39 @@ pub fn mutate_metadata_under_lock_with(
     options: &MutateOptions,
     on_published: impl FnOnce(&SessionMetadata),
 ) -> MutateStatus {
-    let Some(_lock) = acquire_lock(name) else {
-        return MutateStatus::Busy;
+    mutate_metadata_under_lock_with_wait(
+        name,
+        mutate,
+        options,
+        on_published,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// [`mutate_metadata_under_lock_with`] that waits up to `wait` for
+/// `<name>.lock` instead of reporting `Busy` at once.
+///
+/// compoundingtech/pty#180: `pty run` holds the creation lock across daemon
+/// spawn and publication, so a just-spawned attached child's first metadata
+/// write met a held lock. Transient creation/attach holders clear quickly;
+/// a holder that outlives the budget still reports `Busy` (fail-closed), and
+/// a lock file that cannot be created at all reports `Busy` at once, exactly
+/// as the fail-fast path does today.
+pub fn mutate_metadata_under_lock_with_wait(
+    name: &str,
+    mutate: impl FnOnce(&mut SessionMetadata) -> bool,
+    options: &MutateOptions,
+    on_published: impl FnOnce(&SessionMetadata),
+    wait: std::time::Duration,
+) -> MutateStatus {
+    let _lock = match wait_for_metadata_lock(name, wait) {
+        Ok(guard) => guard,
+        // `Unavailable` folds into `Busy` here, as `acquire_lock` folds
+        // every I/O error into "not taken" today. The presentation path
+        // takes the event lock first and surfaces its cause, so this arm
+        // is nearly unreachable through it; daemon-internal callers keep
+        // their existing `Busy` handling either way.
+        Err(LockRefusal::Busy) | Err(LockRefusal::Unavailable(_)) => return MutateStatus::Busy,
     };
     let Some(raw) = read_metadata_map(name) else {
         return MutateStatus::Missing;
@@ -247,18 +283,32 @@ pub enum MetadataPatchEvent {
     TagsChange,
 }
 
-/// The core of `metadata patch` / `rename` / `tag`: event lock, then the
-/// creation lock, mutate, publish, append exactly one event when something
-/// changed.
+/// The fail-fast core used by `rename` / `tag` and direct callers: event
+/// lock, then the creation lock, mutate, publish, append exactly one event
+/// when something changed.
 ///
-/// node: src/sessions.ts:444-557
+/// node: src/sessions.ts:478-595
 pub fn apply_metadata_patch_by_id(
     id: &str,
     patch: &MetadataPatch,
     event: MetadataPatchEvent,
 ) -> Result<MetadataPatchResult, String> {
+    apply_metadata_patch_by_id_with_wait(id, patch, event, Duration::ZERO)
+}
+
+fn apply_metadata_patch_by_id_with_wait(
+    id: &str,
+    patch: &MetadataPatch,
+    event: MetadataPatchEvent,
+    wait: Duration,
+) -> Result<MetadataPatchResult, String> {
     patch.validate()?;
-    let _event_lock = take_event_lock(id)?;
+    let deadline = Instant::now() + wait;
+    let _event_lock = if wait.is_zero() {
+        take_event_lock(id)?
+    } else {
+        wait_for_event_lock(id, wait)?
+    };
 
     #[derive(Default)]
     struct PatchState {
@@ -270,7 +320,12 @@ pub fn apply_metadata_patch_by_id(
     }
     let state = std::cell::RefCell::new(PatchState::default());
 
-    let result = mutate_metadata_under_lock_with(
+    // `metadata patch --id` waits out a transient creation/attach holder.
+    // Its event-lock acquisition above and the creation lock share one
+    // bounded budget. Direct callers, `rename`, and `tag` pass zero and keep
+    // their historical fail-fast behavior. A holder that outlives the budget
+    // still fails closed with today's busy text.
+    let result = mutate_metadata_under_lock_with_wait(
         id,
         |metadata| {
             let mut st = state.borrow_mut();
@@ -356,6 +411,7 @@ pub fn apply_metadata_patch_by_id(
             };
             let _ = append_event_locked(id, &ev);
         },
+        deadline.saturating_duration_since(Instant::now()),
     );
 
     let mutation_error = state.into_inner().error;
@@ -381,18 +437,34 @@ pub fn apply_metadata_patch_by_id(
 
 /// Atomically merge presentation metadata for one exact stable id (no
 /// displayName fallback), emitting `metadata_change` with only the touched
-/// keys.
+/// keys. A live creation lock is waited out before taking the event lock, so
+/// daemon publication events retain their own bounded lock budget. Genuinely
+/// unknown ids still fail fast.
 ///
-/// node: src/sessions.ts:559-567
+/// node: src/sessions.ts `patchMetadataById`
 pub fn patch_metadata_by_id(
     id: &str,
     patch: &MetadataPatch,
 ) -> Result<MetadataPatchResult, String> {
     patch.validate()?;
-    if !super::root::metadata_path(id).is_file() {
+    let path = super::root::metadata_path(id);
+    let deadline = Instant::now() + METADATA_PATCH_LOCK_WAIT;
+    while is_creation_lock_held(id) {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(metadata_busy_message(id));
+        }
+        std::thread::sleep(Duration::from_millis(25).min(deadline - now));
+    }
+    if !path.is_file() {
         return Err(format!("Session id \"{id}\" not found."));
     }
-    apply_metadata_patch_by_id(id, patch, MetadataPatchEvent::MetadataChange)
+    apply_metadata_patch_by_id_with_wait(
+        id,
+        patch,
+        MetadataPatchEvent::MetadataChange,
+        deadline.saturating_duration_since(Instant::now()),
+    )
 }
 
 /// Set or clear (`None` or `""`) the display name, emitting

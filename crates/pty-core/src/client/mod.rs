@@ -34,7 +34,8 @@ pub use attach::{AttachOutcome, AttachParams, Reconnect, attach};
 #[cfg(feature = "tokio")]
 pub use connection::AsyncConnection;
 pub use connection::{
-    PeekScreenOptions, SendDataOptions, SessionConnection, SessionEvent, peek_screen, send_data,
+    PeekScreenOptions, SendDataOptions, SessionConnection, SessionEvent, peek_screen,
+    peek_screen_bytes_in, peek_screen_in, send_data,
 };
 pub use peek::{PeekOutcome, PeekParams, PeekWaitError, follow, peek, peek_wait, strip_ansi};
 pub use remote::{
@@ -43,7 +44,10 @@ pub use remote::{
 };
 pub use sanitize::{CLEAR_SCREEN_HOME, CURSOR_TO_BOTTOM, TERMINAL_SANITIZE};
 pub use send::{DEFAULT_SEQ_DELAY_MS, SendOptions, resolve_seq_delay_ms, send, send_over};
-pub use stats::{STATS_TIMEOUT, query_stats, query_stats_with_timeout, query_status_json};
+pub use stats::{
+    STATS_TIMEOUT, query_stats, query_stats_in, query_stats_in_with_timeout,
+    query_stats_with_timeout, query_status_json,
+};
 pub use stream::{parse_attach_stream_fd_token, validate_attach_stream_fd};
 
 use crate::registry;
@@ -253,8 +257,15 @@ pub fn connect_session(name: &str) -> Result<UnixStream, ClientError> {
 /// [`connect_session`] with an explicit gone set.
 pub fn connect_session_with(name: &str, set: GoneSet) -> Result<UnixStream, ClientError> {
     let path = registry::socket_path(name);
-    UnixStream::connect(&path)
-        .map_err(|e| map_io_error(name, false, set, "connect", Some(&path), &e))
+    connect_session_at(&path, name, set)
+}
+
+pub(crate) fn connect_session_at(
+    path: &Path,
+    name: &str,
+    set: GoneSet,
+) -> Result<UnixStream, ClientError> {
+    UnixStream::connect(path).map_err(|e| map_io_error(name, false, set, "connect", Some(path), &e))
 }
 
 /// Is a session's socket connectable right now?

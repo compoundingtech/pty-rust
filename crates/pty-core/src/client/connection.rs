@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::keys::{KeyError, resolve_key};
@@ -20,7 +21,7 @@ use crate::protocol::{
 };
 use crate::registry;
 
-use super::{ClientError, GoneSet, connect_session_with, map_io_error};
+use super::{ClientError, GoneSet, connect_session_at, connect_session_with, map_io_error};
 
 /// Something the daemon sent (the `SessionConnection` events of the Node API).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,54 +373,167 @@ pub struct PeekScreenOptions {
 /// How long [`peek_screen`] waits for the SCREEN packet.
 pub const PEEK_SCREEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+enum PeekScreenReadError {
+    Client(ClientError),
+    TimedOut,
+}
+
+impl PeekScreenReadError {
+    fn into_client_error(self, name: &str) -> ClientError {
+        match self {
+            PeekScreenReadError::Client(error) => error,
+            PeekScreenReadError::TimedOut => ClientError::ClosedBeforeScreen(name.to_string()),
+        }
+    }
+}
+
 /// Fetch the current screen (one PEEK, first SCREEN). Strict gone set; a close
 /// before the screen is `Connection to "<name>" closed before screen received.`
 ///
 /// node: tests/connection.test.ts:318-349
 pub fn peek_screen(name: &str, opts: PeekScreenOptions) -> Result<String, ClientError> {
-    let socket = connect_session_with(name, GoneSet::Strict)?;
-    peek_screen_over(socket, name, opts, PEEK_SCREEN_TIMEOUT)
+    let path = registry::socket_path(name);
+    peek_screen_text_at(&path, name, opts)
+}
+
+/// Fetch the current screen from `root/<name>.sock`.
+pub fn peek_screen_in(
+    root: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<String, ClientError> {
+    let bytes = peek_screen_bytes_in(root, name, opts)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Fetch the exact SCREEN payload from `root/<name>.sock`. For a full peek
+/// whose socket is gone, return the retained metadata `lastLines` in the same
+/// newline-delimited form as `pty peek --full`.
+pub fn peek_screen_bytes_in(
+    root: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<Vec<u8>, ClientError> {
+    match peek_screen_bytes_at(&root.join(format!("{name}.sock")), name, opts) {
+        Err(PeekScreenReadError::Client(
+            error @ (ClientError::NotReachable { .. } | ClientError::ClosedBeforeScreen { .. }),
+        )) if opts.full => retained_screen_bytes_in(root, name).ok_or(error),
+        result => result.map_err(|error| error.into_client_error(name)),
+    }
+}
+
+fn retained_screen_bytes_in(root: &Path, name: &str) -> Option<Vec<u8>> {
+    let lines =
+        registry::metadata::read_metadata_at(&root.join(format!("{name}.json")))?.last_lines?;
+    if lines.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut screen = Vec::with_capacity(lines.iter().map(String::len).sum::<usize>() + lines.len());
+    for line in lines {
+        screen.extend_from_slice(line.as_bytes());
+        screen.push(b'\n');
+    }
+    Some(screen)
+}
+
+fn peek_screen_text_at(
+    path: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<String, ClientError> {
+    let bytes =
+        peek_screen_bytes_at(path, name, opts).map_err(|error| error.into_client_error(name))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn peek_screen_bytes_at(
+    path: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<Vec<u8>, PeekScreenReadError> {
+    let socket =
+        connect_session_at(path, name, GoneSet::Strict).map_err(PeekScreenReadError::Client)?;
+    peek_screen_bytes_over(socket, path, name, opts, PEEK_SCREEN_TIMEOUT)
 }
 
 /// [`peek_screen`] over an already-connected socket with an explicit budget.
 pub fn peek_screen_over(
-    mut socket: UnixStream,
+    socket: UnixStream,
     name: &str,
     opts: PeekScreenOptions,
     timeout: Duration,
 ) -> Result<String, ClientError> {
-    let deadline = Instant::now() + timeout;
     let path = registry::socket_path(name);
+    let bytes = peek_screen_bytes_over(socket, &path, name, opts, timeout)
+        .map_err(|error| error.into_client_error(name))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn peek_screen_bytes_over(
+    mut socket: UnixStream,
+    path: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+    timeout: Duration,
+) -> Result<Vec<u8>, PeekScreenReadError> {
+    let deadline = Instant::now() + timeout;
     socket
         .write_all(&encode_peek(opts.plain, opts.full))
-        .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(&path), &e))?;
+        .map_err(|e| {
+            PeekScreenReadError::Client(map_io_error(
+                name,
+                false,
+                GoneSet::Strict,
+                "write",
+                Some(path),
+                &e,
+            ))
+        })?;
     let mut reader = PacketReader::new();
     let mut buf = [0u8; 16384];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(ClientError::ClosedBeforeScreen(name.to_string()));
+            return Err(PeekScreenReadError::TimedOut);
         }
         let _ = socket.set_read_timeout(Some(remaining));
         match socket.read(&mut buf) {
-            Ok(0) => return Err(ClientError::ClosedBeforeScreen(name.to_string())),
+            Ok(0) => {
+                return Err(PeekScreenReadError::Client(
+                    ClientError::ClosedBeforeScreen(name.to_string()),
+                ));
+            }
             Ok(n) => match reader.feed(&buf[..n]) {
                 Ok(packets) => {
                     for p in packets {
                         if p.type_ == MessageType::Screen {
-                            return Ok(String::from_utf8_lossy(&p.payload).into_owned());
+                            return Ok(p.payload);
                         }
                     }
                 }
-                Err(e) => return Err(ClientError::Connection(e.to_string())),
+                Err(e) => {
+                    return Err(PeekScreenReadError::Client(ClientError::Connection(
+                        e.to_string(),
+                    )));
+                }
             },
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                return Err(ClientError::ClosedBeforeScreen(name.to_string()));
+                return Err(PeekScreenReadError::TimedOut);
             }
-            Err(e) => return Err(map_io_error(name, false, GoneSet::Strict, "read", None, &e)),
+            Err(e) => {
+                return Err(PeekScreenReadError::Client(map_io_error(
+                    name,
+                    false,
+                    GoneSet::Strict,
+                    "read",
+                    None,
+                    &e,
+                )));
+            }
         }
     }
 }

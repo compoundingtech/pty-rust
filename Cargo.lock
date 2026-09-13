@@ -1157,6 +1157,7 @@ dependencies = [
  "libghostty-vt",
  "portable-pty",
  "pty-core",
+ "pty-lifecycle",
  "pty-spawn",
  "pty-terminal",
  "pty-testkit",
@@ -1192,6 +1193,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "pty-lifecycle"
+version = "0.13.0-rust"
+dependencies = [
+ "libc",
+ "pty-core",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

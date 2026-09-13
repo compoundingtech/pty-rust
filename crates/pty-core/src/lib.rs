@@ -10,15 +10,13 @@
 //! a Zig toolchain. Terminal emulation lives in `pty-terminal`; the daemon and
 //! CLI live in the `pty` binary crate.
 //!
-//! # One thing to know before you build on this
+//! # Lock compatibility boundary
 //!
-//! **The registry's file locks are not exclusive across a crash.** They keep
-//! two live, healthy processes apart, which is what they are for. They do not
-//! settle a race between two processes tidying up after a daemon that died
-//! holding one: both can end up believing they hold it. The Node tool has the
-//! same defect, so a shared `$PTY_ROOT` is no worse than either alone.
-//! [`registry::lock`] states the measurement and what a correct fix would
-//! need.
+//! Rust publishes complete owner records atomically and makes stale stealing
+//! exclusive between Rust contenders. Node retains an empty-publication window
+//! and an unbound stale read-then-unlink. Rust respects a live, complete Node
+//! lock, but a delayed Node stale contender can unlink a newer Rust or Node
+//! claim. [`registry::lock`] describes the mixed-registry boundary.
 
 pub mod client;
 pub mod duration;
