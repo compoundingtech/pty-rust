@@ -31,7 +31,7 @@ use pty_core::registry::{
 use sha2::{Digest, Sha256};
 
 use super::argv::js_parse_int;
-use super::{CliError, CliResult};
+use super::{CliError, CliResult, apply_persisted_launch_options};
 
 /// Parse and run.
 ///
@@ -517,9 +517,11 @@ fn gc(
             continue;
         }
         if dry_run {
-            let ptyfile_reread = meta.tags.as_ref().and_then(|t| t.get("ptyfile")).is_some();
+            let (params, ptyfile_reread) = respawn_params(&s.name, meta);
             let decision = classify_flapping(
                 meta,
+                &params.command,
+                &params.args,
                 now_epoch_ms(),
                 global_fast_fail_window,
                 global_fast_fail_limit,
@@ -706,6 +708,8 @@ fn command_fingerprint(command: &str, args: &[String]) -> String {
 /// node: src/sessions.ts:773-897
 fn classify_flapping(
     meta: &SessionMetadata,
+    command: &str,
+    args: &[String],
     now_ms: i64,
     global_window: Option<i64>,
     global_limit: Option<i64>,
@@ -722,7 +726,7 @@ fn classify_flapping(
     let effective_limit = positive_tag("strategy.fast-fail-limit")
         .or(global_limit.filter(|v| *v > 0))
         .unwrap_or(DEFAULT_FAST_FAIL_LIMIT);
-    let current_hash = command_fingerprint(&meta.command, &meta.args);
+    let current_hash = command_fingerprint(command, args);
     let stored_hash = tags.and_then(|t| t.get("strategy.command-hash"));
     let command_changed = stored_hash.is_some_and(|h| h != &current_hash);
     let status = tags
@@ -843,8 +847,16 @@ fn reconcile_permanent(
         return PermanentOutcome::Stale;
     }
 
+    let (mut params, ptyfile_reread) = respawn_params(name, &current);
     let now_ms = now_epoch_ms();
-    let decision = classify_flapping(&current, now_ms, global_window, global_limit);
+    let decision = classify_flapping(
+        &current,
+        &params.command,
+        &params.args,
+        now_ms,
+        global_window,
+        global_limit,
+    );
     match decision.action {
         FlappingAction::Skip => PermanentOutcome::SkippedFlapping,
         FlappingAction::Flap => {
@@ -880,7 +892,9 @@ fn reconcile_permanent(
             }
         }
         FlappingAction::Respawn => {
-            let (params, ptyfile_reread) = respawn_params(name, &current, &decision.bookkeeping);
+            for (key, value) in &decision.bookkeeping {
+                params.tags.insert(key.clone(), value.clone());
+            }
             if let Err(error) = pty_core::spawn::resolve_command(&params.command) {
                 return PermanentOutcome::Failed(error);
             }
@@ -907,11 +921,7 @@ fn reconcile_permanent(
 /// fresh pty.toml definition when the recorded binding still resolves.
 ///
 /// node: src/sessions.ts:899-982
-fn respawn_params(
-    name: &str,
-    meta: &SessionMetadata,
-    bookkeeping: &TagMap,
-) -> (super::SpawnParams, bool) {
+fn respawn_params(name: &str, meta: &SessionMetadata) -> (super::SpawnParams, bool) {
     let mut command = meta.command.clone();
     let mut args = meta.args.clone();
     let mut display_command = meta.display_command.clone();
@@ -932,22 +942,43 @@ fn respawn_params(
             .cwd
             .clone()
             .unwrap_or_else(|| file.dir.to_string_lossy().into_owned());
-        tags = session.tags.clone().unwrap_or_default();
+        let mut user_keys: Vec<String> = session
+            .tags
+            .as_ref()
+            .map(|manifest| manifest.keys().cloned().collect())
+            .unwrap_or_default();
+        user_keys.sort();
+        let previous_keys: Vec<String> = tags
+            .get("ptyfile.tags")
+            .map(String::as_str)
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .collect();
+        for key in previous_keys {
+            if !user_keys.iter().any(|user_key| user_key == &key) {
+                tags.shift_remove(&key);
+            }
+        }
+        if let Some(manifest_tags) = &session.tags {
+            for (key, value) in manifest_tags {
+                tags.insert(key.clone(), value.clone());
+            }
+        }
         tags.insert("ptyfile".into(), path.clone());
         tags.insert("ptyfile.session".into(), short_name.clone());
+        tags.insert("ptyfile.tags".into(), user_keys.join(","));
     }
-    for (key, value) in bookkeeping {
-        tags.insert(key.clone(), value.clone());
-    }
-    if !bookkeeping.contains_key("strategy.status") {
-        tags.shift_remove("strategy.status");
-    }
+    tags.shift_remove("strategy.status");
 
     let mut params = super::SpawnParams::new(name, &command, &args);
     params.display_command = display_command;
     params.cwd = cwd;
     params.tags = tags;
     params.display_name = meta.display_name.clone();
+    apply_persisted_launch_options(&mut params, meta);
     params.respawn = true;
     (params, ptyfile_reread)
 }

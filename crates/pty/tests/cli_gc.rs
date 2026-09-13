@@ -202,6 +202,60 @@ fn respawns_permanent_sessions_and_sweeps_non_permanent() {
     );
 }
 
+/// GC rebuilds a permanent session with the same terminal and environment
+/// policy that its metadata recorded.
+#[test]
+fn permanent_respawn_preserves_persisted_launch_options() {
+    let rig = Rig::new();
+    rig.write_meta(
+        "options",
+        json!({
+            "command": "cat",
+            "args": [],
+            "rows": 31,
+            "cols": 101,
+            "ephemeral": true,
+            "isolateEnv": true,
+            "extraEnv": {"EXTRA": "kept"},
+            "unsetEnv": ["DROP"],
+            "tags": {"strategy": "permanent"}
+        }),
+    );
+    rig.write_meta(
+        "exact-env",
+        json!({
+            "command": "cat",
+            "args": [],
+            "env": {"ONLY": "preserved"},
+            "tags": {"strategy": "permanent"}
+        }),
+    );
+
+    let out = rig.ok(&["gc"]);
+    assert!(
+        out.stdout.contains("Respawned: options")
+            && out.stdout.contains("Respawned: exact-env"),
+        "unexpected gc output:\nstdout:\n{}\nstderr:\n{}",
+        out.stdout,
+        out.stderr
+    );
+    wait_until("option-preserving respawn", || {
+        std::os::unix::net::UnixStream::connect(rig.path("options.sock")).is_ok()
+    });
+    wait_until("verbatim-environment respawn", || {
+        std::os::unix::net::UnixStream::connect(rig.path("exact-env.sock")).is_ok()
+    });
+    let meta = rig.read_meta("options").unwrap();
+    assert_eq!(meta["rows"], 31);
+    assert_eq!(meta["cols"], 101);
+    assert_eq!(meta["ephemeral"], true);
+    assert_eq!(meta["isolateEnv"], true);
+    assert_eq!(meta["extraEnv"], json!({"EXTRA": "kept"}));
+    assert_eq!(meta["unsetEnv"], json!(["DROP"]));
+    let exact_env = rig.read_meta("exact-env").unwrap();
+    assert_eq!(exact_env["env"], json!({"ONLY": "preserved"}));
+}
+
 /// The flapping clock is sampled only after earlier reaps and after this
 /// permanent's locks are held, rather than once at the start of the GC pass.
 #[test]
@@ -250,8 +304,8 @@ fn permanent_respawn_timestamp_is_taken_at_its_reconciliation() {
     let _ = delayed.wait();
 }
 
-/// A pty.toml-bound respawn reuses the stable id but re-reads command, cwd,
-/// and manifest tags.
+/// A pty.toml-bound respawn reuses the stable id, re-reads command and cwd,
+/// and refreshes manifest tags without dropping manual tags.
 #[test]
 fn permanent_respawn_rereads_ptyfile_without_changing_identity() {
     let rig = Rig::new();
@@ -276,10 +330,13 @@ fn permanent_respawn_rereads_ptyfile_without_changing_identity() {
             .is_some_and(|value| value.is_string())
             && std::os::unix::net::UnixStream::connect(rig.path(&format!("{id}.sock"))).is_err()
     });
+    mutate_meta(&rig, &id, |meta| {
+        meta["tags"]["manual"] = json!("keep");
+    });
 
     std::fs::write(
         manifest.join("pty.toml"),
-        "[sessions.worker]\ncommand = \"cat\"\ncwd = \"..\"\ntags = { strategy = \"permanent\", version = \"two\" }\n",
+        "[sessions.worker]\ncommand = \"cat\"\ncwd = \"..\"\ntags = { strategy = \"permanent\", role = \"worker\" }\n",
     )
     .unwrap();
     let out = rig.ok(&["gc"]);
@@ -296,8 +353,70 @@ fn permanent_respawn_rereads_ptyfile_without_changing_identity() {
     let meta = rig.read_meta(&id).unwrap();
     assert_eq!(meta["displayName"], "worker");
     assert_eq!(meta["cwd"], rig.scratch.to_string_lossy().to_string());
-    assert_eq!(meta["tags"]["version"], "two");
+    assert_eq!(meta["tags"]["role"], "worker");
+    assert!(meta["tags"].get("version").is_none());
+    assert_eq!(meta["tags"]["manual"], "keep");
     assert_eq!(meta["tags"]["ptyfile.session"], "worker");
+    assert_eq!(meta["tags"]["ptyfile.tags"], "role,strategy");
+}
+
+/// Editing a bound manifest command is an operator recovery action even when
+/// the previous command has already been marked as flapping.
+#[test]
+fn manifest_command_change_recovers_a_flapping_session() {
+    let rig = Rig::new();
+    let manifest = rig.write_toml(
+        "flapping-manifest",
+        "[sessions.worker]\ncommand = \"exit 1\"\ntags = { strategy = \"permanent\", \"strategy.fast-fail-limit\" = \"1\" }\n",
+    );
+    rig.ok(&["up", manifest.to_str().unwrap()]);
+    let listed = rig.ok(&["list", "--json"]).json();
+    let id = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["displayName"] == "worker")
+        .unwrap()["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_until("initial manifest command exit", || {
+        rig.read_meta(&id)
+            .and_then(|meta| meta.get("exitedAt").cloned())
+            .is_some_and(|value| value.is_string())
+            && std::os::unix::net::UnixStream::connect(rig.path(&format!("{id}.sock"))).is_err()
+    });
+
+    assert!(rig.ok(&["gc"]).stdout.contains(&format!("Respawned: {id}")));
+    wait_until("respawned manifest command exit", || {
+        rig.read_meta(&id)
+            .and_then(|meta| meta.get("exitedAt").cloned())
+            .is_some_and(|value| value.is_string())
+            && std::os::unix::net::UnixStream::connect(rig.path(&format!("{id}.sock"))).is_err()
+    });
+    assert!(
+        rig.ok(&["gc"])
+            .stdout
+            .contains(&format!("Flapping: {id}"))
+    );
+
+    std::fs::write(
+        manifest.join("pty.toml"),
+        "[sessions.worker]\ncommand = \"cat\"\ntags = { strategy = \"permanent\", \"strategy.fast-fail-limit\" = \"1\" }\n",
+    )
+    .unwrap();
+    let dry = rig.ok(&["gc", "--dry-run"]);
+    assert!(dry.stdout.contains(&format!("Would respawn: {id}")));
+    assert!(!dry.stdout.contains(&format!("Skipped (flapping): {id}")));
+    let out = rig.ok(&["gc"]);
+    assert!(out.stdout.contains(&format!("Respawned: {id}")));
+    wait_until("recovered manifest session", || {
+        std::os::unix::net::UnixStream::connect(rig.path(&format!("{id}.sock"))).is_ok()
+    });
+    let meta = rig.read_meta(&id).unwrap();
+    assert_eq!(meta["displayCommand"], "cat");
+    assert!(meta["tags"].get("strategy.status").is_none());
+    assert_eq!(meta["tags"]["strategy.consecutive-fast-fails"], "0");
 }
 
 /// The per-session creation lock makes repeated/concurrent reconciliation
