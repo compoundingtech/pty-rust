@@ -18,8 +18,7 @@ fn main() {
 }
 
 /// `process.title = "pty"` (bin/pty:7, cli.ts:80), the same way the daemon
-/// names itself. See `daemon::launch::set_process_title` for why macOS has
-/// its own call rather than nothing.
+/// names itself. See `pty_lifecycle::set_process_title` for the platform notes.
 fn set_process_title(title: &str) {
     daemon::set_process_title(title);
 }

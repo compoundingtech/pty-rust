@@ -27,8 +27,8 @@ use pty_core::registry::{
 };
 use pty_terminal::{TerminalActor, serialize};
 
+use super::DaemonConfig;
 use super::clients::{Client, Out, REDRAW_SETTLE};
-use super::config::DaemonConfig;
 use super::daemon_warn;
 use super::env::{build_child_env, describe_invalid_cwd, invalid_cwd_error};
 use super::tree::{
@@ -208,7 +208,7 @@ fn kill(pid: i32, signal: i32) {
 /// exit status (the child's code after a natural exit, 0 after a kill).
 pub(crate) fn run(
     cfg: DaemonConfig,
-    readiness: super::launch::ReadyNotifier,
+    readiness: super::ReadyNotifier,
 ) -> Result<i32, String> {
     let name = cfg.name.clone();
     let generation = cfg

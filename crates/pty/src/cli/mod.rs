@@ -43,7 +43,6 @@ pub mod stats;
 use std::fmt;
 use std::io::Write;
 
-use pty_core::client;
 use pty_core::registry::{self, TagMap};
 
 /// A failed command: `Display` is the exact text Node prints to stderr
@@ -121,38 +120,6 @@ pub fn ensure_not_nested(cmd: &str, force: bool, hint: Option<&str>) -> Option<i
         None => eprintln!("  Pass --force to override."),
     }
     Some(1)
-}
-
-/// Carry a session's launch-time settings into its replacement. Older
-/// records simply have fewer of them.
-///
-/// node: src/cli.ts:3874-3884 (`persistedLaunchOptions`)
-pub fn apply_persisted_launch_options(params: &mut SpawnParams, meta: &registry::SessionMetadata) {
-    if let Some(rows) = meta.rows {
-        params.rows = rows;
-    }
-    if let Some(cols) = meta.cols {
-        params.cols = cols;
-    }
-    if let Some(ephemeral) = meta.ephemeral {
-        params.ephemeral = ephemeral;
-    }
-    if meta.isolate_env == Some(true) {
-        params.isolate_env = true;
-    }
-    if let Some(extra) = &meta.extra_env
-        && !extra.is_empty()
-    {
-        params.extra_env = extra.clone();
-    }
-    if let Some(unset) = &meta.unset_env
-        && !unset.is_empty()
-    {
-        params.unset_env = unset.clone();
-    }
-    if let Some(env) = &meta.env {
-        params.env = Some(env.clone());
-    }
 }
 
 /// Options the interactive picker is opened with.
@@ -367,35 +334,18 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
 
 // ── Daemon launch ───────────────────────────────────────────────────────
 
-pub use crate::daemon::SpawnParams;
-
-impl SpawnParams {
-    /// Parameters for `command` with the CLI's terminal size (or 24×80).
-    pub fn new(name: &str, command: &str, args: &[String]) -> Self {
-        let (rows, cols) = client::tty::size_or_default(libc::STDOUT_FILENO);
-        SpawnParams {
-            name: name.to_string(),
-            command: command.to_string(),
-            args: args.to_vec(),
-            display_command: std::iter::once(command.to_string())
-                .chain(args.iter().cloned())
-                .collect::<Vec<_>>()
-                .join(" "),
-            rows,
-            cols,
-            ..Default::default()
-        }
-    }
-}
+pub use pty_lifecycle::{SpawnParams, apply_persisted_launch_options};
 
 /// Resolve the command, spawn the detached session daemon and wait for it
-/// to publish (`daemon::launch::spawn_daemon`).
+/// to publish through `pty-lifecycle`.
 ///
 /// node: src/spawn.ts:372-393, 164-243
 pub fn spawn_daemon(p: &SpawnParams) -> Result<(), String> {
     let mut params = p.clone();
     params.command = pty_core::spawn::resolve_command(&p.command)?;
-    crate::daemon::spawn_daemon(params)
+    let executable =
+        std::env::current_exe().map_err(|e| format!("cannot find own executable: {e}"))?;
+    pty_lifecycle::spawn_daemon(&executable, params)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

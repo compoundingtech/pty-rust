@@ -3,27 +3,25 @@
 //! session's files, and records its exit — Node's `server.ts` with the
 //! same ordering guarantees.
 //!
-//! - [`launch`]: how a CLI spawns one (`spawn_daemon`) and how the process
-//!   starts (`daemon_main`, the `__daemon` argv).
-//! - [`config`], [`env`]: the start-up config and the child's environment.
-//! - [`lifecycle`]: the actor loop, publication, exit, shutdown.
+//! - `pty-lifecycle` owns daemon launch and the shared start-up config.
+//! - [`daemon_main`] implements the private `__daemon` entrypoint.
+//! - [`env`], [`lifecycle`]: the child's environment, actor loop, publication,
+//!   exit, and shutdown.
 //! - [`clients`], [`geometry`], [`status`], [`events`]: the packet handlers,
 //!   effective geometry, STATUS, and the events log.
 //! - [`tree`]: descendant termination on an external kill.
 
 pub mod clients;
-pub mod config;
 pub mod env;
 pub mod events;
 pub mod geometry;
-pub mod launch;
 pub mod lifecycle;
 pub mod status;
 pub mod tree;
 
 use std::path::PathBuf;
 
-pub use config::DaemonConfig;
+pub use pty_lifecycle::{DaemonConfig, ReadyNotifier, set_process_title};
 
 /// Write a diagnostic line to stderr and carry on if nobody is listening.
 ///
@@ -41,8 +39,6 @@ macro_rules! daemon_warn {
     }};
 }
 pub(crate) use daemon_warn;
-#[allow(unused_imports)]
-pub use launch::{SpawnError, SpawnParams, SpawnedDaemon, set_process_title, spawn_daemon};
 
 /// The `pty __daemon` entry: title, config from fd 3 (or
 /// `PTY_SERVER_CONFIG`), then the daemon. Returns the process exit status.
@@ -57,7 +53,7 @@ pub fn daemon_main() -> i32 {
             return 1;
         }
     };
-    let readiness = launch::ReadyNotifier::from_process();
+    let readiness = ReadyNotifier::from_process();
     match lifecycle::run(cfg, readiness) {
         Ok(code) => code,
         Err(msg) => {

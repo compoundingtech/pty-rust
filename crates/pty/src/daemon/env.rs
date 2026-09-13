@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::config::DaemonConfig;
+use pty_lifecycle::{DaemonConfig, READY_FD_ENV};
 
 /// What an isolated child keeps of the daemon's environment (plus `LC_*`).
 ///
@@ -63,7 +63,7 @@ pub fn build_child_env_from(
     } else if !cfg.isolate_env() {
         let mut env: BTreeMap<String, String> = source.iter().cloned().collect();
         env.remove("PTY_SERVER_CONFIG");
-        env.remove(super::launch::READY_FD_ENV);
+        env.remove(READY_FD_ENV);
         env
     } else {
         source
