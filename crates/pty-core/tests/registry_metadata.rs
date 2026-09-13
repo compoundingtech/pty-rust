@@ -8,6 +8,7 @@ mod registry_support;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
+use pty_core::events::{Event, EventWriter};
 use pty_core::registry::{
     self, MetadataPatch, MutateOptions, MutateStatus, SessionMetadata, TagMap,
 };
@@ -526,6 +527,46 @@ fn patch_waits_for_a_late_record_during_creation() {
         Some("1")
     );
     publisher.join().unwrap();
+}
+
+/// A metadata patch waiting for the creation lock must not monopolize the
+/// event lock: the daemon's bounded writer still has to publish startup.
+#[test]
+fn patch_creation_wait_does_not_block_daemon_events() {
+    let _ = root();
+    let name = unique_name("patch-event-window");
+    plant(&name);
+    let creation_lock = registry::acquire_lock(&name).unwrap();
+    let event_lock = registry::acquire_event_lock(&name).unwrap();
+    let patch_name = name.clone();
+    let patcher = std::thread::spawn(move || {
+        let patch =
+            MetadataPatch::from_json(&json!({"tags": {"created-by-child": "1"}})).unwrap();
+        registry::patch_metadata_by_id(&patch_name, &patch)
+    });
+
+    // Give the patch time to observe both locks held. An event-first patch
+    // claims the event lock when it opens; a creation-first patch does not.
+    std::thread::sleep(Duration::from_millis(100));
+    drop(event_lock);
+    std::thread::sleep(Duration::from_millis(100));
+
+    let writer = EventWriter::new(&name);
+    writer.append(Event::new(&name, "session_start"));
+    let event_published_during_creation = wait_for(1_000, || {
+        read_events(&name)
+            .iter()
+            .any(|event| event["type"] == "session_start")
+    });
+
+    drop(creation_lock);
+    let result = patcher.join().unwrap().unwrap();
+    writer.close();
+    assert!(result.changed);
+    assert!(
+        event_published_during_creation,
+        "metadata patch held the event lock while waiting for creation"
+    );
 }
 
 /// node: tests/metadata-events.test.ts:146-167

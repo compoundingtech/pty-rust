@@ -437,8 +437,9 @@ fn apply_metadata_patch_by_id_with_wait(
 
 /// Atomically merge presentation metadata for one exact stable id (no
 /// displayName fallback), emitting `metadata_change` with only the touched
-/// keys. A missing record is waited for only while a live creation lock proves
-/// that publication is in flight; genuinely unknown ids still fail fast.
+/// keys. A live creation lock is waited out before taking the event lock, so
+/// daemon publication events retain their own bounded lock budget. Genuinely
+/// unknown ids still fail fast.
 ///
 /// node: src/sessions.ts `patchMetadataById`
 pub fn patch_metadata_by_id(
@@ -448,18 +449,15 @@ pub fn patch_metadata_by_id(
     patch.validate()?;
     let path = super::root::metadata_path(id);
     let deadline = Instant::now() + METADATA_PATCH_LOCK_WAIT;
-    while !path.is_file() {
-        if !is_creation_lock_held(id) {
-            if path.is_file() {
-                break;
-            }
-            return Err(format!("Session id \"{id}\" not found."));
-        }
+    while is_creation_lock_held(id) {
         let now = Instant::now();
         if now >= deadline {
-            return Err(format!("Session id \"{id}\" not found."));
+            return Err(metadata_busy_message(id));
         }
         std::thread::sleep(Duration::from_millis(25).min(deadline - now));
+    }
+    if !path.is_file() {
+        return Err(format!("Session id \"{id}\" not found."));
     }
     apply_metadata_patch_by_id_with_wait(
         id,
