@@ -211,6 +211,7 @@ fn fake_publishing_launcher(name: &str) -> PathBuf {
          EOF\n\
          printf '%s' \"$pid\" > '{}'\n\
          : > '{}'\n\
+         eval \"printf '\\001' >&$PTY_DAEMON_READY_FD\"\n\
          exec sleep 30\n",
         registry::metadata_path(name).display(),
         registry::pid_path(name).display(),
