@@ -373,6 +373,20 @@ pub struct PeekScreenOptions {
 /// How long [`peek_screen`] waits for the SCREEN packet.
 pub const PEEK_SCREEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+enum PeekScreenReadError {
+    Client(ClientError),
+    TimedOut,
+}
+
+impl PeekScreenReadError {
+    fn into_client_error(self, name: &str) -> ClientError {
+        match self {
+            PeekScreenReadError::Client(error) => error,
+            PeekScreenReadError::TimedOut => ClientError::ClosedBeforeScreen(name.to_string()),
+        }
+    }
+}
+
 /// Fetch the current screen (one PEEK, first SCREEN). Strict gone set; a close
 /// before the screen is `Connection to "<name>" closed before screen received.`
 ///
@@ -401,10 +415,10 @@ pub fn peek_screen_bytes_in(
     opts: PeekScreenOptions,
 ) -> Result<Vec<u8>, ClientError> {
     match peek_screen_bytes_at(&root.join(format!("{name}.sock")), name, opts) {
-        Err(
+        Err(PeekScreenReadError::Client(
             error @ (ClientError::NotReachable { .. } | ClientError::ClosedBeforeScreen { .. }),
-        ) if opts.full => retained_screen_bytes_in(root, name).ok_or(error),
-        result => result,
+        )) if opts.full => retained_screen_bytes_in(root, name).ok_or(error),
+        result => result.map_err(|error| error.into_client_error(name)),
     }
 }
 
@@ -428,7 +442,8 @@ fn peek_screen_text_at(
     name: &str,
     opts: PeekScreenOptions,
 ) -> Result<String, ClientError> {
-    let bytes = peek_screen_bytes_at(path, name, opts)?;
+    let bytes =
+        peek_screen_bytes_at(path, name, opts).map_err(|error| error.into_client_error(name))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -436,8 +451,9 @@ fn peek_screen_bytes_at(
     path: &Path,
     name: &str,
     opts: PeekScreenOptions,
-) -> Result<Vec<u8>, ClientError> {
-    let socket = connect_session_at(path, name, GoneSet::Strict)?;
+) -> Result<Vec<u8>, PeekScreenReadError> {
+    let socket =
+        connect_session_at(path, name, GoneSet::Strict).map_err(PeekScreenReadError::Client)?;
     peek_screen_bytes_over(socket, path, name, opts, PEEK_SCREEN_TIMEOUT)
 }
 
@@ -449,7 +465,8 @@ pub fn peek_screen_over(
     timeout: Duration,
 ) -> Result<String, ClientError> {
     let path = registry::socket_path(name);
-    let bytes = peek_screen_bytes_over(socket, &path, name, opts, timeout)?;
+    let bytes = peek_screen_bytes_over(socket, &path, name, opts, timeout)
+        .map_err(|error| error.into_client_error(name))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -459,21 +476,34 @@ fn peek_screen_bytes_over(
     name: &str,
     opts: PeekScreenOptions,
     timeout: Duration,
-) -> Result<Vec<u8>, ClientError> {
+) -> Result<Vec<u8>, PeekScreenReadError> {
     let deadline = Instant::now() + timeout;
     socket
         .write_all(&encode_peek(opts.plain, opts.full))
-        .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(path), &e))?;
+        .map_err(|e| {
+            PeekScreenReadError::Client(map_io_error(
+                name,
+                false,
+                GoneSet::Strict,
+                "write",
+                Some(path),
+                &e,
+            ))
+        })?;
     let mut reader = PacketReader::new();
     let mut buf = [0u8; 16384];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(ClientError::ClosedBeforeScreen(name.to_string()));
+            return Err(PeekScreenReadError::TimedOut);
         }
         let _ = socket.set_read_timeout(Some(remaining));
         match socket.read(&mut buf) {
-            Ok(0) => return Err(ClientError::ClosedBeforeScreen(name.to_string())),
+            Ok(0) => {
+                return Err(PeekScreenReadError::Client(
+                    ClientError::ClosedBeforeScreen(name.to_string()),
+                ));
+            }
             Ok(n) => match reader.feed(&buf[..n]) {
                 Ok(packets) => {
                     for p in packets {
@@ -482,15 +512,28 @@ fn peek_screen_bytes_over(
                         }
                     }
                 }
-                Err(e) => return Err(ClientError::Connection(e.to_string())),
+                Err(e) => {
+                    return Err(PeekScreenReadError::Client(ClientError::Connection(
+                        e.to_string(),
+                    )));
+                }
             },
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                return Err(ClientError::ClosedBeforeScreen(name.to_string()));
+                return Err(PeekScreenReadError::TimedOut);
             }
-            Err(e) => return Err(map_io_error(name, false, GoneSet::Strict, "read", None, &e)),
+            Err(e) => {
+                return Err(PeekScreenReadError::Client(map_io_error(
+                    name,
+                    false,
+                    GoneSet::Strict,
+                    "read",
+                    None,
+                    &e,
+                )));
+            }
         }
     }
 }

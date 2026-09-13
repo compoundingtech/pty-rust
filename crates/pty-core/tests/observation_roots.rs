@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use pty_core::client::{
-    PeekScreenOptions, peek_screen_bytes_in, peek_screen_in, query_stats_in,
+    ClientError, PeekScreenOptions, peek_screen_bytes_in, peek_screen_in, query_stats_in,
     query_stats_in_with_timeout,
 };
 use pty_core::events::{read_all_events_in, read_recent_events_in};
@@ -317,6 +317,52 @@ fn full_peek_uses_retained_last_lines_when_the_socket_closes_before_screen() {
         b"saved output\n"
     );
     server.join().unwrap();
+}
+
+#[test]
+fn full_peek_does_not_use_retained_lines_when_a_live_socket_times_out() {
+    let root = TestRoot::new();
+    let name = "slow-live-session";
+    std::fs::write(
+        root.session_file(name, "json"),
+        json!({
+            "command": "cat",
+            "args": [],
+            "displayCommand": "cat",
+            "cwd": "/tmp",
+            "createdAt": "2026-09-13T00:00:00.000Z",
+            "lastLines": ["stale output"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn({
+        let listener = root.listen(name);
+        move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            assert_eq!(read_packet(&mut stream).type_, MessageType::Peek);
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("client should finish before the server closes");
+        }
+    });
+
+    let result = peek_screen_bytes_in(
+        root.path(),
+        name,
+        PeekScreenOptions {
+            plain: false,
+            full: true,
+        },
+    );
+    release_tx.send(()).unwrap();
+    server.join().unwrap();
+
+    assert_eq!(
+        result.expect_err("a live timeout must not return retained output"),
+        ClientError::ClosedBeforeScreen(name.to_string())
+    );
 }
 
 #[test]
