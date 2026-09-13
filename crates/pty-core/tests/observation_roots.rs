@@ -248,6 +248,38 @@ fn full_peek_uses_retained_last_lines_when_the_socket_is_unavailable() {
 }
 
 #[test]
+fn full_peek_returns_an_empty_retained_screen() {
+    let root = TestRoot::new();
+    let name = "empty-retained";
+    std::fs::write(
+        root.session_file(name, "json"),
+        json!({
+            "command": "cat",
+            "args": [],
+            "displayCommand": "cat",
+            "cwd": "/tmp",
+            "createdAt": "2026-09-13T00:00:00.000Z",
+            "lastLines": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        peek_screen_bytes_in(
+            root.path(),
+            name,
+            PeekScreenOptions {
+                plain: false,
+                full: true,
+            },
+        )
+        .unwrap(),
+        Vec::<u8>::new()
+    );
+}
+
+#[test]
 fn full_peek_uses_retained_last_lines_when_the_socket_closes_before_screen() {
     let root = TestRoot::new();
     let name = "retained-race";

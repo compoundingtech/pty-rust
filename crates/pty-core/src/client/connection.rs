@@ -412,7 +412,7 @@ fn retained_screen_bytes_in(root: &Path, name: &str) -> Option<Vec<u8>> {
     let lines =
         registry::metadata::read_metadata_at(&root.join(format!("{name}.json")))?.last_lines?;
     if lines.is_empty() {
-        return None;
+        return Some(Vec::new());
     }
 
     let mut screen = Vec::with_capacity(lines.iter().map(String::len).sum::<usize>() + lines.len());
