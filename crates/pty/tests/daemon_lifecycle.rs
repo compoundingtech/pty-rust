@@ -135,6 +135,53 @@ fn owner_record_is_published_before_the_child_starts() {
     );
 }
 
+/// A complete owner record is not launcher readiness: starting the PTY child
+/// can still fail after publication. The daemon must close its readiness pipe
+/// without acknowledging success in that case.
+#[test]
+fn failed_child_spawn_never_signals_launcher_ready() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("spawnfail");
+    let cfg = config(&name, "/bin/sh", &["\0"]);
+
+    let mut fds = [0i32; 2];
+    // SAFETY: pipe(2) fills two new descriptors owned by this test.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    // SAFETY: this is the sole owner of the read descriptor.
+    let mut ready = unsafe {
+        use std::os::fd::FromRawFd;
+        std::fs::File::from_raw_fd(read_fd)
+    };
+
+    let mut child = std::process::Command::new(pty_bin())
+        .arg("__daemon")
+        .env("PTY_ROOT", &root)
+        .env("PTY_SERVER_CONFIG", cfg.to_string())
+        .env("PTY_DAEMON_READY_FD", write_fd.to_string())
+        .env_remove("PTY_SESSION")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn daemon");
+    // SAFETY: the child inherited its copy and this process no longer writes.
+    unsafe {
+        libc::close(write_fd);
+    }
+    let status = child.wait().expect("failed daemon exits");
+    assert!(!status.success());
+
+    let mut signal = Vec::new();
+    use std::io::Read;
+    ready.read_to_end(&mut signal).unwrap();
+    assert!(signal.is_empty(), "failed child spawn reported launcher readiness");
+    assert!(read_meta(&root, &name).is_some(), "pre-spawn metadata was published");
+    assert_eq!(events_of_type(&root, &name, "session_start").len(), 1);
+}
+
 /// What `ps` and `top` call a process, read the way each machine offers it.
 ///
 /// **This used to read `/proc` and nothing else, so on a Mac it panicked with

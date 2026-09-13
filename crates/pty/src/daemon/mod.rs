@@ -57,7 +57,8 @@ pub fn daemon_main() -> i32 {
             return 1;
         }
     };
-    match lifecycle::run(cfg) {
+    let readiness = launch::ReadyNotifier::from_process();
+    match lifecycle::run(cfg, readiness) {
         Ok(code) => code,
         Err(msg) => {
             eprintln!("{msg}");

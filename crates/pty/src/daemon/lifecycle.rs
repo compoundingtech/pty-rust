@@ -195,7 +195,10 @@ fn kill(pid: i32, signal: i32) {
 
 /// Run the daemon for `cfg` to completion; the return value is the process
 /// exit status (the child's code after a natural exit, 0 after a kill).
-pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
+pub(crate) fn run(
+    cfg: DaemonConfig,
+    readiness: super::launch::ReadyNotifier,
+) -> Result<i32, String> {
     let name = cfg.name.clone();
     let generation = cfg
         .generation
@@ -334,6 +337,7 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
         activity_persist_at: None,
         listener_fd,
     };
+    readiness.notify();
     Ok(daemon.serve())
 }
 

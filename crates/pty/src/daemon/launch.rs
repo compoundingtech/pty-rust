@@ -1,14 +1,16 @@
 //! Spawning a session daemon and waiting for it to publish, the way Node's
 //! `spawnDaemon` does: one detached child (`<self> __daemon`), the config as
 //! JSON on inherited fd 3 (never argv), stderr collected for the early-exit
-//! message, then the socket, then `daemonPid == child.pid` plus a
-//! `session_start` line stamped at or after `createdAt`.
+//! message, then the socket, matching metadata plus `session_start`, and the
+//! daemon's post-child-spawn readiness acknowledgement.
 //!
 //! node: src/spawn.ts:129-260
 
+use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use pty_core::registry::{self, EnvMap, TagMap};
@@ -17,6 +19,11 @@ use super::config::DaemonConfig;
 
 /// `DEFAULT_START_TIMEOUT_MS`.
 pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Inherited descriptor on which the daemon acknowledges that its child and
+/// serving threads have started. Kept out of the public session registry: the
+/// owner record and `session_start` must still precede the attached child.
+pub(crate) const READY_FD_ENV: &str = "PTY_DAEMON_READY_FD";
 
 /// Node's `SpawnDaemonOptions`, minus the launcher/server-module knobs.
 /// `command` is already resolved absolute (`pty_core::spawn::resolve_command`).
@@ -63,11 +70,12 @@ pub struct SpawnedDaemon {
 pub enum SpawnError {
     /// `env` together with `isolate_env` / `extra_env` / `unset_env`.
     EnvExclusive,
-    /// The daemon process died before publishing.
+    /// The daemon process died before becoming ready.
     DaemonExited { code: Option<i32>, stderr: String },
     /// No socket within the budget.
     SocketTimeout { name: String },
-    /// A socket, but no matching metadata + `session_start` within the budget.
+    /// A socket, but no matching publication and readiness acknowledgement
+    /// within the budget.
     PublicationTimeout { name: String },
     /// The session was published, by somebody else. This attempt cannot win,
     /// so there is nothing to wait for.
@@ -216,10 +224,42 @@ pub fn is_published_by(name: &str, pid: u32) -> bool {
     meta.daemon_pid == Some(pid as i32) && has_published_session_start(name, &meta.created_at)
 }
 
+/// The daemon side of the launcher's one-byte readiness pipe.
+pub(crate) struct ReadyNotifier(Option<File>);
+
+impl ReadyNotifier {
+    pub(crate) fn from_process() -> Self {
+        let Some(fd) = std::env::var(READY_FD_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<RawFd>().ok())
+            .filter(|fd| *fd >= 0)
+        else {
+            return Self(None);
+        };
+        // The launcher names an inherited descriptor. Validate it before
+        // taking ownership, then keep it out of the session child.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Self(None);
+        }
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            Self(Some(File::from_raw_fd(fd)))
+        }
+    }
+
+    pub(crate) fn notify(mut self) {
+        if let Some(mut pipe) = self.0.take() {
+            let _ = pipe.write_all(&[1]);
+        }
+    }
+}
+
 struct ChildWatch {
     child: std::process::Child,
     stderr: std::sync::Arc<std::sync::Mutex<String>>,
     exit_code: Option<Option<i32>>,
+    readiness: Receiver<bool>,
 }
 
 impl ChildWatch {
@@ -274,6 +314,28 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
 
+    // A second pipe distinguishes registry publication from a daemon that is
+    // actually ready. Publication intentionally happens before the session
+    // child starts; the daemon writes this pipe only after that spawn and the
+    // serving threads succeed.
+    let mut ready_fds = [0i32; 2];
+    // SAFETY: pipe(2) fills two descriptors.
+    if unsafe { libc::pipe(ready_fds.as_mut_ptr()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: the config read descriptor is still owned by this process.
+        unsafe {
+            libc::close(read_fd);
+        }
+        return Err(SpawnError::Io(format!("cannot create readiness pipe: {error}")));
+    }
+    let (ready_read_fd, ready_write_fd) = (ready_fds[0], ready_fds[1]);
+    // SAFETY: both descriptors are freshly created and owned here.
+    let ready_read = unsafe { File::from_raw_fd(ready_read_fd) };
+    // The daemon needs only the write end.
+    unsafe {
+        libc::fcntl(ready_read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+
     let mut cmd = Command::new(exe);
     cmd.arg("__daemon")
         .stdin(Stdio::null())
@@ -283,6 +345,7 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
     for key in &params.scrub_env {
         cmd.env_remove(key);
     }
+    cmd.env(READY_FD_ENV, ready_write_fd.to_string());
     if params.bind_to_spawner_lifetime {
         cmd.env("PTY_SPAWNER_PID", std::process::id().to_string());
     }
@@ -313,9 +376,11 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         });
     }
     let spawned = cmd.spawn();
-    // SAFETY: the parent's copy of the read end is closed here regardless.
+    // SAFETY: the parent's copies of the inherited descriptors close here
+    // regardless of whether spawning succeeded.
     unsafe {
         libc::close(read_fd);
+        libc::close(ready_write_fd);
     }
     let mut child = match spawned {
         Ok(c) => c,
@@ -329,6 +394,14 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         let _ = write_end.write_all(&config_bytes);
         let _ = write_end.flush();
         drop(write_end);
+    });
+
+    let (ready_tx, ready_rx) = channel();
+    std::thread::spawn(move || {
+        let mut ready_read = ready_read;
+        let mut byte = [0u8; 1];
+        let ready = ready_read.read_exact(&mut byte).is_ok() && byte == [1];
+        let _ = ready_tx.send(ready);
     });
 
     let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -353,8 +426,8 @@ pub fn spawn_daemon(params: SpawnParams) -> Result<SpawnedDaemon, SpawnError> {
         child,
         stderr: stderr_buf,
         exit_code: None,
+        readiness: ready_rx,
     };
-
     let outcome = wait_for_publication(&name, pid, timeout, &mut watch);
     if let Err(err) = &outcome
         && !matches!(err, SpawnError::DaemonExited { .. })
@@ -379,7 +452,7 @@ fn wait_for_publication(
     let started = Instant::now();
     wait_for_socket(name, timeout, || watch.check_early_exit())?;
     loop {
-        if is_published_by(name, pid) {
+        if is_published_by(name, pid) && matches!(watch.readiness.try_recv(), Ok(true)) {
             let generation = registry::read_metadata(name)
                 .and_then(|m| m.generation)
                 .unwrap_or_default();

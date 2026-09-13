@@ -63,6 +63,7 @@ pub fn build_child_env_from(
     } else if !cfg.isolate_env() {
         let mut env: BTreeMap<String, String> = source.iter().cloned().collect();
         env.remove("PTY_SERVER_CONFIG");
+        env.remove(super::launch::READY_FD_ENV);
         env
     } else {
         source
