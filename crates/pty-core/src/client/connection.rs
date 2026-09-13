@@ -392,13 +392,35 @@ pub fn peek_screen_in(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Fetch the exact SCREEN payload from `root/<name>.sock`.
+/// Fetch the exact SCREEN payload from `root/<name>.sock`. For a full peek
+/// whose socket is gone, return the retained metadata `lastLines` in the same
+/// newline-delimited form as `pty peek --full`.
 pub fn peek_screen_bytes_in(
     root: &Path,
     name: &str,
     opts: PeekScreenOptions,
 ) -> Result<Vec<u8>, ClientError> {
-    peek_screen_bytes_at(&root.join(format!("{name}.sock")), name, opts)
+    match peek_screen_bytes_at(&root.join(format!("{name}.sock")), name, opts) {
+        Err(error @ ClientError::NotReachable { .. }) if opts.full => {
+            retained_screen_bytes_in(root, name).ok_or(error)
+        }
+        result => result,
+    }
+}
+
+fn retained_screen_bytes_in(root: &Path, name: &str) -> Option<Vec<u8>> {
+    let lines =
+        registry::metadata::read_metadata_at(&root.join(format!("{name}.json")))?.last_lines?;
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut screen = Vec::with_capacity(lines.iter().map(String::len).sum::<usize>() + lines.len());
+    for line in lines {
+        screen.extend_from_slice(line.as_bytes());
+        screen.push(b'\n');
+    }
+    Some(screen)
 }
 
 fn peek_screen_text_at(

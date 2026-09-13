@@ -212,6 +212,42 @@ fn explicit_peek_has_a_text_api_and_a_lossless_byte_api() {
 }
 
 #[test]
+fn full_peek_uses_retained_last_lines_when_the_socket_is_unavailable() {
+    let root = TestRoot::new();
+    let name = "retained";
+    std::fs::write(
+        root.session_file(name, "json"),
+        json!({
+            "command": "cat",
+            "args": [],
+            "displayCommand": "cat",
+            "cwd": "/tmp",
+            "createdAt": "2026-09-13T00:00:00.000Z",
+            "exitedAt": "2026-09-13T00:00:01.000Z",
+            "lastLines": ["café", "snowman ☃ and \"quoted\""],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let options = PeekScreenOptions {
+        plain: false,
+        full: true,
+    };
+    let expected = b"caf\xc3\xa9\nsnowman \xe2\x98\x83 and \"quoted\"\n";
+
+    assert_eq!(
+        peek_screen_bytes_in(root.path(), name, options).unwrap(),
+        expected
+    );
+    assert_eq!(
+        peek_screen_in(root.path(), name, options)
+            .unwrap()
+            .as_bytes(),
+        expected
+    );
+}
+
+#[test]
 fn event_readers_use_only_the_supplied_root() {
     let left = TestRoot::new();
     let right = TestRoot::new();
