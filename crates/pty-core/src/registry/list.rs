@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::atomic::is_tmp_name;
 use super::lock::parse_leading_int;
-use super::metadata::{SessionMetadata, read_metadata};
-use super::root::{metadata_path, pid_path, session_dir, socket_path};
+use super::metadata::{SessionMetadata, read_metadata_at};
+use super::root::{metadata_path, pid_path, session_dir};
 
 /// `running` / `exited` / `vanished`.
 ///
@@ -122,7 +122,11 @@ pub fn pid_alive(pid: i32) -> bool {
 ///
 /// node: src/sessions.ts:2076-2084
 pub fn read_session_pid(name: &str) -> Option<i32> {
-    let content = std::fs::read_to_string(pid_path(name)).ok()?;
+    read_session_pid_at(&pid_path(name))
+}
+
+fn read_session_pid_at(path: &Path) -> Option<i32> {
+    let content = std::fs::read_to_string(path).ok()?;
     parse_leading_int(content.trim())
 }
 
@@ -173,14 +177,19 @@ pub fn read_process_start_token(pid: i32) -> Option<String> {
 ///
 /// node: src/sessions.ts:2086-2095
 pub fn read_pid_with(name: &str, metadata: Option<&SessionMetadata>) -> Option<i32> {
-    if let Some(pid) = read_session_pid(name) {
+    let root = session_dir();
+    read_pid_with_in(&root, name, metadata)
+}
+
+fn read_pid_with_in(root: &Path, name: &str, metadata: Option<&SessionMetadata>) -> Option<i32> {
+    if let Some(pid) = read_session_pid_at(&root.join(format!("{name}.pid"))) {
         return Some(pid);
     }
     let owned;
     let retained = match metadata {
         Some(m) => m,
         None => {
-            owned = read_metadata(name)?;
+            owned = read_metadata_at(&root.join(format!("{name}.json")))?;
             &owned
         }
     };
@@ -356,7 +365,13 @@ pub fn list_sessions() -> Vec<SessionInfo> {
 
 /// [`list_sessions`] with an explicit probe budget.
 pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
-    let Ok(dir) = std::fs::read_dir(session_dir()) else {
+    let root = session_dir();
+    list_sessions_in(&root, options)
+}
+
+/// One bounded, read-only observation of `root`, sorted by session name.
+pub fn list_sessions_in(root: &Path, options: &ListOptions) -> Vec<SessionInfo> {
+    let Ok(dir) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut entries: Vec<String> = dir
@@ -379,10 +394,10 @@ pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
         .iter()
         .filter_map(|e| e.strip_suffix(".sock"))
         .map(|name| {
-            let pid = read_pid(name);
+            let pid = read_pid_with_in(root, name, None);
             Candidate {
                 name: name.to_string(),
-                socket_path: socket_path(name),
+                socket_path: root.join(format!("{name}.sock")),
                 pid,
                 pid_alive: pid.is_some_and(pid_alive),
             }
@@ -400,7 +415,7 @@ pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
         seen.insert(c.name.clone());
         let socket_reachable = c.pid_alive || reachability.get(&c.socket_path) == Some(&true);
         if c.pid_alive || socket_reachable {
-            let metadata = read_metadata(&c.name);
+            let metadata = read_metadata_at(&root.join(format!("{}.json", c.name)));
             let status = if metadata.as_ref().is_some_and(SessionMetadata::has_exited) {
                 SessionStatus::Exited
             } else {
@@ -414,7 +429,7 @@ pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
                 metadata,
             });
         } else if c.pid.is_some() {
-            if let Some(metadata) = read_metadata(&c.name) {
+            if let Some(metadata) = read_metadata_at(&root.join(format!("{}.json", c.name))) {
                 let vanished = metadata.exited_at.is_none() && metadata.exit_code.is_none();
                 sessions.push(SessionInfo {
                     name: c.name,
@@ -429,7 +444,7 @@ pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
                 });
             }
         } else {
-            let metadata = read_metadata(&c.name);
+            let metadata = read_metadata_at(&root.join(format!("{}.json", c.name)));
             let status = if metadata.as_ref().is_some_and(SessionMetadata::has_exited) {
                 SessionStatus::Exited
             } else {
@@ -449,16 +464,16 @@ pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
         if seen.contains(name) {
             continue;
         }
-        let Some(metadata) = read_metadata(name) else {
+        let Some(metadata) = read_metadata_at(&root.join(format!("{name}.json"))) else {
             continue;
         };
-        let pid = read_pid_with(name, Some(&metadata));
+        let pid = read_pid_with_in(root, name, Some(&metadata));
         if let Some(pid) = pid
             && pid_alive(pid)
         {
             sessions.push(SessionInfo {
                 name: name.to_string(),
-                socket_path: socket_path(name),
+                socket_path: root.join(format!("{name}.sock")),
                 pid: Some(pid),
                 status: if metadata.has_exited() {
                     SessionStatus::Exited
@@ -472,7 +487,7 @@ pub fn list_sessions_with(options: &ListOptions) -> Vec<SessionInfo> {
         let vanished = metadata.exited_at.is_none() && metadata.exit_code.is_none();
         sessions.push(SessionInfo {
             name: name.to_string(),
-            socket_path: socket_path(name),
+            socket_path: root.join(format!("{name}.sock")),
             pid: None,
             status: if vanished {
                 SessionStatus::Vanished

@@ -489,7 +489,16 @@ pub fn remove_events(name: &str) -> Result<(), String> {
 ///
 /// node: src/events.ts:415-423
 pub fn read_recent_events(name: &str, count: usize) -> Vec<Event> {
-    let Ok(content) = std::fs::read_to_string(events_path(name)) else {
+    read_recent_events_at(&events_path(name), count)
+}
+
+/// The newest `count` events from `root/<name>.events.jsonl`.
+pub fn read_recent_events_in(root: &Path, name: &str, count: usize) -> Vec<Event> {
+    read_recent_events_at(&root.join(format!("{name}.events.jsonl")), count)
+}
+
+fn read_recent_events_at(path: &Path, count: usize) -> Vec<Event> {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let lines: Vec<&str> = content
@@ -511,7 +520,16 @@ pub fn read_recent_events(name: &str, count: usize) -> Vec<Event> {
 /// Every parseable event in the log, in order (a parse failure skips that
 /// line rather than emptying the result).
 pub fn read_all_events(name: &str) -> Vec<Event> {
-    let Ok(content) = std::fs::read_to_string(events_path(name)) else {
+    read_all_events_at(&events_path(name))
+}
+
+/// Every parseable event from `root/<name>.events.jsonl`, in order.
+pub fn read_all_events_in(root: &Path, name: &str) -> Vec<Event> {
+    read_all_events_at(&root.join(format!("{name}.events.jsonl")))
+}
+
+fn read_all_events_at(path: &Path) -> Vec<Event> {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     content

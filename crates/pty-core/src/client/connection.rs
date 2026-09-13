@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::keys::{KeyError, resolve_key};
@@ -20,7 +21,7 @@ use crate::protocol::{
 };
 use crate::registry;
 
-use super::{ClientError, GoneSet, connect_session_with, map_io_error};
+use super::{ClientError, GoneSet, connect_session_at, connect_session_with, map_io_error};
 
 /// Something the daemon sent (the `SessionConnection` events of the Node API).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,22 +378,70 @@ pub const PEEK_SCREEN_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// node: tests/connection.test.ts:318-349
 pub fn peek_screen(name: &str, opts: PeekScreenOptions) -> Result<String, ClientError> {
-    let socket = connect_session_with(name, GoneSet::Strict)?;
-    peek_screen_over(socket, name, opts, PEEK_SCREEN_TIMEOUT)
+    let path = registry::socket_path(name);
+    peek_screen_text_at(&path, name, opts)
+}
+
+/// Fetch the current screen from `root/<name>.sock`.
+pub fn peek_screen_in(
+    root: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<String, ClientError> {
+    let bytes = peek_screen_bytes_in(root, name, opts)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Fetch the exact SCREEN payload from `root/<name>.sock`.
+pub fn peek_screen_bytes_in(
+    root: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<Vec<u8>, ClientError> {
+    peek_screen_bytes_at(&root.join(format!("{name}.sock")), name, opts)
+}
+
+fn peek_screen_text_at(
+    path: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<String, ClientError> {
+    let bytes = peek_screen_bytes_at(path, name, opts)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn peek_screen_bytes_at(
+    path: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+) -> Result<Vec<u8>, ClientError> {
+    let socket = connect_session_at(path, name, GoneSet::Strict)?;
+    peek_screen_bytes_over(socket, path, name, opts, PEEK_SCREEN_TIMEOUT)
 }
 
 /// [`peek_screen`] over an already-connected socket with an explicit budget.
 pub fn peek_screen_over(
-    mut socket: UnixStream,
+    socket: UnixStream,
     name: &str,
     opts: PeekScreenOptions,
     timeout: Duration,
 ) -> Result<String, ClientError> {
-    let deadline = Instant::now() + timeout;
     let path = registry::socket_path(name);
+    let bytes = peek_screen_bytes_over(socket, &path, name, opts, timeout)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn peek_screen_bytes_over(
+    mut socket: UnixStream,
+    path: &Path,
+    name: &str,
+    opts: PeekScreenOptions,
+    timeout: Duration,
+) -> Result<Vec<u8>, ClientError> {
+    let deadline = Instant::now() + timeout;
     socket
         .write_all(&encode_peek(opts.plain, opts.full))
-        .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(&path), &e))?;
+        .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(path), &e))?;
     let mut reader = PacketReader::new();
     let mut buf = [0u8; 16384];
     loop {
@@ -407,7 +456,7 @@ pub fn peek_screen_over(
                 Ok(packets) => {
                     for p in packets {
                         if p.type_ == MessageType::Screen {
-                            return Ok(String::from_utf8_lossy(&p.payload).into_owned());
+                            return Ok(p.payload);
                         }
                     }
                 }
