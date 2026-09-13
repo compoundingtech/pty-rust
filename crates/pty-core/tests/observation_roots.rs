@@ -248,6 +248,46 @@ fn full_peek_uses_retained_last_lines_when_the_socket_is_unavailable() {
 }
 
 #[test]
+fn full_peek_uses_retained_last_lines_when_the_socket_closes_before_screen() {
+    let root = TestRoot::new();
+    let name = "retained-race";
+    std::fs::write(
+        root.session_file(name, "json"),
+        json!({
+            "command": "cat",
+            "args": [],
+            "displayCommand": "cat",
+            "cwd": "/tmp",
+            "createdAt": "2026-09-13T00:00:00.000Z",
+            "lastLines": ["saved output"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = std::thread::spawn({
+        let listener = root.listen(name);
+        move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            assert_eq!(read_packet(&mut stream).type_, MessageType::Peek);
+        }
+    });
+
+    assert_eq!(
+        peek_screen_bytes_in(
+            root.path(),
+            name,
+            PeekScreenOptions {
+                plain: false,
+                full: true,
+            },
+        )
+        .unwrap(),
+        b"saved output\n"
+    );
+    server.join().unwrap();
+}
+
+#[test]
 fn event_readers_use_only_the_supplied_root() {
     let left = TestRoot::new();
     let right = TestRoot::new();

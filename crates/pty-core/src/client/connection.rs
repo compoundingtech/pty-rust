@@ -401,9 +401,9 @@ pub fn peek_screen_bytes_in(
     opts: PeekScreenOptions,
 ) -> Result<Vec<u8>, ClientError> {
     match peek_screen_bytes_at(&root.join(format!("{name}.sock")), name, opts) {
-        Err(error @ ClientError::NotReachable { .. }) if opts.full => {
-            retained_screen_bytes_in(root, name).ok_or(error)
-        }
+        Err(
+            error @ (ClientError::NotReachable { .. } | ClientError::ClosedBeforeScreen { .. }),
+        ) if opts.full => retained_screen_bytes_in(root, name).ok_or(error),
         result => result,
     }
 }
