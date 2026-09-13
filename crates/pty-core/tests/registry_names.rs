@@ -46,19 +46,20 @@ fn validate_name_messages_in_order() {
     assert_eq!(
         err,
         format!(
-            "Session name \"{long}\" produces a socket path of {bytes} bytes, which exceeds the 104-byte kernel limit by {}. Shorten the name or set PTY_SESSION_DIR to a shorter path.",
-            bytes - 104
+            "Session name \"{long}\" produces a socket path of {bytes} bytes, which exceeds the {}-byte kernel limit by {}. Shorten the name or set PTY_SESSION_DIR to a shorter path.",
+            registry::SUN_PATH_MAX,
+            bytes - registry::SUN_PATH_MAX
         )
     );
     // Exactly +1 over the limit is rejected; exactly at the limit passes.
     let overhead = root.join(".sock").as_os_str().len();
-    let overshoot = "a".repeat((104 - overhead + 1).max(1));
+    let overshoot = "a".repeat((registry::SUN_PATH_MAX - overhead + 1).max(1));
     assert!(
         registry::validate_name(&overshoot)
             .unwrap_err()
             .contains("socket path")
     );
-    let fits = "a".repeat(104 - overhead);
+    let fits = "a".repeat(registry::SUN_PATH_MAX - overhead);
     assert_eq!(registry::validate_name(&fits), Ok(()));
 }
 

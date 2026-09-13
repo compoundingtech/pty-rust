@@ -5,6 +5,8 @@
 
 mod registry_support;
 
+use std::time::{Duration, Instant};
+
 use indexmap::IndexMap;
 use pty_core::registry::{
     self, MetadataPatch, MutateOptions, MutateStatus, SessionMetadata, TagMap,
@@ -499,6 +501,33 @@ fn patch_by_id_never_falls_back_to_a_matching_display_name() {
     assert_eq!(registry::read_metadata(&name).unwrap().tags, None);
 }
 
+/// A missing record is not treated as unknown while a live creation lock
+/// proves that publication is still in flight.
+#[test]
+fn patch_waits_for_a_late_record_during_creation() {
+    let _ = root();
+    let name = unique_name("late-record");
+    let held = registry::acquire_lock(&name).unwrap();
+    let publisher_name = name.clone();
+    let publisher = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        plant(&publisher_name);
+        drop(held);
+    });
+    let patch = MetadataPatch::from_json(&json!({"tags": {"published": "1"}})).unwrap();
+    let result = registry::patch_metadata_by_id(&name, &patch).unwrap();
+    assert_eq!(
+        result
+            .metadata
+            .tags
+            .as_ref()
+            .and_then(|tags| tags.get("published"))
+            .map(String::as_str),
+        Some("1")
+    );
+    publisher.join().unwrap();
+}
+
 /// node: tests/metadata-events.test.ts:146-167
 #[test]
 fn patch_fails_before_any_write_when_the_event_lock_is_held() {
@@ -513,10 +542,16 @@ fn patch_fails_before_any_write_when_the_event_lock_is_held() {
         &json!({"displayName": "Blocked", "tags": {"description": "x".repeat(1000)}}),
     )
     .unwrap();
+    let started = Instant::now();
     let err = registry::patch_metadata_by_id(&name, &patch).unwrap_err();
     assert_eq!(
         err,
         format!("Session id \"{name}\" event log is busy. Retry the operation.")
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(7) && started.elapsed() < Duration::from_secs(20),
+        "metadata patch did not honor its bounded event-lock budget: {:?}",
+        started.elapsed()
     );
     assert_eq!(
         std::fs::read(registry::metadata_path(&name)).unwrap(),
@@ -528,31 +563,59 @@ fn patch_fails_before_any_write_when_the_event_lock_is_held() {
     );
 }
 
-/// A held creation lock surfaces as the metadata-busy text.
+/// A creation lock that outlives the eight-second metadata-patch budget
+/// surfaces the metadata-busy text and fails closed.
 ///
-/// node: src/sessions.ts:547-549
-///
-/// A holder that outlives `METADATA_LOCK_WAIT` still fails busy: the wait is
-/// bounded and fail-closed. (This test takes the whole budget by design.)
+/// node: src/sessions.ts `METADATA_PATCH_WAIT_MS`
 #[test]
-fn patch_reports_metadata_busy_when_the_creation_lock_is_held() {
+fn patch_reports_metadata_busy_after_the_bounded_wait() {
     let _ = root();
     let name = unique_name("metabusy");
     plant(&name);
     let _held = registry::acquire_lock(&name).unwrap();
-    let err = registry::set_display_name(&name, Some("x")).unwrap_err();
+    let patch = MetadataPatch::from_json(&json!({"tags": {"blocked": "1"}})).unwrap();
+    let started = Instant::now();
+    let err = registry::patch_metadata_by_id(&name, &patch).unwrap_err();
     assert_eq!(
         err,
         format!("Session id \"{name}\" metadata is busy. Retry the operation.")
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(7) && started.elapsed() < Duration::from_secs(20),
+        "metadata patch did not honor its bounded creation-lock budget: {:?}",
+        started.elapsed()
+    );
+}
+
+/// `rename` and `tag` deliberately keep their historical fail-fast
+/// contention behavior; only `metadata patch --id` waits out creation.
+#[test]
+fn rename_and_tag_remain_fail_fast_when_creation_is_locked() {
+    let _ = root();
+    let name = unique_name("presentation-fast");
+    plant(&name);
+    let _held = registry::acquire_lock(&name).unwrap();
+    let started = Instant::now();
+    let rename = registry::set_display_name(&name, Some("blocked")).unwrap_err();
+    let tag = registry::update_tags(&name, &tags(&[("blocked", "1")]), &[]).unwrap_err();
+    assert_eq!(
+        rename,
+        format!("Session id \"{name}\" metadata is busy. Retry the operation.")
+    );
+    assert_eq!(tag, rename);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "fail-fast presentation writes stalled for {:?}",
+        started.elapsed()
     );
 }
 
 /// A transient creation/attach holder is waited out instead of failing busy.
 ///
 /// compoundingtech/pty#180: `pty run` holds `<name>.lock` across daemon
-/// spawn and publication, so a just-spawned attached child's first patch met
-/// a held lock and failed deterministically. The presentation path waits up
-/// to `METADATA_LOCK_WAIT`; a holder that clears quickly is invisible.
+/// spawn and publication, so a just-spawned attached child's first metadata
+/// patch met a held lock. `metadata patch --id` waits up to
+/// `METADATA_PATCH_LOCK_WAIT`; a holder that clears quickly is invisible.
 #[test]
 fn patch_waits_for_a_transient_creation_lock() {
     let _ = root();

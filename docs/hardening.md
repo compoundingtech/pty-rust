@@ -126,53 +126,49 @@ defect in 12 of 300 runs.
 nothing warns, and the run that measured nothing prints what a clean run
 prints.
 
-## Stealing a stale lock is not exclusive, and this file used to say it was
+## Rust makes stale-lock stealing exclusive; Node does not
 
-**Measured 2026-09-02. Eight threads racing for one stale lock, four hundred
-rounds: 386 rounds had more than one winner.** Exclusion held in 14.
-
-The steal is three steps and nothing binds them together:
+The former Rust implementation copied Node's three-step steal:
 
     open(O_CREAT|O_EXCL)   -> fails, a lock file is there
     read the holder pid    -> the holder is dead, so this lock is stale
     unlink, then create    -> take it
 
-Two processes both reach step three believing the same thing:
+In the former implementation, concurrent contenders frequently produced
+multiple winners. One delayed stealer could unlink the complete owner record
+another stealer had already installed. The original create also exposed the
+canonical path before its pid had been written, so a racing acquirer could
+misclassify a live but empty lock as stale.
 
-1. A unlinks the stale file and creates its own. **A now holds the lock.**
-2. B, whose decision came from the file A has already replaced, unlinks —
-   **and what it unlinks is A's live lock** — and then creates its own.
-3. Both hold an armed guard. Either one's drop unlinks the other's file, and
-   a third process can then walk in while both still believe they own it.
+Rust now closes both windows. It writes the complete decimal pid to a unique
+`0600` sibling inode, then hard-links that inode to the canonical lock path.
+Hard-link creation is no-replace, so only one claimant wins and the path is
+complete when it first becomes visible. For stale recovery, each contender
+takes an advisory lock on the stale inode and then compares its device and
+inode number with the canonical path before unlinking. If another contender
+has replaced the path, the delayed contender loses without touching the new
+owner.
 
-**The unlink is the fault. A loser must never be able to remove a winner's
-file**, and here the loser cannot tell that the file it is removing is not the
-one it inspected.
+`lock::tests::delayed_stale_stealer_does_not_remove_a_new_owner` fixes the
+damaging interleaving deterministically: it opens the stale inode, replaces
+the canonical path with a new complete owner, then proves the delayed decision
+cannot remove that replacement. The process-level conformance test still
+checks the public CLI contract.
 
-**The Node tool has the identical sequence and the identical defect**
-(`src/sessions.ts`, `acquireFileLock`). So this is not a difference between the
-two implementations and a mixed registry is no worse than either alone. Its
-comment there makes the same claim this file did: *"only one wins the wx open;
-the loser returns false instead of stomping on the winner's lock."* The loser
-stomps first and creates second.
+The Node implementation retains both the create-before-write window and the
+unbound read-then-unlink steal. Advisory locks cannot protect a participant
+that does not take them. Rust safely respects a live Node lock once its
+complete pid is visible, and Rust-only stale recovery is exclusive. If any
+concurrent stale-recovery path involves Node, however, a delayed Node
+contender can unlink a newer Rust or Node claim and both contenders can
+believe they won. Mixed-registry stale recovery must therefore be externally
+serialized whenever Node participates.
 
-**Two tests carry the old belief in their names and neither establishes it.**
-`security_fixes.rs::concurrent_stealers_cannot_both_win` races two spawned
-processes, and process start-up jitter is what makes it pass;
-`registry_locks.rs::only_one_of_two_sequential_steals_wins` is honest about
-being sequential. Reproduce the real behaviour with a barrier: N threads that
-all wait, then all call `acquire_lock` on one stale lock, counted over many
-rounds. It does not need process spawning and it does not need luck.
-
-**A correct steal needs one exclusive create that only one process can win**,
-which means a second lock file to funnel the steal through, and that changes a
-protocol both implementations share. **It is not fixed here, on purpose. The
-decision is not one implementation's to take alone.**
-
-**When it bites:** a daemon crashes and leaves its lock behind, then two
-creators for the same id arrive together. Then two daemons can own one name,
-with socket rebinding and last-writer-wins metadata, or two event writers can
-interleave a truncation with an append.
+**When the remaining mixed-registry boundary bites:** a daemon leaves a stale
+lock behind and concurrent recovery includes a Node contender. The delayed
+Node unlink can defeat a Rust or Node winner, giving two daemons one name with
+socket rebinding and last-writer-wins metadata, or letting event writers race
+their publications.
 
 ## A test that watches a stream must start the stream itself
 
@@ -215,11 +211,14 @@ the cause in one run.**
   both sides. `PacketReader::feed` returns `InvalidData`; the daemon closes
   the socket and keeps serving everyone else.
 - **Socket path length.** A `PTY_ROOT` whose session socket path would
-  exceed the kernel's 104-byte `sun_path` limit is refused before anything
-  is created, with the path and the limit in the message.
+  exceed the kernel's `sun_path` limit—103 pathname bytes on macOS, 104 on
+  Linux—is refused before anything is created, with the path and limit in
+  the message.
 - **Creation locks.** `<id>.lock` held by a live process turns a second
   creator away. A lock whose holder is dead, or whose contents are garbage,
-  is stolen. **Two concurrent stealers CAN both win. See below.**
+  is stolen exclusively between Rust contenders. Concurrent stale recovery
+  can still produce two winners when a Node steal path participates; see
+  above.
 - **Session names.** Validated before a spawn, so automation fails with a
   message rather than deep inside a syscall.
 - **Generation tokens.** `pty exec` rewrites a session's command only while

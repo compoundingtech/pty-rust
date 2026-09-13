@@ -28,8 +28,8 @@ use pty_core::registry::{
 use pty_terminal::{TerminalActor, serialize};
 
 use super::clients::{Client, Out, REDRAW_SETTLE};
-use super::daemon_warn;
 use super::config::DaemonConfig;
+use super::daemon_warn;
 use super::env::{build_child_env, describe_invalid_cwd, invalid_cwd_error};
 use super::tree::{
     KILL_WAIT, ProcessIdentity, TERM_WAIT, signal_process_identities,
@@ -42,9 +42,17 @@ pub(crate) enum Msg {
     PtyEof,
     /// The raw `waitpid` status, `None` when the wait itself failed.
     ChildExited(Option<i32>),
-    Connect { id: u64, tx: Sender<Out> },
-    Packet { id: u64, packet: Packet },
-    Closed { id: u64 },
+    Connect {
+        id: u64,
+        tx: Sender<Out>,
+    },
+    Packet {
+        id: u64,
+        packet: Packet,
+    },
+    Closed {
+        id: u64,
+    },
     /// SIGTERM, SIGINT, or the spawner watchdog.
     ExternalKill,
 }
@@ -176,7 +184,10 @@ pub fn reap_at_exit(
     if external_kill && !ephemeral {
         return false;
     }
-    let tags = metadata.as_ref().and_then(|m| m.tags.as_ref()).or(config_tags);
+    let tags = metadata
+        .as_ref()
+        .and_then(|m| m.tags.as_ref())
+        .or(config_tags);
     registry::should_reap_at_exit(tags, ephemeral, registry::reap_on_exit_default())
 }
 
@@ -263,6 +274,9 @@ pub fn run(cfg: DaemonConfig) -> Result<i32, String> {
     };
     registry::write_metadata_publication(&name, &metadata).map_err(|e| e.to_string())?;
     events.append(Event::session_start(&name, cfg.tags()));
+    if cfg.respawn {
+        events.append(Event::session_respawn(&name));
+    }
     events.flush();
 
     // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
@@ -508,9 +522,10 @@ fn spawn_client(id: u64, stream: UnixStream, tx: Sender<Msg>) {
 ///
 /// node: src/server.ts:1598-1603
 fn spawn_signal_listener(tx: Sender<Msg>) {
-    let Ok(mut signals) =
-        signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT])
-    else {
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ]) else {
         return;
     };
     std::thread::spawn(move || {
@@ -527,7 +542,10 @@ fn spawn_signal_listener(tx: Sender<Msg>) {
 ///
 /// node: src/server.ts:1439-1456
 fn install_spawner_watchdog(tx: Sender<Msg>) {
-    let Some(raw) = std::env::var("PTY_SPAWNER_PID").ok().filter(|r| !r.is_empty()) else {
+    let Some(raw) = std::env::var("PTY_SPAWNER_PID")
+        .ok()
+        .filter(|r| !r.is_empty())
+    else {
         return;
     };
     let Some(pid) = raw
@@ -745,7 +763,8 @@ impl Daemon {
             MutateStatus::Busy | MutateStatus::Stale
         ) {
             let now = Instant::now();
-            self.exit_meta_retry = Some((now + Duration::from_millis(10), now + EXIT_METADATA_RETRY));
+            self.exit_meta_retry =
+                Some((now + Duration::from_millis(10), now + EXIT_METADATA_RETRY));
         }
         if self.shutdown_code.is_none() {
             self.exit_shutdown_at = Some(Instant::now() + EXIT_GRACE);

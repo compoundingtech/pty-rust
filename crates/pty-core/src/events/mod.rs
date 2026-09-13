@@ -1,16 +1,17 @@
-//! `<name>.events.jsonl`: the append-only event log, identical to Node's
+//! `<name>.events.jsonl`: the append-only event log, compatible with Node's
 //! `src/events.ts` in envelope, type names, payloads, retention and lock
 //! protocol.
 //!
 //! Envelope: `{"session", "type", "ts", ...payload}` with `ts` an ISO-8601
 //! timestamp (`Date.prototype.toISOString`). Retention: at or past 1000
-//! lines the last 500 are kept, rewritten atomically under the event lock.
+//! lines the last 500 are kept. Every complete snapshot is published with a
+//! sibling temporary file + rename so lock-free raw readers cannot see a
+//! partial append or retention rewrite.
 //!
 //! node: src/events.ts
 
 pub mod follow;
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
@@ -20,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::registry::atomic::atomic_write;
-use crate::registry::lock::{
-    EVENT_LOCK_WAIT, LockGuard, take_event_lock, wait_for_event_lock,
-};
+use crate::registry::lock::{EVENT_LOCK_WAIT, LockGuard, take_event_lock, wait_for_event_lock};
 use crate::registry::metadata::TagMap;
 use crate::registry::mutate::MetadataChangeSnapshot;
 use crate::registry::root::{ensure_session_dir, events_path};
@@ -251,10 +250,8 @@ impl Event {
     /// daemon and cannot see a surviving child, so without this the fact
     /// existed and reached no one.
     pub fn session_descendants_survived(session: &str, pids: &[i32]) -> Self {
-        Event::new(session, event_type::SESSION_DESCENDANTS_SURVIVED).with(
-            "data",
-            serde_json::json!({ "pids": pids }),
-        )
+        Event::new(session, event_type::SESSION_DESCENDANTS_SURVIVED)
+            .with("data", serde_json::json!({ "pids": pids }))
     }
 
     pub fn session_exec(session: &str, previous_command: &str, command: &str) -> Self {
@@ -375,51 +372,59 @@ pub const TRUNCATE_SIZE_THRESHOLD: u64 = (MAX_LINES as u64) * 40;
 /// `read_recent_events` default.
 pub const DEFAULT_RECENT_EVENTS: usize = 50;
 
-fn append_line(path: &Path, event: &Event) -> std::io::Result<()> {
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    let mut line = event.to_json();
-    line.push('\n');
-    f.write_all(line.as_bytes())
+/// The newest [`KEEP_LINES`] as a byte slice when retention is due.
+fn retained_suffix(content: &[u8]) -> Option<&[u8]> {
+    let text = std::str::from_utf8(content).ok()?;
+    let lines: Vec<&str> = text.trim_end().split('\n').collect();
+    if lines.len() < MAX_LINES {
+        return None;
+    }
+    let first = lines[lines.len() - KEEP_LINES];
+    let start = first.as_ptr() as usize - text.as_ptr() as usize;
+    Some(&content[start..])
 }
 
-/// Keep the newest [`KEEP_LINES`] when the file has [`MAX_LINES`] or more.
-/// Atomic rewrite; the caller holds the event lock.
+/// Publish one appended record by replacing the whole bounded log. The event
+/// lock serializes writers; the sibling temporary file + rename gives raw
+/// readers one complete JSONL snapshot instead of exposing a growing last
+/// record.
 ///
-/// node: src/events.ts:382-390
-fn truncate(path: &Path) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
+/// Retention is applied to the in-memory snapshot before publication. Even
+/// when the cap is crossed, one append performs exactly one log read and one
+/// atomic write rather than publishing an unbounded intermediate or rewriting
+/// twice.
+fn append_line(
+    path: &Path,
+    event: &Event,
+    should_check_retention: impl FnOnce(u64) -> bool,
+) -> std::io::Result<()> {
+    let mut content = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
     };
-    let lines: Vec<&str> = content.trim_end().split('\n').collect();
-    if lines.len() >= MAX_LINES {
-        let mut kept = lines[lines.len() - KEEP_LINES..].join("\n");
-        kept.push('\n');
-        let _ = atomic_write(path, kept.as_bytes());
-    }
+    let line = event.to_json();
+    content.reserve(line.len() + 1);
+    content.extend_from_slice(line.as_bytes());
+    content.push(b'\n');
+    let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    let published = if should_check_retention(size) {
+        retained_suffix(&content).unwrap_or(&content)
+    } else {
+        &content
+    };
+    atomic_write(path, published)
 }
 
-/// [`truncate`] behind the cheap size check one-shot writers use.
+/// Append while the caller owns the session's event lock. Publication
+/// atomically replaces the previous snapshot and applies the one-shot
+/// size-gated retention check in the same replacement.
 ///
-/// node: src/events.ts:297-310
-fn maybe_truncate(path: &Path) {
-    match std::fs::metadata(path) {
-        Ok(m) if m.len() >= TRUNCATE_SIZE_THRESHOLD => truncate(path),
-        _ => {}
-    }
-}
-
-/// Append while the caller owns the session's event lock.
-///
-/// node: src/events.ts:277-283
+/// node: src/events.ts:277-310
 pub fn append_event_locked(name: &str, event: &Event) -> std::io::Result<()> {
     ensure_session_dir()?;
     let path = events_path(name);
-    append_line(&path, event)?;
-    maybe_truncate(&path);
-    Ok(())
+    append_line(&path, event, |size| size >= TRUNCATE_SIZE_THRESHOLD)
 }
 
 /// One-shot append that fails immediately when the event lock is held
@@ -459,12 +464,14 @@ pub fn emit_user_event(
 }
 
 /// Truncate the log to empty (creating it), as the daemon does at start.
+/// Replacement is atomic so a raw reader already walking the old log can
+/// finish that complete snapshot.
 ///
 /// node: src/events.ts:392-402
 pub fn clear_events(name: &str) -> Result<(), String> {
     ensure_session_dir().map_err(|e| e.to_string())?;
     let _lock = take_event_lock(name)?;
-    let _ = std::fs::write(events_path(name), b"");
+    let _ = atomic_write(&events_path(name), b"");
     Ok(())
 }
 
@@ -552,12 +559,9 @@ impl EventWriter {
                 WriterMsg::Append(event) => {
                     if let Ok(_lock) = wait_for_event_lock(name, EVENT_LOCK_WAIT) {
                         let path = events_path(name);
-                        if append_line(&path, &event).is_ok() {
-                            append_count += 1;
-                            if append_count >= TRUNCATE_CHECK_INTERVAL {
-                                append_count = 0;
-                                truncate(&path);
-                            }
+                        let check_retention = append_count + 1 >= TRUNCATE_CHECK_INTERVAL;
+                        if append_line(&path, &event, |_| check_retention).is_ok() {
+                            append_count = if check_retention { 0 } else { append_count + 1 };
                         }
                     }
                 }

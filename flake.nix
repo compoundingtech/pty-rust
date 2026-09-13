@@ -226,14 +226,33 @@
             mainProgram = "pty";
           };
         };
+
+        # Fleet consumers need the deterministic liveness faults in addition to
+        # the sandbox-safe pty-core package check. Keep this as an exported check
+        # so downstream flakes can depend on behavior without importing test internals.
+        ptyFleetLiveness = pty.overrideAttrs (_: {
+          pname = "pty-fleet-liveness-check";
+          cargoTestFlags = [
+            "-p"
+            "pty-conformance"
+            "--test"
+            "list_liveness_budget"
+          ];
+          preCheck = ''
+            export TMPDIR=$(mktemp -d /tmp/pty.XXXXXX)
+            export HOME=$(mktemp -d)
+            export PTY_TEST_BIN="$PWD/target/${pkgs.stdenv.hostPlatform.config}/release/pty"
+          '';
+        });
       in
       {
         packages.pty = pty;
         packages.default = pty;
 
-        # `nix flake check` builds the package (which runs `cargo test
-        # --workspace`) and the smoke tests below.
+        # `nix flake check` builds the package, its pty-core tests, and the
+        # installed-binary smoke checks below.
         checks.pty = pty;
+        checks.fleet-liveness = ptyFleetLiveness;
 
         # The installed completion files are the ones the binary prints, byte
         # for byte. Both come from completions/ at the repo root; this proves the

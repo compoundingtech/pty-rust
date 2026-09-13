@@ -37,7 +37,7 @@ fn rejects_names_that_overflow_the_socket_path_limit() {
     let out = rig.pty(&["run", "-d", "--id", &long, "--", "cat"]);
     expect_failure(&out);
     expect_regex(&out.stderr(), "socket path.*exceeds");
-    expect_contains(&out.stderr(), "104-byte kernel limit");
+    expect_regex(&out.stderr(), "10[34]-byte kernel limit");
     assert!(root_entries(&rig, "aaaa").is_empty());
 }
 
@@ -117,12 +117,12 @@ fn garbage_lock_content_is_treated_as_stale() {
 }
 
 /// node: tests/security-fixes.test.ts:77
+///
+/// Rust's atomic complete-owner publication and inode-validated stale steal
+/// make exactly one claimant win. This process-level test covers the public
+/// CLI; `pty_core::registry::lock` has a deterministic delayed-stealer
+/// regression for the damaging unlink interleaving.
 #[test]
-/// **This does not establish what its name claims, and the name is kept only
-/// because it mirrors the Node test.** Two spawned processes race, and
-/// start-up jitter is what separates them. Eight threads released by a
-/// barrier produce more than one winner in 386 rounds out of 400. See
-/// docs/hardening.md, "Stealing a stale lock is not exclusive".
 fn concurrent_stealers_cannot_both_win() {
     let rig = Rig::new();
     let lock = rig.root().join("race4.lock");

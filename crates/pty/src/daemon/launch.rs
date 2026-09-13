@@ -49,6 +49,8 @@ pub struct SpawnParams {
     pub bind_to_spawner_lifetime: bool,
     /// Override of the 30 s start budget.
     pub start_timeout: Option<Duration>,
+    /// Ask the daemon to publish `session_respawn` with `session_start`.
+    pub respawn: bool,
 }
 
 /// What a successful spawn learned about the daemon it started.
@@ -85,7 +87,9 @@ impl std::fmt::Display for SpawnError {
                  Use env for verbatim control, or inherited environment policy options — not both."
             ),
             SpawnError::DaemonExited { code, stderr } => {
-                let code = code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+                let code = code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let msg = format!("Daemon process exited immediately (code {code}).");
                 if stderr.is_empty() {
                     write!(f, "{msg} Is the command valid?")
@@ -128,15 +132,13 @@ pub fn config_for(params: &SpawnParams) -> DaemonConfig {
         cols: Some(params.cols),
         ephemeral: params.ephemeral,
         tags: (!params.tags.is_empty()).then(|| params.tags.clone()),
-        display_name: params
-            .display_name
-            .clone()
-            .filter(|d| !d.is_empty()),
+        display_name: params.display_name.clone().filter(|d| !d.is_empty()),
         isolate_env: params.isolate_env.then_some(true),
         extra_env: (!params.extra_env.is_empty()).then(|| params.extra_env.clone()),
         unset_env: (!params.unset_env.is_empty()).then(|| params.unset_env.clone()),
         env: params.env.clone(),
         generation: None,
+        respawn: params.respawn,
     }
 }
 
@@ -230,7 +232,11 @@ impl ChildWatch {
             self.exit_code = Some(status.code());
         }
         if let Some(code) = self.exit_code {
-            let stderr = self.stderr.lock().map(|s| s.trim().to_string()).unwrap_or_default();
+            let stderr = self
+                .stderr
+                .lock()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
             return Err(SpawnError::DaemonExited { code, stderr });
         }
         Ok(())
@@ -595,6 +601,10 @@ mod tests {
             json,
             r#"{"name":"n","command":"/bin/sh","args":["-c","true"],"displayCommand":"sh -c true","cwd":"/tmp","rows":24,"cols":80,"ephemeral":false,"tags":{"k":"v"}}"#
         );
+        let mut respawn = params;
+        respawn.respawn = true;
+        let json = serde_json::to_string(&config_for(&respawn)).unwrap();
+        assert!(json.ends_with(r#","respawn":true}"#));
     }
 
     #[test]

@@ -245,29 +245,23 @@ for the reasoning): `pty recover`, `pty evidence`, and `pty test`. Their help
 texts are kept verbatim so `--help` still describes them, but running them
 prints `pty <cmd>: not available in this build. See docs/parity.md.` and exits 1.
 
-### One known defect, documented rather than fixed
+### Lock compatibility boundary
 
-**A session's lock files are not exclusive across a crash.** When a lock's
-holder has died, any process may steal it, and two processes stealing the same
-stale lock can both end up holding it. Measured on 2026-09-02: eight threads
-released together against one stale lock produced more than one winner in 386
-races out of 400.
+Rust publishes each `0600` lock owner record under a unique sibling name and
+hard-links it into the canonical path with no replacement. The canonical path
+is therefore never visible before its complete decimal pid. A stale-lock
+stealer also locks the inode it inspected and verifies that the path still
+names that inode before unlinking it, so a delayed Rust stealer cannot remove
+a newer owner's lock.
 
-The **Node tool has the identical sequence and the identical defect**, so a
-shared `$PTY_ROOT` is no worse than either implementation alone, and neither
-one can be relied on here.
-
-**In ordinary use this does not arise.** Taking a lock still keeps two live,
-healthy processes apart. It needs a daemon that died holding a lock and two
-processes arriving together to clean up after it — typically two creators for
-the same session name.
-
-**Do not rely on these locks for correctness after a crash.** A correct steal
-needs an exclusive create that only one process can win, which means a second
-file in a directory both implementations read. That is a change to a protocol
-they share and has to be agreed between them, which is why it is written down
-here instead of fixed on one side. `crates/pty-core/src/registry/lock.rs` and
-`docs/hardening.md` carry the interleaving in full.
+The Node tool still creates the canonical file before writing its pid and
+steals with an unbound read-then-unlink sequence. Rust safely respects a live
+Node lock after its complete pid is visible, and Rust-only stale recovery is
+exclusive. If any concurrent stale-recovery path involves Node, a delayed
+Node contender can still unlink a newer Rust or Node claim. Such recovery
+must be externally serialized in a mixed registry.
+`crates/pty-core/src/registry/lock.rs` and `docs/hardening.md` describe the
+boundary in full.
 
 ## The crates
 
