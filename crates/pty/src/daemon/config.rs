@@ -51,6 +51,14 @@ pub struct DaemonConfig {
     pub env: Option<EnvMap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
+    /// Internal launch marker: append `session_respawn` in the daemon's
+    /// serialized publication batch. Node spawners omit it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub respawn: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl DaemonConfig {
@@ -164,6 +172,9 @@ mod tests {
             DaemonConfig::parse(r#"{"name":"x"}"#).unwrap_err(),
             CONFIG_REQUIRED
         );
-        assert_eq!(DaemonConfig::parse("not json").unwrap_err(), CONFIG_REQUIRED);
+        assert_eq!(
+            DaemonConfig::parse("not json").unwrap_err(),
+            CONFIG_REQUIRED
+        );
     }
 }
