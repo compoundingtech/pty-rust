@@ -1,6 +1,7 @@
-//! `pty events [--all] [--recent] [--json] [--wait <type>] [-t <sec>] [<ref>]`:
-//! print a session's recent events, follow one log (or every log with
-//! `--all`), or block until one event type appears.
+//! `pty events [--all] [--recent] [--json] [--type <type>] [--wait <type>]
+//! [-t <sec>] [<ref>]`: print a session's recent events, optionally filtered
+//! by exact type, follow one log (or every log with `--all`), or block until
+//! one event type appears.
 //!
 //! node: src/cli.ts:1219-1248 (parsing), 3965-4051 (`cmdEvents`)
 
@@ -14,8 +15,7 @@ use pty_core::registry;
 use super::argv::{Argv, js_number, js_parse_float};
 use super::{CliError, CliResult, resolve_ref};
 
-const USAGE: &str =
-    "Usage: pty events [--all] [--recent] [--json] [--wait <type>] [-t <seconds>] [<name>]";
+const USAGE: &str = "Usage: pty events [--all] [--recent] [--json] [--type <type>] [--wait <type>] [-t <seconds>] [<name>]";
 
 fn render(event: &Event, json: bool) -> String {
     if json {
@@ -47,6 +47,7 @@ pub fn run(args: &[String]) -> CliResult {
     let mut recent = false;
     let mut json = false;
     let mut wait_type: Option<String> = None;
+    let mut event_type: Option<&str> = None;
     let mut timeout = 0f64;
     let mut cur = Argv::new(args);
     // Leading dash-tokens are flags; an unknown one ends the loop and is the ref.
@@ -64,6 +65,10 @@ pub fn run(args: &[String]) -> CliResult {
                 json = true;
                 cur.next();
             }
+            Some("--type") if cur.has_next() => {
+                event_type = cur.take_value();
+            }
+            Some("--type") => return Err("--type requires an event type.".into()),
             Some("--wait") if cur.has_next() => {
                 wait_type = cur.take_value().map(str::to_string);
             }
@@ -82,7 +87,15 @@ pub fn run(args: &[String]) -> CliResult {
         Some(r) => Some(resolve_ref(r)?),
         None => None,
     };
-    cmd_events(name.as_deref(), all, recent, json, wait_type.as_deref(), timeout)
+    cmd_events(
+        name.as_deref(),
+        all,
+        recent,
+        json,
+        event_type,
+        wait_type.as_deref(),
+        timeout,
+    )
 }
 
 /// `cmdEvents`.
@@ -91,20 +104,27 @@ fn cmd_events(
     all: bool,
     recent: bool,
     json: bool,
+    event_type: Option<&str>,
     wait_type: Option<&str>,
     timeout: f64,
 ) -> CliResult {
+    if event_type.is_some() && !recent {
+        return Err("--type requires --recent.".into());
+    }
     if recent {
         let Some(name) = name else {
             return Err("--recent requires a session name.".into());
         };
         let events = read_recent_events(name, DEFAULT_RECENT_EVENTS);
-        if events.is_empty() {
+        if events.is_empty() && event_type.is_none() {
             println!("No recent events for \"{name}\".");
             return Ok(0);
         }
-        for e in &events {
-            println!("{}", render(e, json));
+        for event in &events {
+            if event_type.is_some_and(|expected| event.r#type != expected) {
+                continue;
+            }
+            println!("{}", render(event, json));
         }
         return Ok(0);
     }

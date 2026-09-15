@@ -11,7 +11,7 @@
 //! offset/truncation cases — library-only.
 
 use pty_conformance::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io::Read;
 use std::time::Duration;
 
@@ -21,6 +21,16 @@ fn events_path(rig: &Rig, id: &str) -> std::path::PathBuf {
 
 fn recent_json(rig: &Rig, id: &str) -> Vec<Value> {
     let out = rig.pty(&["events", "--recent", "--json", id]);
+    expect_status(&out, 0);
+    out.stdout()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
+        .collect()
+}
+
+fn recent_json_of_type(rig: &Rig, id: &str, event_type: &str) -> Vec<Value> {
+    let out = rig.pty(&["events", "--recent", "--json", "--type", event_type, id]);
     expect_status(&out, 0);
     out.stdout()
         .lines()
@@ -48,6 +58,55 @@ fn wait_for_events(rig: &Rig, id: &str, kind: &str, n: usize) -> Vec<Value> {
 fn emitting_session(rig: &Rig, id: &str, printf_arg: &str) {
     let script = format!("printf '{printf_arg}'; exec cat");
     rig.daemon(id, &["sh", "-c", &script], DaemonOpts::no_display_name());
+}
+
+/// Rust additive retained-event query contract.
+#[test]
+fn recent_type_filter_preserves_envelopes_order_and_the_event_file() {
+    let rig = Rig::new();
+    let id = "evquery";
+    std::fs::write(rig.meta_path(id), "{}").unwrap();
+    let events = [
+        json!({
+            "session": id,
+            "type": "user.note",
+            "ts": "2026-01-02T03:04:05.000Z",
+            "text": "first",
+            "data": {"sequence": 1}
+        }),
+        json!({
+            "session": id,
+            "type": "user.notice",
+            "ts": "2026-01-02T03:04:06.000Z",
+            "text": "prefix must not match"
+        }),
+        json!({
+            "session": id,
+            "type": "bell",
+            "ts": "2026-01-02T03:04:07.000Z"
+        }),
+        json!({
+            "session": id,
+            "type": "user.note",
+            "ts": "2026-01-02T03:04:08.000Z",
+            "text": "second",
+            "data": {"sequence": 2}
+        }),
+    ];
+    let path = events_path(&rig, id);
+    let raw = events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(&path, raw).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    assert_eq!(recent_json(&rig, id), events.to_vec());
+    assert_eq!(
+        recent_json_of_type(&rig, id, "user.note"),
+        vec![events[0].clone(), events[3].clone()]
+    );
+    assert_eq!(recent_json_of_type(&rig, id, "user.notice"), vec![events[1].clone()]);
+    assert!(recent_json_of_type(&rig, id, "user").is_empty());
+    assert!(recent_json_of_type(&rig, id, "missing").is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before, "retained event file changed");
 }
 
 /// node: tests/events.test.ts:414

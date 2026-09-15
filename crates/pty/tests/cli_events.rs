@@ -22,6 +22,76 @@ fn append_event(rig: &Rig, name: &str, line: &str) {
     writeln!(f, "{line}").unwrap();
 }
 
+fn parse_json_lines(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn recent_type_filter_is_exact_ordered_and_read_only() {
+    let rig = Rig::new();
+    rig.write_meta("query", json!({}));
+    let events = [
+        json!({
+            "session": "query",
+            "type": "user.note",
+            "ts": "2026-01-02T03:04:05.000Z",
+            "text": "first",
+            "data": {"sequence": 1}
+        }),
+        json!({
+            "session": "query",
+            "type": "user.notice",
+            "ts": "2026-01-02T03:04:06.000Z",
+            "text": "prefix must not match"
+        }),
+        json!({
+            "session": "query",
+            "type": "bell",
+            "ts": "2026-01-02T03:04:07.000Z"
+        }),
+        json!({
+            "session": "query",
+            "type": "user.note",
+            "ts": "2026-01-02T03:04:08.000Z",
+            "text": "second",
+            "data": {"sequence": 2}
+        }),
+    ];
+    let path = rig.path("query.events.jsonl");
+    let raw = events.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(&path, raw).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let unfiltered = rig.ok(&["events", "--recent", "--json", "query"]);
+    assert_eq!(parse_json_lines(&unfiltered.stdout), events.to_vec());
+
+    let filtered = rig.ok(&["events", "--recent", "--json", "--type", "user.note", "query"]);
+    assert_eq!(
+        parse_json_lines(&filtered.stdout),
+        vec![events[0].clone(), events[3].clone()]
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "user.notice", "query"])
+            .json(),
+        events[1]
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "user", "query"])
+            .stdout,
+        ""
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "missing", "query"])
+            .stdout,
+        ""
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before, "retained event file changed");
+}
+
 /// node: src/cli.ts:1226-1236, 3969-3982
 #[test]
 fn recent_and_usage() {
@@ -49,7 +119,7 @@ fn recent_and_usage() {
     assert_eq!(out.code, 1);
     assert_eq!(
         out.stderr,
-        "Usage: pty events [--all] [--recent] [--json] [--wait <type>] [-t <seconds>] [<name>]\n"
+        "Usage: pty events [--all] [--recent] [--json] [--type <type>] [--wait <type>] [-t <seconds>] [<name>]\n"
     );
     let out = rig.run(&["events", "--recent", "--all"]);
     assert_eq!(out.code, 1);
@@ -57,6 +127,12 @@ fn recent_and_usage() {
     let out = rig.run(&["events", "--wait", "bell", "--all"]);
     assert_eq!(out.code, 1);
     assert_eq!(out.stderr, "--wait requires a session name.\n");
+    let out = rig.run(&["events", "--type", "bell", "s"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stderr, "--type requires --recent.\n");
+    let out = rig.run(&["events", "--recent", "--type"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stderr, "--type requires an event type.\n");
     let out = rig.run(&["events", "--recent", "ghost"]);
     assert_eq!(out.code, 1);
     assert_eq!(out.stderr, "Session \"ghost\" not found.\n");
