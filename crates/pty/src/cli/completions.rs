@@ -1,10 +1,11 @@
 //! `pty completions <shell>`: print a shell completion script to stdout.
 //!
-//! The three scripts are vendored byte for byte from the Node repo
-//! (`completions/pty.{fish,bash,zsh}` at the repo root; Node generates them
-//! from its command spec and checks them in, so the files are the contract).
-//! The usage text is the `completions.txt` help fixture, captured from the
-//! Node binary like the other help texts.
+//! The three scripts are checked in at `completions/pty.{fish,bash,zsh}` and
+//! emitted byte for byte, so those files are the Rust CLI's completion
+//! contract. They began as the Node-generated artifacts and retain parity
+//! except where the Rust CLI intentionally adds an option. The usage text is
+//! the `completions.txt` help fixture, captured from the Node binary like the
+//! other help texts.
 //!
 //! Exit codes: `--help`/`-h` → usage on stdout, 0; a known shell → its script,
 //! 0; no shell → usage on stderr, 2; an unknown shell → an `unknown shell`
@@ -15,7 +16,7 @@
 
 use std::io::Write;
 
-/// The shells with a vendored script, in Node's order.
+/// The shells with a checked-in script, in Node's order.
 pub const SHELLS: [&str; 3] = ["fish", "bash", "zsh"];
 
 /// `usage: pty completions <shell>` ... — printed for `--help` and on errors.

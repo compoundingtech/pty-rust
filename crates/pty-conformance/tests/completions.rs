@@ -1,10 +1,10 @@
 //! Port of tests/completions.test.ts: `pty completions <shell>` prints the
-//! generated script (byte-identical to the checked-in `completions/pty.*`
-//! in the Node checkout), models `run --env` and
-//! `attach --attach-stream-fd-v1 <fd>`, and completes session names from
-//! the registry. Shell syntax checks run only where the shell is installed,
-//! as in Node. Left out: the spec-vs-COMMAND_HELP parity check (reads the
-//! Node source) and the `evidence` leaves (deferred in docs/parity.md §12).
+//! implementation's checked-in `completions/pty.*` artifact byte for byte,
+//! models `run --env` and `attach --attach-stream-fd-v1 <fd>`, and completes
+//! session names from the registry. Shell syntax checks run only where the
+//! shell is installed, as in Node. Left out: the spec-vs-COMMAND_HELP parity
+//! check (reads the Node source) and the `evidence` leaves (deferred in
+//! docs/parity.md §12).
 
 use pty_conformance::*;
 use std::path::PathBuf;
@@ -41,13 +41,19 @@ fn node_checkout_dir() -> Option<PathBuf> {
 /// node: tests/completions.test.ts:81
 #[test]
 fn matches_every_checked_in_completion_artifact() {
-    let Some(checkout) = node_checkout_dir() else {
-        eprintln!("skipping: no Node checkout with completions/ (set PTY_NODE_CHECKOUT)");
-        return;
+    let completions = if is_rust() {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../completions")
+    } else {
+        let Some(checkout) = node_checkout_dir() else {
+            eprintln!("skipping: no Node checkout with completions/ (set PTY_NODE_CHECKOUT)");
+            return;
+        };
+        checkout.join("completions")
     };
     let rig = Rig::new();
     for shell in ["fish", "bash", "zsh"] {
-        let checked_in = std::fs::read_to_string(checkout.join("completions").join(format!("pty.{shell}"))).unwrap();
+        let checked_in =
+            std::fs::read_to_string(completions.join(format!("pty.{shell}"))).unwrap();
         assert_eq!(generate(&rig, shell), checked_in, "completions/pty.{shell} differs");
     }
 }

@@ -62,11 +62,13 @@ fn emitting_session(rig: &Rig, id: &str, printf_arg: &str) {
 
 /// Rust additive retained-event query contract.
 #[test]
-fn recent_type_filter_preserves_envelopes_order_and_the_event_file() {
+fn recent_type_filter_precedes_bound_and_preserves_envelopes_order() {
+    const RECENT_BOUND: usize = 50;
+
     let rig = Rig::new();
     let id = "evquery";
     std::fs::write(rig.meta_path(id), "{}").unwrap();
-    let events = [
+    let matching = [
         json!({
             "session": id,
             "type": "user.note",
@@ -76,35 +78,37 @@ fn recent_type_filter_preserves_envelopes_order_and_the_event_file() {
         }),
         json!({
             "session": id,
-            "type": "user.notice",
-            "ts": "2026-01-02T03:04:06.000Z",
-            "text": "prefix must not match"
-        }),
-        json!({
-            "session": id,
-            "type": "bell",
-            "ts": "2026-01-02T03:04:07.000Z"
-        }),
-        json!({
-            "session": id,
             "type": "user.note",
             "ts": "2026-01-02T03:04:08.000Z",
             "text": "second",
             "data": {"sequence": 2}
         }),
     ];
+    let notice = json!({
+        "session": id,
+        "type": "user.notice",
+        "ts": "2026-01-02T03:04:06.000Z",
+        "text": "prefix must not match"
+    });
+    let mut events = vec![matching[0].clone(), notice.clone(), matching[1].clone()];
+    for sequence in 0..=RECENT_BOUND {
+        events.push(json!({
+            "session": id,
+            "type": "bell",
+            "ts": format!("2026-01-02T04:00:{sequence:02}.000Z"),
+            "data": {"sequence": sequence}
+        }));
+    }
     let path = events_path(&rig, id);
     let raw = events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
     std::fs::write(&path, raw).unwrap();
     let before = std::fs::read(&path).unwrap();
 
-    assert_eq!(recent_json(&rig, id), events.to_vec());
-    assert_eq!(
-        recent_json_of_type(&rig, id, "user.note"),
-        vec![events[0].clone(), events[3].clone()]
-    );
-    assert_eq!(recent_json_of_type(&rig, id, "user.notice"), vec![events[1].clone()]);
+    assert_eq!(recent_json(&rig, id), events[events.len() - RECENT_BOUND..]);
+    assert_eq!(recent_json_of_type(&rig, id, "user.note"), matching);
+    assert_eq!(recent_json_of_type(&rig, id, "user.notice"), [notice]);
     assert!(recent_json_of_type(&rig, id, "user").is_empty());
+    assert!(recent_json_of_type(&rig, id, "User.Note").is_empty());
     assert!(recent_json_of_type(&rig, id, "missing").is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), before, "retained event file changed");
 }

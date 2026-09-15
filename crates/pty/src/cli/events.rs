@@ -9,7 +9,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use pty_core::events::follow::{EventFollower, FollowerOptions};
-use pty_core::events::{DEFAULT_RECENT_EVENTS, Event, format_event, read_recent_events};
+use pty_core::events::{
+    DEFAULT_RECENT_EVENTS, Event, format_event, read_recent_events, read_recent_events_of_type,
+};
 use pty_core::registry;
 
 use super::argv::{Argv, js_number, js_parse_float};
@@ -115,15 +117,15 @@ fn cmd_events(
         let Some(name) = name else {
             return Err("--recent requires a session name.".into());
         };
-        let events = read_recent_events(name, DEFAULT_RECENT_EVENTS);
+        let events = match event_type {
+            Some(expected) => read_recent_events_of_type(name, DEFAULT_RECENT_EVENTS, expected),
+            None => read_recent_events(name, DEFAULT_RECENT_EVENTS),
+        };
         if events.is_empty() && event_type.is_none() {
             println!("No recent events for \"{name}\".");
             return Ok(0);
         }
         for event in &events {
-            if event_type.is_some_and(|expected| event.r#type != expected) {
-                continue;
-            }
             println!("{}", render(event, json));
         }
         return Ok(0);

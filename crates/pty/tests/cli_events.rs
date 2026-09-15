@@ -31,10 +31,12 @@ fn parse_json_lines(stdout: &str) -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn recent_type_filter_is_exact_ordered_and_read_only() {
+fn recent_type_filter_precedes_bound_and_is_exact_ordered_and_read_only() {
+    const RECENT_BOUND: usize = 50;
+
     let rig = Rig::new();
     rig.write_meta("query", json!({}));
-    let events = [
+    let matching = [
         json!({
             "session": "query",
             "type": "user.note",
@@ -44,43 +46,56 @@ fn recent_type_filter_is_exact_ordered_and_read_only() {
         }),
         json!({
             "session": "query",
-            "type": "user.notice",
-            "ts": "2026-01-02T03:04:06.000Z",
-            "text": "prefix must not match"
-        }),
-        json!({
-            "session": "query",
-            "type": "bell",
-            "ts": "2026-01-02T03:04:07.000Z"
-        }),
-        json!({
-            "session": "query",
             "type": "user.note",
             "ts": "2026-01-02T03:04:08.000Z",
             "text": "second",
             "data": {"sequence": 2}
         }),
     ];
+    let notice = json!({
+        "session": "query",
+        "type": "user.notice",
+        "ts": "2026-01-02T03:04:06.000Z",
+        "text": "prefix must not match"
+    });
+    let mut events = vec![matching[0].clone(), notice.clone(), matching[1].clone()];
+    for sequence in 0..=RECENT_BOUND {
+        events.push(json!({
+            "session": "query",
+            "type": "bell",
+            "ts": format!("2026-01-02T04:00:{sequence:02}.000Z"),
+            "data": {"sequence": sequence}
+        }));
+    }
     let path = rig.path("query.events.jsonl");
     let raw = events.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
     std::fs::write(&path, raw).unwrap();
     let before = std::fs::read(&path).unwrap();
 
     let unfiltered = rig.ok(&["events", "--recent", "--json", "query"]);
-    assert_eq!(parse_json_lines(&unfiltered.stdout), events.to_vec());
-
-    let filtered = rig.ok(&["events", "--recent", "--json", "--type", "user.note", "query"]);
     assert_eq!(
-        parse_json_lines(&filtered.stdout),
-        vec![events[0].clone(), events[3].clone()]
+        parse_json_lines(&unfiltered.stdout),
+        events[events.len() - RECENT_BOUND..]
+    );
+    assert_eq!(
+        parse_json_lines(
+            &rig.ok(&["events", "--recent", "--json", "--type", "user.note", "query"])
+                .stdout
+        ),
+        matching
     );
     assert_eq!(
         rig.ok(&["events", "--recent", "--json", "--type", "user.notice", "query"])
             .json(),
-        events[1]
+        notice
     );
     assert_eq!(
         rig.ok(&["events", "--recent", "--json", "--type", "user", "query"])
+            .stdout,
+        ""
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "User.Note", "query"])
             .stdout,
         ""
     );

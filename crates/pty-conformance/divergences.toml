@@ -64,3 +64,19 @@ This divergence was not written down anywhere before the gate found it: it is \
 in neither docs/parity.md nor a decision record. Remove this entry if the Node \
 pty adopts the same behaviour.
 """
+
+[[divergence]]
+test = "events::recent_type_filter_precedes_bound_and_preserves_envelopes_order"
+side = "node"
+kind = "intended"
+reason = """
+pty-rust adds `events --recent --type <type>` for an exact, case-sensitive \
+retained-event query. Measured against pinned Node 98e11c946f2aa90a10bdc235735e9a82e66158c4 \
+on Node 22, the Node CLI does not recognize the option: it treats `--type` as \
+the session reference and exits 1 with `Session "--type" not found.` Rust \
+instead filters the retained log before applying the 50-event result bound, \
+then returns matching envelopes in their original chronological order; the \
+fixture proves two old matches remain visible behind 51 newer unrelated \
+events. Remove this entry when Node supports the same option with exact \
+filter-before-bound and empty-success semantics, or if Rust removes it.
+"""
