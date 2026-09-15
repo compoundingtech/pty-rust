@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use pty_core::events::follow::{EventFollower, FollowerOptions};
 use pty_core::events::{
-    DEFAULT_RECENT_EVENTS, Event, format_event, read_recent_events, read_recent_events_of_type,
+    DEFAULT_RECENT_EVENTS, Event, format_event, read_recent_events, read_retained_events_of_type,
 };
 use pty_core::registry;
 
@@ -118,7 +118,7 @@ fn cmd_events(
             return Err("--recent requires a session name.".into());
         };
         let events = match event_type {
-            Some(expected) => read_recent_events_of_type(name, DEFAULT_RECENT_EVENTS, expected),
+            Some(expected) => read_retained_events_of_type(name, expected),
             None => read_recent_events(name, DEFAULT_RECENT_EVENTS),
         };
         if events.is_empty() && event_type.is_none() {

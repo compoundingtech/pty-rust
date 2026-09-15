@@ -492,12 +492,11 @@ pub fn read_recent_events(name: &str, count: usize) -> Vec<Event> {
     read_recent_events_at(&events_path(name), count, None)
 }
 
-/// The newest `count` events whose type exactly matches `event_type`.
+/// Every retained event whose type exactly matches `event_type`.
 ///
-/// Filtering precedes the bound, so newer events of other types do not
-/// displace older matches.
-pub fn read_recent_events_of_type(name: &str, count: usize, event_type: &str) -> Vec<Event> {
-    read_recent_events_at(&events_path(name), count, Some(event_type))
+/// The retained file is itself bounded by the writer's retention policy.
+pub fn read_retained_events_of_type(name: &str, event_type: &str) -> Vec<Event> {
+    read_recent_events_at(&events_path(name), usize::MAX, Some(event_type))
 }
 
 /// The newest `count` events from `root/<name>.events.jsonl`.

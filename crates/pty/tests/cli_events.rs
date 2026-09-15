@@ -31,12 +31,12 @@ fn parse_json_lines(stdout: &str) -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn recent_type_filter_precedes_bound_and_is_exact_ordered_and_read_only() {
+fn recent_type_filter_returns_every_retained_exact_match_in_order_without_writes() {
     const RECENT_BOUND: usize = 50;
 
     let rig = Rig::new();
     rig.write_meta("query", json!({}));
-    let matching = [
+    let mut matching = vec![
         json!({
             "session": "query",
             "type": "user.note",
@@ -66,6 +66,16 @@ fn recent_type_filter_precedes_bound_and_is_exact_ordered_and_read_only() {
             "ts": format!("2026-01-02T04:00:{sequence:02}.000Z"),
             "data": {"sequence": sequence}
         }));
+    }
+    for sequence in 3..=RECENT_BOUND + 3 {
+        let event = json!({
+            "session": "query",
+            "type": "user.note",
+            "ts": format!("2026-01-02T05:00:{sequence:02}.000Z"),
+            "data": {"sequence": sequence}
+        });
+        matching.push(event.clone());
+        events.push(event);
     }
     let path = rig.path("query.events.jsonl");
     let raw = events.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";

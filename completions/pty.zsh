@@ -106,7 +106,7 @@ _pty() {
             '--all[Follow every session, interleaved]' \
             '--recent[Print recent + exit]' \
             '--json[Emit JSON]' \
-            '--type[Filter recent events by exact type]:event type:' \
+            '--type[Print all retained events of exact type]:event type:' \
             '--wait[Wait for a specific event type]' \
             '(t --timeout){t,--timeout}[Timeout (seconds) for --wait]' \
             '1:session:_pty_sessions'

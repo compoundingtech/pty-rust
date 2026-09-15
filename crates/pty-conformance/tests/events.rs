@@ -62,13 +62,13 @@ fn emitting_session(rig: &Rig, id: &str, printf_arg: &str) {
 
 /// Rust additive retained-event query contract.
 #[test]
-fn recent_type_filter_precedes_bound_and_preserves_envelopes_order() {
+fn recent_type_filter_returns_every_retained_match_and_preserves_envelopes_order() {
     const RECENT_BOUND: usize = 50;
 
     let rig = Rig::new();
     let id = "evquery";
     std::fs::write(rig.meta_path(id), "{}").unwrap();
-    let matching = [
+    let mut matching = vec![
         json!({
             "session": id,
             "type": "user.note",
@@ -98,6 +98,16 @@ fn recent_type_filter_precedes_bound_and_preserves_envelopes_order() {
             "ts": format!("2026-01-02T04:00:{sequence:02}.000Z"),
             "data": {"sequence": sequence}
         }));
+    }
+    for sequence in 3..=RECENT_BOUND + 3 {
+        let event = json!({
+            "session": id,
+            "type": "user.note",
+            "ts": format!("2026-01-02T05:00:{sequence:02}.000Z"),
+            "data": {"sequence": sequence}
+        });
+        matching.push(event.clone());
+        events.push(event);
     }
     let path = events_path(&rig, id);
     let raw = events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";

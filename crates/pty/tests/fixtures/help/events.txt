@@ -6,7 +6,7 @@ Flags:
   --all                Follow every session, interleaved (omit <ref>)
   --recent             Print recent events and exit (don't follow)
   --json               Emit raw JSONL
-  --type <type>         With --recent, include only this exact event type
+  --type <type>         With --recent, print every retained event of this exact type
   --wait <type>        Block until an event of <type> appears
   -t, --timeout <sec>  Timeout (seconds) for --wait
 
