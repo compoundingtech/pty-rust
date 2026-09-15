@@ -55,7 +55,7 @@ _pty() {
       ;;
     events)
       if [[ "${cur}" == -* ]]; then
-        COMPREPLY=($(compgen -W "--all --recent --json --wait -t --timeout" -- "${cur}"))
+        COMPREPLY=($(compgen -W "--all --recent --json --type --wait -t --timeout" -- "${cur}"))
       else
         COMPREPLY=($(compgen -W "${names}" -- "${cur}"))
       fi

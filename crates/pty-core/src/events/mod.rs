@@ -484,36 +484,47 @@ pub fn remove_events(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The newest `count` events. Empty when the file is missing or any of the
-/// selected lines fails to parse (as Node's `readRecentEvents`).
+/// The newest `count` events. Empty when the file is missing or any inspected
+/// line fails to parse (as Node's `readRecentEvents`).
 ///
 /// node: src/events.ts:415-423
 pub fn read_recent_events(name: &str, count: usize) -> Vec<Event> {
-    read_recent_events_at(&events_path(name), count)
+    read_recent_events_at(&events_path(name), count, None)
+}
+
+/// Every retained event whose type exactly matches `event_type`.
+///
+/// The retained file is itself bounded by the writer's retention policy.
+pub fn read_retained_events_of_type(name: &str, event_type: &str) -> Vec<Event> {
+    read_recent_events_at(&events_path(name), usize::MAX, Some(event_type))
 }
 
 /// The newest `count` events from `root/<name>.events.jsonl`.
 pub fn read_recent_events_in(root: &Path, name: &str, count: usize) -> Vec<Event> {
-    read_recent_events_at(&root.join(format!("{name}.events.jsonl")), count)
+    read_recent_events_at(&root.join(format!("{name}.events.jsonl")), count, None)
 }
 
-fn read_recent_events_at(path: &Path, count: usize) -> Vec<Event> {
+fn read_recent_events_at(path: &Path, count: usize, event_type: Option<&str>) -> Vec<Event> {
+    if count == 0 {
+        return Vec::new();
+    }
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let lines: Vec<&str> = content
-        .trim_end()
-        .split('\n')
-        .filter(|l| !l.is_empty())
-        .collect();
-    let start = lines.len().saturating_sub(count);
-    let mut out = Vec::with_capacity(lines.len() - start);
-    for line in &lines[start..] {
-        match serde_json::from_str::<Event>(line) {
-            Ok(e) => out.push(e),
+    let mut out = Vec::with_capacity(count.min(content.lines().count()));
+    for line in content.trim_end().split('\n').filter(|line| !line.is_empty()).rev() {
+        let event = match serde_json::from_str::<Event>(line) {
+            Ok(event) => event,
             Err(_) => return Vec::new(),
+        };
+        if event_type.is_none_or(|expected| event.r#type == expected) {
+            out.push(event);
+            if out.len() == count {
+                break;
+            }
         }
     }
+    out.reverse();
     out
 }
 

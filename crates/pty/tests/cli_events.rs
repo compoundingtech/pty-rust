@@ -22,6 +22,101 @@ fn append_event(rig: &Rig, name: &str, line: &str) {
     writeln!(f, "{line}").unwrap();
 }
 
+fn parse_json_lines(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn recent_type_filter_returns_every_retained_exact_match_in_order_without_writes() {
+    const RECENT_BOUND: usize = 50;
+
+    let rig = Rig::new();
+    rig.write_meta("query", json!({}));
+    let mut matching = vec![
+        json!({
+            "session": "query",
+            "type": "user.note",
+            "ts": "2026-01-02T03:04:05.000Z",
+            "text": "first",
+            "data": {"sequence": 1}
+        }),
+        json!({
+            "session": "query",
+            "type": "user.note",
+            "ts": "2026-01-02T03:04:08.000Z",
+            "text": "second",
+            "data": {"sequence": 2}
+        }),
+    ];
+    let notice = json!({
+        "session": "query",
+        "type": "user.notice",
+        "ts": "2026-01-02T03:04:06.000Z",
+        "text": "prefix must not match"
+    });
+    let mut events = vec![matching[0].clone(), notice.clone(), matching[1].clone()];
+    for sequence in 0..=RECENT_BOUND {
+        events.push(json!({
+            "session": "query",
+            "type": "bell",
+            "ts": format!("2026-01-02T04:00:{sequence:02}.000Z"),
+            "data": {"sequence": sequence}
+        }));
+    }
+    for sequence in 3..=RECENT_BOUND + 3 {
+        let event = json!({
+            "session": "query",
+            "type": "user.note",
+            "ts": format!("2026-01-02T05:00:{sequence:02}.000Z"),
+            "data": {"sequence": sequence}
+        });
+        matching.push(event.clone());
+        events.push(event);
+    }
+    let path = rig.path("query.events.jsonl");
+    let raw = events.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(&path, raw).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let unfiltered = rig.ok(&["events", "--recent", "--json", "query"]);
+    assert_eq!(
+        parse_json_lines(&unfiltered.stdout),
+        events[events.len() - RECENT_BOUND..]
+    );
+    assert_eq!(
+        parse_json_lines(
+            &rig.ok(&["events", "--recent", "--json", "--type", "user.note", "query"])
+                .stdout
+        ),
+        matching
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "user.notice", "query"])
+            .json(),
+        notice
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "user", "query"])
+            .stdout,
+        ""
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "User.Note", "query"])
+            .stdout,
+        ""
+    );
+    assert_eq!(
+        rig.ok(&["events", "--recent", "--json", "--type", "missing", "query"])
+            .stdout,
+        ""
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before, "retained event file changed");
+}
+
 /// node: src/cli.ts:1226-1236, 3969-3982
 #[test]
 fn recent_and_usage() {
@@ -49,7 +144,7 @@ fn recent_and_usage() {
     assert_eq!(out.code, 1);
     assert_eq!(
         out.stderr,
-        "Usage: pty events [--all] [--recent] [--json] [--wait <type>] [-t <seconds>] [<name>]\n"
+        "Usage: pty events [--all] [--recent] [--json] [--type <type>] [--wait <type>] [-t <seconds>] [<name>]\n"
     );
     let out = rig.run(&["events", "--recent", "--all"]);
     assert_eq!(out.code, 1);
@@ -57,6 +152,12 @@ fn recent_and_usage() {
     let out = rig.run(&["events", "--wait", "bell", "--all"]);
     assert_eq!(out.code, 1);
     assert_eq!(out.stderr, "--wait requires a session name.\n");
+    let out = rig.run(&["events", "--type", "bell", "s"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stderr, "--type requires --recent.\n");
+    let out = rig.run(&["events", "--recent", "--type"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stderr, "--type requires an event type.\n");
     let out = rig.run(&["events", "--recent", "ghost"]);
     assert_eq!(out.code, 1);
     assert_eq!(out.stderr, "Session \"ghost\" not found.\n");

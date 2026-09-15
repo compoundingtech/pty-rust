@@ -44,6 +44,7 @@ Observe:
   pty events <ref>                        Follow events from a session
   pty events --all                        Follow events from every session, interleaved
   pty events --recent <ref>               Print recent events and exit
+  pty events --recent --type <type> <ref>  Print all retained events of exactly one type
   pty events --json <ref>                 Emit raw JSONL
   pty stats                               Live CPU / memory / PIDs for every session
   pty stats <ref>                         Live metrics for a single session
