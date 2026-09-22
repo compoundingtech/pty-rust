@@ -262,37 +262,72 @@ pub fn snapshot_descendant_processes_complete_for(
     snapshot_complete_from_table(root.pid, &table)
 }
 
-/// Authenticate a control peer as live and outside the spawned child's exact
-/// process tree. Unknown/truncated ancestry fails closed.
-pub fn control_peer_is_outside_tree(root: &ProcessIdentity, peer_pid: i32) -> bool {
-    control_peer_is_outside_tree_in(root, peer_pid, &ProcTable::read())
+/// Authenticate a control peer as the same accepted process, beneath the exact
+/// launch authority, outside the exact managed child tree, and not routed
+/// through the daemon. Every identity and ancestry edge must be present in one
+/// complete table snapshot.
+pub fn control_peer_is_authorized(
+    root: &ProcessIdentity,
+    daemon: &ProcessIdentity,
+    authority: &ProcessIdentity,
+    peer_pid: i32,
+    peer_identity: &LiveIdentity,
+) -> bool {
+    control_peer_is_authorized_in(
+        root,
+        daemon,
+        authority,
+        peer_pid,
+        peer_identity,
+        &ProcTable::read(),
+    )
 }
 
-fn control_peer_is_outside_tree_in(
+fn control_peer_is_authorized_in(
     root: &ProcessIdentity,
+    daemon: &ProcessIdentity,
+    authority: &ProcessIdentity,
     peer_pid: i32,
+    peer_identity: &LiveIdentity,
     table: &ProcTable,
 ) -> bool {
     if !table.is_readable()
-        || table.identity(root.pid).known().as_ref() != Some(&root.identity)
+        || root.pid <= 1
+        || daemon.pid <= 1
+        || authority.pid <= 1
         || peer_pid <= 1
     {
         return false;
     }
+    for expected in [root, daemon] {
+        let Some(row) = table.row(expected.pid).known() else {
+            return false;
+        };
+        if row.is_zombie() || row.identity.as_ref() != Some(&expected.identity) {
+            return false;
+        }
+    }
+
     let mut pid = peer_pid;
     let mut seen = std::collections::HashSet::new();
     loop {
-        if pid == root.pid || !seen.insert(pid) {
+        if !seen.insert(pid) || pid == root.pid || pid == daemon.pid {
             return false;
         }
         let Some(row) = table.row(pid).known() else {
             return false;
         };
-        if row.is_zombie() {
+        if row.is_zombie() || row.identity.is_none() {
             return false;
         }
+        if pid == peer_pid && row.identity.as_ref() != Some(peer_identity) {
+            return false;
+        }
+        if pid == authority.pid {
+            return row.identity.as_ref() == Some(&authority.identity);
+        }
         if row.ppid <= 1 {
-            return true;
+            return false;
         }
         pid = row.ppid;
     }
@@ -373,11 +408,6 @@ pub fn freeze_descendant_processes(root: &ProcessIdentity) -> CompleteProcessTre
     }
 }
 
-pub fn resume_frozen_descendants(root: &ProcessIdentity, identities: &[ProcessIdentity]) {
-    let _ = signal_group_for_root(root, libc::SIGCONT);
-    signal_process_identities(std::slice::from_ref(root), libc::SIGCONT);
-    signal_process_identities(identities, libc::SIGCONT);
-}
 
 fn signal_group_for_root(root: &ProcessIdentity, signal: i32) -> bool {
     if !is_same_process(root) {
@@ -628,19 +658,96 @@ mod tests {
     }
 
     #[test]
-    fn control_peers_inside_the_child_tree_are_rejected() {
+    fn control_authorization_requires_exact_launch_ancestry_outside_the_child_tree() {
         let table = pty_core::proctable::table_from_shape(
-            "10 1 10 S linux:daemon\n20 10 20 S linux:child\n30 20 20 S linux:grandchild\n40 10 40 S linux:caller\n",
+            "10 1 10 S linux:authority\n\
+             11 10 11 S linux:launcher\n\
+             15 11 15 S linux:daemon\n\
+             20 15 20 S linux:child\n\
+             30 20 20 S linux:managed-descendant\n\
+             40 10 40 S linux:sibling\n\
+             50 20 20 S linux:fork-parent\n\
+             60 1 50 S linux:reparented-child\n\
+             70 40 40 S -\n\
+             80 15 20 S linux:clone-parent-peer\n",
         );
         let root = ProcessIdentity {
             pid: 20,
             identity: LiveIdentity::new("linux:child"),
             depth: 0,
         };
-        assert!(!control_peer_is_outside_tree_in(&root, 20, &table));
-        assert!(!control_peer_is_outside_tree_in(&root, 30, &table));
-        assert!(control_peer_is_outside_tree_in(&root, 40, &table));
-        assert!(!control_peer_is_outside_tree_in(&root, 99, &table));
+        let daemon = ProcessIdentity {
+            pid: 15,
+            identity: LiveIdentity::new("linux:daemon"),
+            depth: 0,
+        };
+        let authority = ProcessIdentity {
+            pid: 10,
+            identity: LiveIdentity::new("linux:authority"),
+            depth: 0,
+        };
+
+        assert!(control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &authority,
+            40,
+            &LiveIdentity::new("linux:sibling"),
+            &table
+        ));
+        assert!(!control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &authority,
+            30,
+            &LiveIdentity::new("linux:managed-descendant"),
+            &table
+        ));
+        assert!(!control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &authority,
+            60,
+            &LiveIdentity::new("linux:reparented-child"),
+            &table
+        ));
+        assert!(!control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &authority,
+            40,
+            &LiveIdentity::new("linux:reused-peer"),
+            &table
+        ));
+        let reused_authority = ProcessIdentity {
+            pid: 10,
+            identity: LiveIdentity::new("linux:reused-authority"),
+            depth: 0,
+        };
+        assert!(!control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &reused_authority,
+            40,
+            &LiveIdentity::new("linux:sibling"),
+            &table
+        ));
+        assert!(!control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &authority,
+            70,
+            &LiveIdentity::new("tok:70"),
+            &table
+        ));
+        assert!(!control_peer_is_authorized_in(
+            &root,
+            &daemon,
+            &authority,
+            80,
+            &LiveIdentity::new("linux:clone-parent-peer"),
+            &table
+        ));
     }
 }
 

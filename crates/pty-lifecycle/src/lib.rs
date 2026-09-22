@@ -9,14 +9,14 @@ mod gc;
 mod launch;
 mod startup;
 
-pub use config::DaemonConfig;
+pub use config::{ControlAuthority, DaemonConfig};
 pub use gc::{
     Abandoned, Flapped, GcOptions, GcResult, OrphanKill, PrunedTags, ReapSkip, RespawnFailed,
     Respawned, gc, prune_orphan_layout_tags,
 };
 pub use launch::{
-    DEFAULT_START_TIMEOUT, READY_FD_ENV, ReadyNotifier, SpawnError, SpawnParams, SpawnedDaemon,
-    apply_persisted_launch_options, set_process_title, spawn_daemon,
+    DEFAULT_START_TIMEOUT, READINESS_CAPABILITY_FD, READY_FD_ENV, ReadyNotifier, SpawnError,
+    SpawnParams, SpawnedDaemon, apply_persisted_launch_options, set_process_title, spawn_daemon,
 };
 pub use pty_core::registry::{
     LockBusy, SessionGenerationOwner, cleanup_all, cleanup_owned_all, cleanup_owned_socket,

@@ -16,6 +16,14 @@ pub const CONFIG_FD: i32 = 3;
 /// The text Node prints when the config is missing or lacks `name`/`command`.
 pub const CONFIG_REQUIRED: &str = "PTY_SERVER_CONFIG env var required";
 
+/// Exact live process that authorizes Rust readiness controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlAuthority {
+    pub pid: i32,
+    pub process_start_token: pty_core::proctable::LiveIdentity,
+}
+
 /// `PTY_SERVER_CONFIG`, key for key. `generation` is absent from a spawner's
 /// config (the daemon makes one) and present only when a restart wants to
 /// keep the old token.
@@ -54,6 +62,15 @@ pub struct DaemonConfig {
     pub generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_lease: Option<StartupLeaseOptions>,
+    /// Exact Rust readiness-control authority. This is the launcher's parent,
+    /// not transient `pty run`, so later sibling CLIs remain its descendants.
+    /// Node configs omit it and therefore cannot authorize readiness control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_authority: Option<ControlAuthority>,
+    /// True only for Rust launches carrying the private capability channel.
+    /// Node-shaped configs omit this and readiness controls remain denied.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub control_capability: bool,
     /// Internal launch marker: append `session_respawn` in the daemon's
     /// serialized publication batch. Node spawners omit it.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -161,6 +178,7 @@ mod tests {
         assert_eq!(cfg.cwd(), "/tmp");
         assert!(cfg.tags().is_none());
         assert!(cfg.generation.is_none());
+        assert!(cfg.control_authority.is_none());
         let minimal = DaemonConfig::parse(r#"{"name":"b","command":"sleep"}"#).unwrap();
         assert_eq!(minimal.rows(), 24);
         assert_eq!(minimal.cols(), 80);

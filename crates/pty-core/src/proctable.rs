@@ -27,6 +27,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// How long `ps` gets before the table is declared unreadable. Under contention
 /// `ps` is exactly the thing that goes quiet, so this bound is the point rather
 /// than a formality.
@@ -103,17 +105,17 @@ impl<T> Answer<T> {
     }
 }
 
-/// A process identity that is only ever compared with another one taken from
-/// the same run.
+/// A live process identity compared only with another process-table
+/// observation, optionally carried across the private daemon launch pipe.
 ///
 /// **This is deliberately not the same type as the registry's
 /// `recovery.processStartToken`, and it must never be compared with it.** That
 /// token is written into session metadata, read by the Node tool from the same
-/// registry, and its exact text is a contract between the two. This one is
-/// private to a single command's lifetime, so it is free to be whatever is
-/// cheapest to read. Making them different types is what stops the two from
-/// meeting.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// registry, and its exact text is a contract between the two. This one never
+/// enters the registry, so it is free to be whatever is cheapest to read.
+/// Making them different types is what stops the two from meeting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct LiveIdentity(String);
 
 impl LiveIdentity {

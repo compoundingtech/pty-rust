@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use pty_core::registry::{self, EnvMap, TagMap};
 
-use super::config::DaemonConfig;
+use super::config::{ControlAuthority, DaemonConfig};
 use crate::StartupLeaseOptions;
 
 /// `DEFAULT_START_TIMEOUT_MS`.
@@ -25,6 +25,8 @@ pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// serving threads have started. Kept out of the public session registry: the
 /// owner record and `session_start` must still precede the attached child.
 pub const READY_FD_ENV: &str = "PTY_DAEMON_READY_FD";
+/// Fixed daemon-side descriptor for the inherited readiness capability.
+pub const READINESS_CAPABILITY_FD: i32 = 4;
 
 /// Node's `SpawnDaemonOptions`, minus the launcher/server-module knobs.
 /// `command` is already resolved absolute (`pty_core::spawn::resolve_command`).
@@ -60,6 +62,8 @@ pub struct SpawnParams {
     pub bind_to_spawner_lifetime: bool,
     /// Override of the 30 s start budget.
     pub start_timeout: Option<Duration>,
+    /// The wrapper-held capability endpoint forwarded to the daemon.
+    pub control_fd: Option<std::os::fd::RawFd>,
     /// Ask the daemon to publish `session_respawn` with `session_start`.
     pub respawn: bool,
 }
@@ -183,6 +187,22 @@ impl std::fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
+fn launch_control_authority() -> Option<ControlAuthority> {
+    // SAFETY: getppid(2) has no arguments and cannot fail.
+    let pid = unsafe { libc::getppid() };
+    if pid <= 1 {
+        return None;
+    }
+    let row = pty_core::proctable::process(pid).known()?;
+    if row.is_zombie() {
+        return None;
+    }
+    Some(ControlAuthority {
+        pid,
+        process_start_token: row.identity?,
+    })
+}
+
 /// The config object Node's spawner serializes, in its key order.
 ///
 /// node: src/spawn.ts:169-184
@@ -203,6 +223,8 @@ pub fn config_for(params: &SpawnParams) -> DaemonConfig {
         unset_env: (!params.unset_env.is_empty()).then(|| params.unset_env.clone()),
         env: params.env.clone(),
         startup_lease: params.startup_lease.clone(),
+        control_authority: params.control_fd.and_then(|_| launch_control_authority()),
+        control_capability: params.control_fd.is_some(),
         generation: None,
         respawn: params.respawn,
     }
@@ -423,10 +445,21 @@ pub fn spawn_daemon(
             cmd.env_remove("PTY_CREATION_LOCK_OWNER_PID");
         }
     }
+    if let Some(fd) = params.control_fd {
+        cmd.env("PTY_READINESS_CAP_FD", READINESS_CAPABILITY_FD.to_string());
+        // SAFETY: this fd is inherited from the wrapper and remains owned by
+        // that caller; the child daemon takes its duplicated descriptor.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, 0);
+        }
+    } else {
+        cmd.env_remove("PTY_READINESS_CAP_FD");
+    }
     // SAFETY: the pre_exec body only calls async-signal-safe functions
     // (setsid, dup2, close).
     unsafe {
         use std::os::unix::process::CommandExt;
+        let control_fd = params.control_fd;
         cmd.pre_exec(move || {
             libc::setsid();
             if read_fd != super::config::CONFIG_FD {
@@ -437,6 +470,18 @@ pub fn spawn_daemon(
             } else {
                 // Already fd 3: clear CLOEXEC so it survives the exec.
                 libc::fcntl(read_fd, libc::F_SETFD, 0);
+            }
+            if let Some(fd) = control_fd {
+                if fd != READINESS_CAPABILITY_FD
+                    && libc::dup2(fd, READINESS_CAPABILITY_FD) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if fd != READINESS_CAPABILITY_FD {
+                    libc::close(fd);
+                } else {
+                    libc::fcntl(fd, libc::F_SETFD, 0);
+                }
             }
             Ok(())
         });
@@ -728,12 +773,28 @@ mod tests {
             cols: 80,
             tags,
             display_name: Some(String::new()),
+            control_fd: Some(197),
             ..Default::default()
         };
-        let json = serde_json::to_string(&config_for(&params)).unwrap();
+        let mut value = serde_json::to_value(config_for(&params)).unwrap();
+        let authority = value
+            .as_object_mut()
+            .unwrap()
+            .remove("controlAuthority")
+            .expect("Rust launches bind readiness control to their parent");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("controlCapability")
+            .expect("Rust launches use the capability channel");
+        assert_eq!(authority["pid"], unsafe { libc::getppid() });
+        assert!(authority["processStartToken"].is_string());
         assert_eq!(
-            json,
-            r#"{"name":"n","command":"/bin/sh","args":["-c","true"],"displayCommand":"sh -c true","cwd":"/tmp","rows":24,"cols":80,"ephemeral":false,"tags":{"k":"v"}}"#
+            value,
+            serde_json::from_str::<serde_json::Value>(
+                r#"{"name":"n","command":"/bin/sh","args":["-c","true"],"displayCommand":"sh -c true","cwd":"/tmp","rows":24,"cols":80,"ephemeral":false,"tags":{"k":"v"}}"#
+            )
+            .unwrap()
         );
         let mut respawn = params;
         respawn.respawn = true;

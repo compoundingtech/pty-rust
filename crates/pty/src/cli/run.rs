@@ -27,6 +27,7 @@ pub fn run(args: &[String]) -> CliResult {
     let mut extra_env = EnvMap::new();
     let mut unset_env: Vec<String> = Vec::new();
     let mut startup_timeout_ms: Option<u64> = None;
+    let mut control_fd: Option<i32> = None;
     let mut lifecycle_tag: Option<String> = None;
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
@@ -73,6 +74,15 @@ pub fn run(args: &[String]) -> CliResult {
                     return Ok(1);
                 }
                 startup_timeout_ms = value;
+                i += 2;
+            }
+            "--control-fd" => {
+                let value = args.get(i + 1).and_then(|value| value.parse::<i32>().ok());
+                if value.is_none_or(|value| value < 0) {
+                    eprintln!("pty run: --control-fd requires a non-negative file descriptor.");
+                    return Ok(1);
+                }
+                control_fd = value;
                 i += 2;
             }
             "--lifecycle-tag" => {
@@ -265,6 +275,7 @@ pub fn run(args: &[String]) -> CliResult {
                 timeout_ms,
                 lifecycle_tag,
             });
+    params.control_fd = control_fd;
 
     create_or_attach(&name, params, cwd.is_some(), background, attach_existing)
 }

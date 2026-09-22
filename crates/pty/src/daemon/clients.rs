@@ -76,6 +76,8 @@ pub struct Client {
     pub phase: Phase,
     /// Kernel-authenticated identity bound to this connected Unix socket.
     pub peer: Option<pty_core::unix_peer::PeerCredentials>,
+    /// True only after the per-connection capability echo challenge.
+    pub capability_authorized: bool,
 }
 
 impl Client {
@@ -84,6 +86,7 @@ impl Client {
         rows: u16,
         cols: u16,
         peer: Option<pty_core::unix_peer::PeerCredentials>,
+        capability_authorized: bool,
     ) -> Client {
         Client {
             tx,
@@ -94,6 +97,7 @@ impl Client {
             generation: 0,
             phase: Phase::Live,
             peer,
+            capability_authorized,
         }
     }
 

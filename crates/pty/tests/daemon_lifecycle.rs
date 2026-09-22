@@ -22,6 +22,18 @@ use serde_json::json;
 const T: Duration = Duration::from_secs(8);
 const STARTUP_TAG: &str = "run.lifecycle";
 const PRESERVE: &[(&str, &str)] = &[("PTY_REAP_ON_EXIT", "false")];
+fn authorize_current_process(config: &mut serde_json::Value) {
+    let pid = std::process::id() as i32;
+    let identity = pty_core::proctable::process(pid)
+        .known()
+        .and_then(|row| row.identity)
+        .expect("test process identity");
+    config["controlAuthority"] = json!({
+        "pid": pid,
+        "processStartToken": identity,
+    });
+}
+
 
 fn wait_exited(d: &Daemon) -> serde_json::Value {
     assert!(
@@ -497,6 +509,45 @@ fn shutdown_backstop_force_exits_and_reaps_a_frozen_child() {
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
+#[test]
+fn shutdown_backstop_is_armed_before_blocked_startup_settlement() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("backstop-order");
+    let mut cfg = config(&name, "sleep", &["30"]);
+    cfg["startupLease"] = json!({
+        "timeoutMs": 30_000,
+        "lifecycleTag": STARTUP_TAG,
+    });
+    let mut daemon = Daemon::start_env(
+        &root,
+        cfg,
+        &[("PTY_SHUTDOWN_DEADLINE_MS", "300")],
+    );
+    let child = daemon.child_pid();
+    let lock = root.join(format!("{name}.lock"));
+    std::fs::write(&lock, std::process::id().to_string()).unwrap();
+
+    daemon.signal(libc::SIGTERM);
+    let forced = daemon.wait_exit(Duration::from_secs(2));
+    std::fs::remove_file(lock).unwrap();
+    if forced.is_none() {
+        daemon.signal(libc::SIGKILL);
+        let _ = daemon.wait_exit(T);
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+        }
+    }
+
+    assert_eq!(
+        forced,
+        Some(0),
+        "startup settlement lock contention bypassed the hard backstop"
+    );
+    assert!(wait_dead(child, Duration::from_secs(2)));
+}
+
 /// node: tests/spawner-pid-watchdog.test.ts:93-193
 #[test]
 fn spawner_pid_watchdog() {
@@ -949,6 +1000,51 @@ fn node_attach_stream_against_the_rust_daemon() {
 }
 
 #[test]
+fn node_compatible_config_without_control_authority_denies_readiness_control() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-no-authority");
+    let mut cfg = config(&name, "sleep", &["30"]);
+    cfg["startupLease"] = json!({
+        "timeoutMs": 30_000,
+        "lifecycleTag": STARTUP_TAG,
+    });
+    let mut daemon = Daemon::start(&root, cfg);
+    let metadata = daemon.meta().unwrap();
+    let generation = metadata["generation"].as_str().unwrap().to_string();
+    let starting = metadata["tags"][STARTUP_TAG]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut connection = daemon.connect();
+    connection.send(&encode_lifecycle_compare_and_set_request(
+        &LifecycleCompareAndSetRequest {
+            expected_generation: generation,
+            tag: STARTUP_TAG.to_string(),
+            expected_value: starting,
+            value: r#"{"_tag":"ready"}"#.to_string(),
+        },
+    ));
+    assert!(connection.wait_for(T, |packets| {
+        packets.iter().any(|packet| packet.type_ == LifecycleCas)
+    }));
+    let response = connection
+        .packets
+        .iter()
+        .find(|packet| packet.type_ == LifecycleCas)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<LifecycleCompareAndSetResult>(&response.payload).unwrap(),
+        LifecycleCompareAndSetResult::InvalidRequest {
+            reason: "unauthorized peer".to_string(),
+        }
+    );
+    daemon.signal(libc::SIGTERM);
+    assert_eq!(daemon.wait_exit(T), Some(0));
+}
+
+#[test]
 fn startup_deadline_returns_before_waiting_for_terminal_persistence() {
     skip_without_a_real_machine!();
     let _s = serial();
@@ -959,6 +1055,7 @@ fn startup_deadline_returns_before_waiting_for_terminal_persistence() {
         "timeoutMs": 1_000,
         "lifecycleTag": STARTUP_TAG,
     });
+    authorize_current_process(&mut cfg);
     let mut daemon = Daemon::start(&root, cfg);
     assert!(wait_until(T, || daemon.meta().is_some()));
     let starting = daemon.meta().unwrap()["tags"][STARTUP_TAG]
@@ -1017,6 +1114,90 @@ fn startup_deadline_returns_before_waiting_for_terminal_persistence() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&terminal).unwrap()["_tag"],
         "terminal"
+    );
+}
+
+#[test]
+fn startup_deadline_arms_backstop_before_terminal_lock_settlement() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-locked");
+    let mut cfg = config(&name, "sleep", &["30"]);
+    cfg["startupLease"] = json!({
+        "timeoutMs": 1_000,
+        "lifecycleTag": STARTUP_TAG,
+    });
+    let mut daemon = Daemon::start_env(
+        &root,
+        cfg,
+        &[("PTY_SHUTDOWN_DEADLINE_MS", "300")],
+    );
+    let child = daemon.child_pid();
+    let lock = root.join(format!("{name}.lock"));
+    std::fs::write(&lock, std::process::id().to_string()).unwrap();
+
+    let exit = daemon.wait_exit(Duration::from_secs(3));
+    std::fs::remove_file(lock).unwrap();
+    if exit.is_none() {
+        daemon.signal(libc::SIGKILL);
+        let _ = daemon.wait_exit(T);
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+        }
+    }
+
+    assert_eq!(
+        exit,
+        Some(124),
+        "terminal persistence lock contention bypassed the hard backstop"
+    );
+    assert!(wait_dead(child, Duration::from_secs(2)));
+}
+
+#[test]
+fn startup_deadline_generation_mismatch_still_terminates_captured_child() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-replaced");
+    let mut cfg = config(&name, "sleep", &["30"]);
+    cfg["startupLease"] = json!({
+        "timeoutMs": 300,
+        "lifecycleTag": STARTUP_TAG,
+    });
+    let mut daemon = Daemon::start_env(
+        &root,
+        cfg,
+        &[("PTY_SHUTDOWN_DEADLINE_MS", "800")],
+    );
+    let child = daemon.child_pid();
+    let mut replacement = daemon.meta().unwrap();
+    replacement["generation"] = json!("replacement-generation");
+    std::fs::write(
+        root.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(&replacement).unwrap(),
+    )
+    .unwrap();
+
+    let exit = daemon.wait_exit(Duration::from_secs(4));
+    if exit.is_none() {
+        daemon.signal(libc::SIGKILL);
+        let _ = daemon.wait_exit(T);
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+        }
+    }
+
+    assert_eq!(exit, Some(124));
+    assert!(wait_dead(child, Duration::from_secs(2)));
+    assert_eq!(
+        daemon.meta().unwrap()["generation"],
+        "replacement-generation"
+    );
+    assert!(
+        daemon.socket_path().exists(),
+        "the replaced registry entry must be fenced from cleanup"
     );
 }
 

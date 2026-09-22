@@ -4,7 +4,7 @@
 //! `compareAndSetLifecycle`
 
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -19,10 +19,12 @@ use crate::protocol::{
 };
 use crate::registry;
 use crate::unix_peer;
+use crate::capability;
 
 use super::{ClientError, GoneSet, map_io_error};
 
 pub const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+pub const CAPABILITY_CHALLENGE_LEN: usize = 32;
 
 pub fn query_accepted_socket_ownership(
     name: &str,
@@ -34,6 +36,22 @@ pub fn query_accepted_socket_ownership(
         MessageType::AcceptedSocketOwnership,
         &encode_accepted_socket_ownership_request(request),
         READINESS_TIMEOUT,
+        None,
+    )
+}
+
+pub fn query_accepted_socket_ownership_with_capability_fd(
+    name: &str,
+    request: &AcceptedSocketOwnershipRequest,
+    capability_fd: RawFd,
+) -> Result<AcceptedSocketOwnershipResult, ClientError> {
+    request_control_json(
+        name,
+        &request.expected_generation,
+        MessageType::AcceptedSocketOwnership,
+        &encode_accepted_socket_ownership_request(request),
+        READINESS_TIMEOUT,
+        Some(capability_fd),
     )
 }
 
@@ -47,6 +65,22 @@ pub fn compare_and_set_lifecycle(
         MessageType::LifecycleCas,
         &encode_lifecycle_compare_and_set_request(request),
         READINESS_TIMEOUT,
+        None,
+    )
+}
+
+pub fn compare_and_set_lifecycle_with_capability_fd(
+    name: &str,
+    request: &LifecycleCompareAndSetRequest,
+    capability_fd: RawFd,
+) -> Result<LifecycleCompareAndSetResult, ClientError> {
+    request_control_json(
+        name,
+        &request.expected_generation,
+        MessageType::LifecycleCas,
+        &encode_lifecycle_compare_and_set_request(request),
+        READINESS_TIMEOUT,
+        Some(capability_fd),
     )
 }
 
@@ -217,12 +251,47 @@ fn write_all_until(socket: &mut UnixStream, mut bytes: &[u8], deadline: Instant)
     Ok(())
 }
 
+fn capability_echo(fd: RawFd, deadline: Instant) -> io::Result<()> {
+    let duplicate = unsafe { libc::dup(fd) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: dup returned a new owned descriptor.
+    let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    let mut stream = UnixStream::from(owned);
+    stream.set_nonblocking(true)?;
+    let mut challenge = [0u8; CAPABILITY_CHALLENGE_LEN];
+    let mut read = 0;
+    while read < challenge.len() {
+        wait_fd(stream.as_raw_fd(), libc::POLLIN, deadline)?;
+        match stream.read(&mut challenge[read..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "capability closed",
+                ));
+            }
+            Ok(n) => read += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    write_all_until(&mut stream, &challenge, deadline)
+}
+
+fn send_capability(fd: RawFd, socket: &UnixStream, deadline: Instant) -> io::Result<()> {
+    capability::send_fd(socket, fd)?;
+    capability_echo(fd, deadline)
+}
+
 fn request_control_json<TResult: DeserializeOwned>(
     name: &str,
     expected_generation: &str,
     expected_type: MessageType,
     packet: &[u8],
     timeout: Duration,
+    capability_fd: Option<RawFd>,
 ) -> Result<TResult, ClientError> {
     let deadline = Instant::now() + timeout;
     let path = registry::socket_path(name);
@@ -234,6 +303,11 @@ fn request_control_json<TResult: DeserializeOwned>(
         }
     })?;
     let binding = verify_daemon_peer(name, expected_generation, &socket)?;
+    if let Some(fd) = capability_fd {
+        send_capability(fd, &socket, deadline).map_err(|_| {
+            ClientError::InvalidReadiness(name.to_string())
+        })?;
+    }
     write_all_until(&mut socket, packet, deadline).map_err(|error| {
         if error.kind() == io::ErrorKind::TimedOut {
             ClientError::ReadinessTimeout(name.to_string())

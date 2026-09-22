@@ -7,10 +7,12 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerCredentials {
     pub pid: i32,
     pub uid: u32,
+    /// Process-start identity captured immediately after accept.
+    pub process_start_token: crate::proctable::LiveIdentity,
 }
 
 pub fn effective_uid() -> u32 {
@@ -35,12 +37,18 @@ pub fn credentials(stream: &UnixStream) -> Option<PeerCredentials> {
             &mut length,
         )
     };
-    (result == 0 && length as usize == std::mem::size_of::<libc::ucred>()).then_some(
-        PeerCredentials {
-            pid: peer.pid,
-            uid: peer.uid,
-        },
-    )
+    if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
+        return None;
+    }
+    let row = crate::proctable::process(peer.pid).known()?;
+    if row.is_zombie() {
+        return None;
+    }
+    Some(PeerCredentials {
+        pid: peer.pid,
+        uid: peer.uid,
+        process_start_token: row.identity?,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -65,10 +73,21 @@ pub fn credentials(stream: &UnixStream) -> Option<PeerCredentials> {
     let mut gid: libc::gid_t = 0;
     // SAFETY: getpeereid writes the uid/gid authenticated by the local socket.
     let uid_result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    (pid_result == 0
-        && pid_length as usize == std::mem::size_of::<libc::pid_t>()
-        && uid_result == 0)
-        .then_some(PeerCredentials { pid, uid })
+    if pid_result != 0
+        || pid_length as usize != std::mem::size_of::<libc::pid_t>()
+        || uid_result != 0
+    {
+        return None;
+    }
+    let row = crate::proctable::process(pid).known()?;
+    if row.is_zombie() {
+        return None;
+    }
+    Some(PeerCredentials {
+        pid,
+        uid,
+        process_start_token: row.identity?,
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -83,11 +102,15 @@ mod tests {
     #[test]
     fn socket_pair_reports_the_exact_local_process() {
         let (left, right) = UnixStream::pair().unwrap();
+        let row = crate::proctable::process(std::process::id() as i32)
+            .known()
+            .unwrap();
         let expected = PeerCredentials {
             pid: std::process::id() as i32,
             uid: effective_uid(),
+            process_start_token: row.identity.unwrap(),
         };
-        assert_eq!(credentials(&left), Some(expected));
+        assert_eq!(credentials(&left), Some(expected.clone()));
         assert_eq!(credentials(&right), Some(expected));
     }
 }
