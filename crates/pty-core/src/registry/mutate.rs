@@ -177,6 +177,76 @@ pub fn mutate_metadata_under_lock_with_wait(
     MutateStatus::Changed(published)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagCompareAndSetResult {
+    Changed { value: String },
+    Unchanged { value: String },
+    ValueMismatch { value: Option<String> },
+    Busy,
+    Missing,
+    GenerationMismatch,
+    Stale,
+}
+
+/// Generation-fenced compare-and-set for one exact tag value.
+///
+/// The daemon protocol is the only supported way to disarm a startup lease;
+/// this filesystem primitive intentionally does not know about daemon timers.
+///
+/// node: src/sessions.ts `compareAndSetTagValue`
+pub fn compare_and_set_tag_value(
+    name: &str,
+    expected_generation: &str,
+    tag: &str,
+    expected_value: &str,
+    value: &str,
+) -> TagCompareAndSetResult {
+    assert!(!tag.is_empty(), "tag must not be empty");
+    let mut current_value = None;
+    let mut matched = false;
+    let result = mutate_metadata_under_lock(
+        name,
+        |metadata| {
+            current_value = metadata
+                .tags
+                .as_ref()
+                .and_then(|tags| tags.get(tag))
+                .cloned();
+            if current_value.as_deref() != Some(expected_value) {
+                return false;
+            }
+            matched = true;
+            if current_value.as_deref() == Some(value) {
+                return false;
+            }
+            metadata
+                .tags
+                .get_or_insert_with(TagMap::new)
+                .insert(tag.to_string(), value.to_string());
+            true
+        },
+        &MutateOptions {
+            expected_generation: Some(expected_generation.to_string()),
+            expected_metadata: None,
+        },
+    );
+    match result {
+        MutateStatus::Changed(_) => TagCompareAndSetResult::Changed {
+            value: value.to_string(),
+        },
+        MutateStatus::Unchanged(_) if matched => TagCompareAndSetResult::Unchanged {
+            value: value.to_string(),
+        },
+        MutateStatus::Unchanged(_) => TagCompareAndSetResult::ValueMismatch {
+            value: current_value,
+        },
+        MutateStatus::Busy => TagCompareAndSetResult::Busy,
+        MutateStatus::Missing => TagCompareAndSetResult::Missing,
+        MutateStatus::GenerationMismatch => TagCompareAndSetResult::GenerationMismatch,
+        MutateStatus::Stale => TagCompareAndSetResult::Stale,
+    }
+}
+
 /// A presentation patch: `displayName` (`Some(None)` clears) and per-key
 /// tag updates (`None` removes).
 ///

@@ -3,12 +3,13 @@
 //!
 //! Frame: `[type: u8][length: u32 BE][payload: length bytes]`.
 
+use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
 
 /// Message types (byte tag on the wire). Unknown bytes are preserved as
 /// [`MessageType::Unknown`] so a peer's newer message types pass through the
 /// framing unharmed (matching the TS reader, which keeps the numeric type).
-/// Values 8 and 9 are reserved for independent protocol extensions.
+/// Values 8 and 9 are readiness control extensions shared with Node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
     /// Terminal data (bidirectional).
@@ -27,6 +28,10 @@ pub enum MessageType {
     Peek,
     /// Bidirectional: request/response for JSON stats.
     Status,
+    /// Request/response: exact held TCP connection ancestry.
+    AcceptedSocketOwnership,
+    /// Request/response: generation-fenced one-tag compare-and-set.
+    LifecycleCas,
     /// Server → Client: effective shared rows/cols (wire value 10).
     Geometry,
     /// An unrecognized wire byte, preserved verbatim.
@@ -47,6 +52,8 @@ impl MessageType {
             6 => MessageType::Peek,
             7 => MessageType::Status,
             10 => MessageType::Geometry,
+            8 => MessageType::AcceptedSocketOwnership,
+            9 => MessageType::LifecycleCas,
             other => MessageType::Unknown(other),
         }
     }
@@ -62,6 +69,8 @@ impl MessageType {
             MessageType::Screen => 5,
             MessageType::Peek => 6,
             MessageType::Status => 7,
+            MessageType::AcceptedSocketOwnership => 8,
+            MessageType::LifecycleCas => 9,
             MessageType::Geometry => 10,
             MessageType::Unknown(b) => b,
         }
@@ -80,6 +89,82 @@ impl Packet {
     pub fn encode(&self) -> Vec<u8> {
         encode_packet(self.type_, &self.payload)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpConnectionTuple {
+    pub local_address: String,
+    pub local_port: u16,
+    pub remote_address: String,
+    pub remote_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedSocketOwnershipRequest {
+    pub expected_generation: String,
+    pub connection: TcpConnectionTuple,
+}
+
+impl AcceptedSocketOwnershipRequest {
+    pub fn validate(&self) -> bool {
+        !self.expected_generation.is_empty()
+            && !self.connection.local_address.is_empty()
+            && self.connection.local_port > 0
+            && !self.connection.remote_address.is_empty()
+            && self.connection.remote_port > 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "_tag")]
+pub enum AcceptedSocketOwnershipResult {
+    Owned { pid: i32 },
+    NotOwned,
+    Unavailable { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleCompareAndSetRequest {
+    pub expected_generation: String,
+    pub tag: String,
+    pub expected_value: String,
+    pub value: String,
+}
+
+impl LifecycleCompareAndSetRequest {
+    pub fn validate(&self) -> bool {
+        !self.expected_generation.is_empty() && !self.tag.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "_tag")]
+pub enum LifecycleCompareAndSetResult {
+    Changed {
+        value: String,
+    },
+    Unchanged {
+        value: String,
+    },
+    ValueMismatch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
+    Missing,
+    GenerationMismatch,
+    Busy,
+    DeadlineExpired {
+        value: String,
+    },
+    Terminal {
+        value: String,
+    },
+    InvalidRequest {
+        reason: String,
+    },
 }
 
 const HEADER_SIZE: usize = 5;
@@ -197,6 +282,47 @@ pub fn encode_status() -> Vec<u8> {
 /// Encode a STATUS JSON response.
 pub fn encode_status_response(json: &str) -> Vec<u8> {
     encode_packet(MessageType::Status, json.as_bytes())
+}
+
+fn encode_json<T: Serialize>(type_: MessageType, value: &T) -> Vec<u8> {
+    let payload = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
+    encode_packet(type_, &payload)
+}
+
+pub fn encode_accepted_socket_ownership_request(
+    request: &AcceptedSocketOwnershipRequest,
+) -> Vec<u8> {
+    encode_json(MessageType::AcceptedSocketOwnership, request)
+}
+
+pub fn encode_accepted_socket_ownership_response(
+    result: &AcceptedSocketOwnershipResult,
+) -> Vec<u8> {
+    encode_json(MessageType::AcceptedSocketOwnership, result)
+}
+
+pub fn encode_lifecycle_compare_and_set_request(
+    request: &LifecycleCompareAndSetRequest,
+) -> Vec<u8> {
+    encode_json(MessageType::LifecycleCas, request)
+}
+
+pub fn encode_lifecycle_compare_and_set_response(result: &LifecycleCompareAndSetResult) -> Vec<u8> {
+    encode_json(MessageType::LifecycleCas, result)
+}
+
+pub fn decode_accepted_socket_ownership_request(
+    payload: &[u8],
+) -> Option<AcceptedSocketOwnershipRequest> {
+    let request: AcceptedSocketOwnershipRequest = serde_json::from_slice(payload).ok()?;
+    request.validate().then_some(request)
+}
+
+pub fn decode_lifecycle_compare_and_set_request(
+    payload: &[u8],
+) -> Option<LifecycleCompareAndSetRequest> {
+    let request: LifecycleCompareAndSetRequest = serde_json::from_slice(payload).ok()?;
+    request.validate().then_some(request)
 }
 
 /// Decode a size payload (rows, cols), defaulting to 24×80.

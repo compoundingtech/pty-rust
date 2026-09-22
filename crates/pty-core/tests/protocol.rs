@@ -1,10 +1,13 @@
 //! Port of the pty project's `tests/protocol.test.ts`.
 
 use pty_core::protocol::{
-    MAX_PACKET_LENGTH, MessageType, PacketReader, decode_cell, decode_exit, decode_geometry,
-    decode_size, encode_attach, encode_attach_with_cell, encode_data, encode_detach, encode_exit,
-    encode_geometry, encode_packet, encode_resize, encode_resize_with_cell, encode_screen,
-    encode_status, encode_status_response,
+    AcceptedSocketOwnershipRequest, LifecycleCompareAndSetRequest, MAX_PACKET_LENGTH, MessageType,
+    PacketReader, TcpConnectionTuple, decode_accepted_socket_ownership_request, decode_cell,
+    decode_exit, decode_geometry, decode_lifecycle_compare_and_set_request, decode_size,
+    encode_accepted_socket_ownership_request, encode_attach, encode_attach_with_cell, encode_data,
+    encode_detach, encode_exit, encode_geometry, encode_lifecycle_compare_and_set_request,
+    encode_packet, encode_resize, encode_resize_with_cell, encode_screen, encode_status,
+    encode_status_response,
 };
 use pty_core::stats::{ClientStats, ConnectionStats, Constrains, StatsResult};
 
@@ -62,7 +65,9 @@ fn attach_can_declare_a_cell_size_without_changing_the_size_it_carries() {
 #[test]
 fn resize_can_declare_a_cell_size() {
     let mut reader = PacketReader::new();
-    let packets = reader.feed(&encode_resize_with_cell(30, 100, 7, 15)).unwrap();
+    let packets = reader
+        .feed(&encode_resize_with_cell(30, 100, 7, 15))
+        .unwrap();
     assert_eq!(packets[0].type_, MessageType::Resize);
     assert_eq!(decode_size(&packets[0].payload), (30, 100));
     assert_eq!(decode_cell(&packets[0].payload), Some((7, 15)));
@@ -346,4 +351,43 @@ fn accepts_legacy_status_without_connection_details() {
         r#"{"total":2,"attached":2,"readOnly":0}"#
     );
     assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+}
+
+#[test]
+fn readiness_requests_use_node_wire_tags_and_json() {
+    let ownership = AcceptedSocketOwnershipRequest {
+        expected_generation: "generation-a".to_string(),
+        connection: TcpConnectionTuple {
+            local_address: "127.0.0.1".to_string(),
+            local_port: 51_000,
+            remote_address: "127.0.0.1".to_string(),
+            remote_port: 3_000,
+        },
+    };
+    let bytes = encode_accepted_socket_ownership_request(&ownership);
+    assert_eq!(bytes[0], 8);
+    let mut reader = PacketReader::new();
+    let packet = reader.feed(&bytes).unwrap().remove(0);
+    assert_eq!(
+        decode_accepted_socket_ownership_request(&packet.payload),
+        Some(ownership)
+    );
+    assert_eq!(
+        std::str::from_utf8(&packet.payload).unwrap(),
+        r#"{"expectedGeneration":"generation-a","connection":{"localAddress":"127.0.0.1","localPort":51000,"remoteAddress":"127.0.0.1","remotePort":3000}}"#
+    );
+
+    let cas = LifecycleCompareAndSetRequest {
+        expected_generation: "generation-a".to_string(),
+        tag: "run.lifecycle".to_string(),
+        expected_value: "starting".to_string(),
+        value: "ready".to_string(),
+    };
+    let bytes = encode_lifecycle_compare_and_set_request(&cas);
+    assert_eq!(bytes[0], 9);
+    let packet = PacketReader::new().feed(&bytes).unwrap().remove(0);
+    assert_eq!(
+        decode_lifecycle_compare_and_set_request(&packet.payload),
+        Some(cas)
+    );
 }

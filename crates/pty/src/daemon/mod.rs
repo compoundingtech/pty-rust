@@ -16,6 +16,7 @@ pub mod env;
 pub mod events;
 pub mod geometry;
 pub mod lifecycle;
+mod ownership;
 pub mod status;
 pub mod tree;
 

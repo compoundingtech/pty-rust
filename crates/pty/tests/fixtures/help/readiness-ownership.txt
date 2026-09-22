@@ -1,0 +1,7 @@
+Usage: pty readiness ownership --id <stable-id>
+
+Read one exact-generation held TCP 4-tuple from stdin and emit one tagged
+Owned, NotOwned, or Unavailable JSON result.
+
+Example:
+  pty readiness ownership --id a1b2c3d4 < ownership.json

@@ -12,7 +12,10 @@ mod daemon_support;
 use std::time::{Duration, Instant};
 
 use daemon_support::*;
-use pty_core::protocol::MessageType::*;
+use pty_core::protocol::{
+    LifecycleCompareAndSetRequest, LifecycleCompareAndSetResult, MessageType::*,
+    encode_lifecycle_compare_and_set_request,
+};
 use serde_json::json;
 
 const T: Duration = Duration::from_secs(8);
@@ -723,4 +726,136 @@ fn node_attach_stream_against_the_rust_daemon() {
     assert!(types[2..types.len() - 1].iter().all(|t| *t == Data), "{types:?}");
     assert!(String::from_utf8_lossy(&packets[1].payload).contains("LAUNCHER_READY"));
     assert_eq!(pty_core::protocol::decode_exit(&packets.last().unwrap().payload), 3);
+}
+
+#[test]
+fn untimed_startup_lifecycle_uses_real_generation_and_equal_clients_can_cas() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-untimed");
+    let mut cfg = config(&name, "/bin/sh", &["-c", "sleep 30"]);
+    cfg["startupLease"] = json!({"lifecycleTag": "run.lifecycle"});
+    let mut daemon = Daemon::start(&root, cfg);
+    assert!(wait_until(T, || {
+        daemon
+            .meta()
+            .and_then(|metadata| metadata["tags"]["run.lifecycle"].as_str().map(str::to_string))
+            .is_some()
+    }));
+    let metadata = daemon.meta().unwrap();
+    let generation = metadata["generation"].as_str().unwrap().to_string();
+    let starting = metadata["tags"]["run.lifecycle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let starting_json: serde_json::Value = serde_json::from_str(&starting).unwrap();
+    assert_eq!(starting_json["_tag"], "starting");
+    assert_eq!(starting_json["generation"], generation);
+    assert!(starting_json["bootId"].is_string());
+    assert!(starting_json.get("deadlineMonotonicNs").is_none());
+
+    let mut first = daemon.connect();
+    first.send(&encode_lifecycle_compare_and_set_request(
+        &LifecycleCompareAndSetRequest {
+            expected_generation: "replacement".to_string(),
+            tag: "run.lifecycle".to_string(),
+            expected_value: starting.clone(),
+            value: "intermediate".to_string(),
+        },
+    ));
+    assert!(first.wait_type(LifecycleCas, T));
+    assert_eq!(
+        serde_json::from_slice::<LifecycleCompareAndSetResult>(
+            &first
+                .packets
+                .iter()
+                .find(|packet| packet.type_ == LifecycleCas)
+                .unwrap()
+                .payload
+        )
+        .unwrap(),
+        LifecycleCompareAndSetResult::GenerationMismatch
+    );
+    first.clear();
+    first.send(&encode_lifecycle_compare_and_set_request(
+        &LifecycleCompareAndSetRequest {
+            expected_generation: generation.clone(),
+            tag: "run.lifecycle".to_string(),
+            expected_value: starting,
+            value: "intermediate".to_string(),
+        },
+    ));
+    assert!(first.wait_type(LifecycleCas, T));
+    assert!(matches!(
+        serde_json::from_slice::<LifecycleCompareAndSetResult>(
+            &first
+                .packets
+                .iter()
+                .find(|packet| packet.type_ == LifecycleCas)
+                .unwrap()
+                .payload
+        )
+        .unwrap(),
+        LifecycleCompareAndSetResult::Changed { .. }
+    ));
+
+    let ready = json!({"_tag":"ready","generation":generation}).to_string();
+    let mut second = daemon.connect();
+    second.send(&encode_lifecycle_compare_and_set_request(
+        &LifecycleCompareAndSetRequest {
+            expected_generation: generation.clone(),
+            tag: "run.lifecycle".to_string(),
+            expected_value: "intermediate".to_string(),
+            value: ready.clone(),
+        },
+    ));
+    assert!(second.wait_type(LifecycleCas, T));
+    assert_eq!(
+        serde_json::from_slice::<LifecycleCompareAndSetResult>(
+            &second
+                .packets
+                .iter()
+                .find(|packet| packet.type_ == LifecycleCas)
+                .unwrap()
+                .payload
+        )
+        .unwrap(),
+        LifecycleCompareAndSetResult::Changed {
+            value: ready.clone()
+        }
+    );
+    assert_eq!(
+        daemon.meta().unwrap()["tags"]["run.lifecycle"],
+        ready
+    );
+    daemon.signal(libc::SIGTERM);
+    assert!(daemon.wait_exit(T).is_some());
+}
+
+#[test]
+fn timed_startup_lifecycle_publishes_deadline_then_expires_terminally() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-timed");
+    let mut cfg = config(&name, "/bin/sh", &["-c", "sleep 30"]);
+    cfg["startupLease"] =
+        json!({"timeoutMs": 300, "lifecycleTag": "run.lifecycle"});
+    let mut daemon = Daemon::start(&root, cfg);
+    assert!(wait_until(T, || {
+        daemon.meta().is_some_and(|metadata| {
+            metadata["tags"]["run.lifecycle"]
+                .as_str()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .is_some_and(|value| value["deadlineMonotonicNs"].is_string())
+        })
+    }));
+    assert_eq!(daemon.wait_exit(T), Some(124));
+    let metadata = daemon.meta().unwrap();
+    let terminal: serde_json::Value =
+        serde_json::from_str(metadata["tags"]["run.lifecycle"].as_str().unwrap()).unwrap();
+    assert_eq!(terminal["_tag"], "terminal");
+    assert_eq!(terminal["generation"], metadata["generation"]);
+    assert_eq!(terminal["cause"], "deadline");
 }

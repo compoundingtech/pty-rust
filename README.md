@@ -20,10 +20,9 @@ box — and has been since 2026-09-02. That is the honest measure of "does it
 work": it is what those machines run, not a demo.
 
 **The documented command surface matches the Node tool exactly.** Both
-`pty help` outputs are 122 lines and every command appears in both. Three are
-deferred rather than missing — `pty recover`, `pty evidence` and `pty test`
-keep their help text and print
-`pty <cmd>: not available in this build. See docs/parity.md.`
+`pty help` and `pty --help` document the same command surface. Two are
+deferred rather than missing — `pty recover` and `pty test` keep their help
+text and print `pty <cmd>: not available in this build. See docs/parity.md.`
 
 **1357 tests pass**, including a conformance suite that runs against *either*
 binary. That is the part worth knowing: the two implementations are held to the
@@ -240,10 +239,10 @@ Both did what was asked, so both exit 0.
 
 ### Commands not in this build
 
-Three Node commands are deferred (see [docs/parity.md §12](docs/parity.md#12-candidates-to-leave-off)
-for the reasoning): `pty recover`, `pty evidence`, and `pty test`. Their help
-texts are kept verbatim so `--help` still describes them, but running them
-prints `pty <cmd>: not available in this build. See docs/parity.md.` and exits 1.
+Two Node commands are deferred (see [docs/parity.md §12](docs/parity.md#12-candidates-to-leave-off)
+for the reasoning): `pty recover` and `pty test`. Their help texts are kept
+verbatim so `--help` still describes them, but running them prints
+`pty <cmd>: not available in this build. See docs/parity.md.` and exits 1.
 
 ### Lock compatibility boundary
 

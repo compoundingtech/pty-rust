@@ -123,6 +123,24 @@ fn publication_writes_node_key_order_and_presence_rules() {
     assert!(text.ends_with("\n}"), "{text}");
 }
 
+#[test]
+fn daemon_start_identity_accepts_additive_rust_and_node_recovery_shapes() {
+    let rust = SessionMetadata {
+        daemon_start_token: Some("linux:rust".into()),
+        ..Default::default()
+    };
+    assert_eq!(rust.daemon_start_token(), Some("linux:rust"));
+
+    let node = SessionMetadata {
+        recovery: Some(json!({
+            "protocol": 1,
+            "processStartToken": "linux:node"
+        })),
+        ..Default::default()
+    };
+    assert_eq!(node.daemon_start_token(), Some("linux:node"));
+}
+
 /// node: tests/metadata-events.test.ts:169-202
 #[test]
 fn unknown_fields_and_launch_settings_survive_a_patch() {

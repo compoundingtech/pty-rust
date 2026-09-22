@@ -7,6 +7,7 @@ use pty_core::client;
 use pty_core::registry::{self, EnvMap, TagMap};
 
 use super::{CliResult, SpawnParams};
+use pty_lifecycle::StartupLeaseOptions;
 
 /// `pty run [--id X] [--name X] [--cwd D] [--tag k=v] [--env K=V]
 /// [--unset-env K] [--isolate-env] [--rows R] [--cols C] -- <cmd...>`
@@ -25,6 +26,8 @@ pub fn run(args: &[String]) -> CliResult {
     let mut tags = TagMap::new();
     let mut extra_env = EnvMap::new();
     let mut unset_env: Vec<String> = Vec::new();
+    let mut startup_timeout_ms: Option<u64> = None;
+    let mut lifecycle_tag: Option<String> = None;
     let mut i = 0;
     let mut command: Vec<String> = Vec::new();
     while i < args.len() {
@@ -62,6 +65,23 @@ pub fn run(args: &[String]) -> CliResult {
             "-e" | "--ephemeral" => {
                 ephemeral = true;
                 i += 1;
+            }
+            "--startup-timeout-ms" => {
+                let value = args.get(i + 1).and_then(|value| value.parse::<u64>().ok());
+                if value.is_none_or(|value| value == 0 || value > 9_007_199_254_740_991) {
+                    eprintln!("pty run: --startup-timeout-ms requires a positive integer.");
+                    return Ok(1);
+                }
+                startup_timeout_ms = value;
+                i += 2;
+            }
+            "--lifecycle-tag" => {
+                let Some(value) = args.get(i + 1).filter(|value| !value.is_empty()) else {
+                    eprintln!("pty run: --lifecycle-tag requires a non-empty key.");
+                    return Ok(1);
+                };
+                lifecycle_tag = Some(value.clone());
+                i += 2;
             }
             "--tag" => {
                 match args.get(i + 1).and_then(|kv| kv.split_once('=')) {
@@ -131,8 +151,18 @@ pub fn run(args: &[String]) -> CliResult {
             }
         }
     }
+    if startup_timeout_ms.is_some() && lifecycle_tag.is_none() {
+        eprintln!("pty run: --startup-timeout-ms requires --lifecycle-tag.");
+        return Ok(1);
+    }
+    if lifecycle_tag.as_deref() == Some("") {
+        eprintln!("pty run: --lifecycle-tag must not be empty.");
+        return Ok(1);
+    }
     if command.is_empty() {
-        eprintln!("Usage: pty run [--id <id>] [--name <displayName>] [-d] [-a] -- <command> [args...]");
+        eprintln!(
+            "Usage: pty run [--id <id>] [--name <displayName>] [-d] [-a] -- <command> [args...]"
+        );
         return Ok(1);
     }
 
@@ -141,14 +171,14 @@ pub fn run(args: &[String]) -> CliResult {
     // `-d` or `--force` explicitly asks for a real nested session.
     if !background
         && !force
-        && std::env::var("PTY_SESSION").map(|v| !v.is_empty()).unwrap_or(false)
+        && std::env::var("PTY_SESSION")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
     {
         // A plain nested `run` executes in place. `-a` is narrower: it asked
         // to attach if the target is already running, and attaching would
         // nest a client, so that case refuses instead.
-        if attach_existing
-            && let Some(reference) = id.as_ref().or(display_name.as_ref())
-        {
+        if attach_existing && let Some(reference) = id.as_ref().or(display_name.as_ref()) {
             let existing = match &id {
                 Some(explicit) => registry::get_session_by_name(explicit),
                 None => registry::get_session(reference).ok().flatten(),
@@ -232,6 +262,10 @@ pub fn run(args: &[String]) -> CliResult {
     params.isolate_env = isolate_env;
     params.extra_env = extra_env;
     params.unset_env = unset_env;
+    params.startup_lease = lifecycle_tag.map(|lifecycle_tag| StartupLeaseOptions {
+        timeout_ms: startup_timeout_ms,
+        lifecycle_tag,
+    });
 
     create_or_attach(&name, params, cwd.is_some(), background, attach_existing)
 }
@@ -366,9 +400,7 @@ fn create_or_attach(
             println!("Session \"{name}\" already running, attaching.");
             return Ok(super::attach::do_attach(name, None));
         }
-        eprintln!(
-            "Session \"{name}\" is already running. Use \"pty attach {name}\" to connect."
-        );
+        eprintln!("Session \"{name}\" is already running. Use \"pty attach {name}\" to connect.");
         return Ok(1);
     }
 

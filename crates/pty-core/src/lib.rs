@@ -31,3 +31,4 @@ pub mod queries;
 pub mod registry;
 pub mod spawn;
 pub mod stats;
+pub mod unix_peer;
