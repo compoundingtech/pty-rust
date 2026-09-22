@@ -54,6 +54,9 @@ fn inspect_with(
         Err(reason) => return unavailable(reason),
     };
     let owned_pid = match observed {
+        AcceptedSocketOwnershipResult::NotOwned if before != middle => {
+            return unavailable("process-tree-changed");
+        }
         AcceptedSocketOwnershipResult::NotOwned => return observed,
         AcceptedSocketOwnershipResult::Owned { pid } => pid,
         AcceptedSocketOwnershipResult::Unavailable { .. } => unreachable!(),
@@ -467,6 +470,44 @@ mod tests {
             Path::new("/proc"),
         );
         assert_eq!(result, AcceptedSocketOwnershipResult::Owned { pid });
+    }
+
+    #[test]
+    fn new_descendant_during_negative_lookup_is_not_definitive() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let server_address = listener.local_addr().unwrap();
+        let tuple = TcpConnectionTuple {
+            local_address: server_address.ip().to_string(),
+            local_port: 1,
+            remote_address: server_address.ip().to_string(),
+            remote_port: server_address.port(),
+        };
+        let reads = AtomicUsize::new(0);
+        let pid = std::process::id() as i32;
+        let helper_pid = pid + 1_000_000;
+        let result = inspect_with(
+            pid,
+            &LiveIdentity::new("owner"),
+            &tuple,
+            || {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    pty_core::proctable::table_from_shape(&format!("{pid} 1 {pid} S owner"))
+                } else {
+                    pty_core::proctable::table_from_shape(&format!(
+                        "{pid} 1 {pid} S owner\n{helper_pid} {pid} {pid} S helper"
+                    ))
+                }
+            },
+            Path::new("/proc"),
+        );
+        assert_eq!(
+            result,
+            AcceptedSocketOwnershipResult::Unavailable {
+                reason: "process-tree-changed".to_string()
+            }
+        );
     }
 
     #[test]
