@@ -53,18 +53,18 @@ fn inspect_with(
         Ok(tree) => tree,
         Err(reason) => return unavailable(reason),
     };
-    if before != middle {
-        return unavailable("process-tree-changed");
-    }
     let owned_pid = match observed {
         AcceptedSocketOwnershipResult::NotOwned => return observed,
         AcceptedSocketOwnershipResult::Owned { pid } => pid,
         AcceptedSocketOwnershipResult::Unavailable { .. } => unreachable!(),
     };
-    if !before.iter().any(|entry| entry.pid == owned_pid) {
+    let Some(owner) = before.iter().find(|entry| entry.pid == owned_pid) else {
         return unavailable("backend-returned-non-descendant");
+    };
+    if !middle.contains(owner) {
+        return unavailable("process-tree-changed");
     }
-    let confirmed = inspect_backend(&pids, tuple, proc_root);
+    let confirmed = inspect_backend(&[owned_pid], tuple, proc_root);
     if confirmed != (AcceptedSocketOwnershipResult::Owned { pid: owned_pid }) {
         return unavailable("socket-ownership-changed");
     }
@@ -72,7 +72,7 @@ fn inspect_with(
         Ok(tree) => tree,
         Err(reason) => return unavailable(reason),
     };
-    if middle == after {
+    if after.contains(owner) {
         confirmed
     } else {
         unavailable("process-tree-changed")
@@ -429,6 +429,44 @@ mod tests {
             ),
             AcceptedSocketOwnershipResult::Owned { pid }
         );
+    }
+
+    #[test]
+    fn unrelated_descendant_churn_keeps_a_stable_socket_owner_valid() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let server_address = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(server_address).unwrap();
+        let client_address = client.local_addr().unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
+        let tuple = TcpConnectionTuple {
+            local_address: client_address.ip().to_string(),
+            local_port: client_address.port(),
+            remote_address: server_address.ip().to_string(),
+            remote_port: server_address.port(),
+        };
+        let reads = AtomicUsize::new(0);
+        let pid = std::process::id() as i32;
+        let helper_pid = pid + 1_000_000;
+        let result = inspect_with(
+            pid,
+            &LiveIdentity::new("owner"),
+            &tuple,
+            || {
+                if reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                    pty_core::proctable::table_from_shape(&format!(
+                        "{pid} 1 {pid} S owner\n{helper_pid} {pid} {pid} S helper"
+                    ))
+                } else {
+                    pty_core::proctable::table_from_shape(&format!(
+                        "{pid} 1 {pid} S owner"
+                    ))
+                }
+            },
+            Path::new("/proc"),
+        );
+        assert_eq!(result, AcceptedSocketOwnershipResult::Owned { pid });
     }
 
     #[test]
