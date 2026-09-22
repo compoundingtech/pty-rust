@@ -106,6 +106,8 @@ pub enum Lifecycle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     Data(Vec<u8>),
+    /// The PTY master reached EOF. No more [`SessionEvent::Data`] follows.
+    OutputClosed,
     Lifecycle(Lifecycle),
     Geometry(PtySize),
 }
@@ -315,6 +317,7 @@ fn actor(
     rx: Receiver<Command>,
 ) {
     let mut lifecycle = Lifecycle::Running;
+    let mut output_closed = false;
     let mut attachments: Vec<Sender<SessionEvent>> = initial_attachment.into_iter().collect();
     broadcast(&mut attachments, SessionEvent::Lifecycle(lifecycle));
     while let Ok(command) = rx.recv() {
@@ -322,6 +325,9 @@ fn actor(
             Command::Attach { session: requested, events, reply } => {
                 let result = check(&requested, &session).and_then(|_| {
                     let _ = events.send(SessionEvent::Lifecycle(lifecycle));
+                    if output_closed {
+                        let _ = events.send(SessionEvent::OutputClosed);
+                    }
                     attachments.push(events);
                     Ok(())
                 });
@@ -349,7 +355,10 @@ fn actor(
                 lifecycle = Lifecycle::Exited(status);
                 broadcast(&mut attachments, SessionEvent::Lifecycle(lifecycle));
             }
-            Command::ReaderClosed => {}
+            Command::ReaderClosed => {
+                output_closed = true;
+                broadcast(&mut attachments, SessionEvent::OutputClosed);
+            }
             Command::OwnerLost => {
                 if matches!(lifecycle, Lifecycle::Running) {
                     lifecycle = Lifecycle::OwnerLost;
@@ -472,14 +481,18 @@ mod tests {
     }
 
     #[test]
-    fn one_reaper_publishes_the_child_exit() {
+    fn one_reaper_publishes_output_close_and_child_exit() {
         let (session, owner) = owner("reaper", "true");
         let (_, stream) = owner.attach(&session).unwrap();
         assert_eq!(stream.recv_timeout(Duration::from_secs(2)).unwrap(), SessionEvent::Lifecycle(Lifecycle::Running));
-        assert!(matches!(
-            stream.recv_timeout(Duration::from_secs(2)).unwrap(),
-            SessionEvent::Lifecycle(Lifecycle::Exited(ExitStatus { code: Some(0), signal: None }))
-        ));
+        let first = stream.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = stream.recv_timeout(Duration::from_secs(2)).unwrap();
+        let events = [first, second];
+        assert!(events.contains(&SessionEvent::OutputClosed));
+        assert!(events.contains(&SessionEvent::Lifecycle(Lifecycle::Exited(ExitStatus {
+            code: Some(0),
+            signal: None,
+        }))));
     }
 
     #[test]

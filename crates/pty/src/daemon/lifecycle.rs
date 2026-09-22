@@ -369,23 +369,37 @@ fn terminal_actor(rows: u16, cols: u16) -> TerminalActor {
 }
 
 fn spawn_session_bridge(stream: pty_spawn::substrate::AttachStream, tx: Sender<Msg>) {
-    std::thread::spawn(move || loop {
-        match stream.recv() {
-            Ok(SessionEvent::Data(bytes)) => {
-                if tx.send(Msg::PtyData(bytes)).is_err() {
+    std::thread::spawn(move || {
+        let mut exited = false;
+        let mut output_closed = false;
+        loop {
+            match stream.recv() {
+                Ok(SessionEvent::Data(bytes)) => {
+                    if tx.send(Msg::PtyData(bytes)).is_err() {
+                        return;
+                    }
+                }
+                Ok(SessionEvent::OutputClosed) => {
+                    output_closed = true;
+                    if tx.send(Msg::PtyEof).is_err() || exited {
+                        return;
+                    }
+                }
+                Ok(SessionEvent::Lifecycle(Lifecycle::Running)) => {}
+                Ok(SessionEvent::Lifecycle(Lifecycle::Exited(status))) => {
+                    exited = true;
+                    if tx.send(Msg::ChildExited(status)).is_err() || output_closed {
+                        return;
+                    }
+                }
+                Ok(SessionEvent::Lifecycle(Lifecycle::OwnerLost)) | Err(_) => {
+                    if !output_closed {
+                        let _ = tx.send(Msg::PtyEof);
+                    }
                     return;
                 }
+                Ok(SessionEvent::Geometry(_)) => {}
             }
-            Ok(SessionEvent::Lifecycle(Lifecycle::Running)) => {}
-            Ok(SessionEvent::Lifecycle(Lifecycle::Exited(status))) => {
-                let _ = tx.send(Msg::ChildExited(status));
-                return;
-            }
-            Ok(SessionEvent::Lifecycle(Lifecycle::OwnerLost)) | Err(_) => {
-                let _ = tx.send(Msg::PtyEof);
-                return;
-            }
-            Ok(SessionEvent::Geometry(_)) => {}
         }
     });
 }
