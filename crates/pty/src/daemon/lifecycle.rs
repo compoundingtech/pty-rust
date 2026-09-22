@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -235,6 +235,20 @@ fn pid_alive(pid: i32) -> bool {
     registry::pid_alive(pid)
 }
 
+fn set_fd_cloexec(fd: RawFd) -> bool {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    flags >= 0
+        && unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == 0
+}
+
+fn should_challenge_capability(
+    control_capability: bool,
+    capability_fd_present: bool,
+    peer_authorized: bool,
+) -> bool {
+    control_capability && capability_fd_present && peer_authorized
+}
+
 fn signal_child(identity: Option<&ProcessIdentity>, signal: i32) {
     if let Some(identity) = identity {
         signal_process_identities(std::slice::from_ref(identity), signal);
@@ -328,6 +342,21 @@ pub(crate) fn run(cfg: DaemonConfig, readiness: super::ReadyNotifier) -> Result<
         events.append(Event::session_respawn(&name));
     }
     events.flush();
+    let capability_stream = std::env::var("PTY_READINESS_CAP_FD")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|&fd| fd >= 0)
+        .map(|fd| unsafe { UnixStream::from_raw_fd(fd) });
+    if let Some(stream) = &capability_stream {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+        // The descriptor must survive the daemon exec, but never cross the
+        // daemon's subsequent managed-child exec boundary.
+        if !set_fd_cloexec(stream.as_raw_fd()) {
+            return Err("Failed to mark readiness capability descriptor CLOEXEC".to_string());
+        }
+    }
+
 
     // The child: `/bin/sh -c 'exec "$@"' sh <command> <args...>`, so PATH
     // lookups, shebangs and symlinks behave like a shell's.
@@ -365,20 +394,6 @@ pub(crate) fn run(cfg: DaemonConfig, readiness: super::ReadyNotifier) -> Result<
     };
     drop(pair.slave);
     let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
-    let capability_stream = std::env::var("PTY_READINESS_CAP_FD")
-        .ok()
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|&fd| fd >= 0)
-        .map(|fd| unsafe { UnixStream::from_raw_fd(fd) });
-    if let Some(stream) = &capability_stream {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-        // The descriptor must survive the daemon exec, but never cross the
-        // daemon's subsequent managed-child exec boundary.
-        unsafe {
-            libc::fcntl(stream.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-        }
-    }
     let child_identity = capture_process_identity(child_pid);
     let daemon_identity = capture_process_identity(std::process::id() as i32);
     // The child is reaped by the waiter thread below, never through this handle.
@@ -773,11 +788,6 @@ impl Daemon {
                 peer,
                 capability_fd,
             } => {
-                let capability_authorized = if self.cfg.control_capability {
-                    capability_fd.is_some() && self.echo_capability()
-                } else {
-                    false
-                };
                 self.clients.insert(
                     id,
                     Client::new(
@@ -785,9 +795,18 @@ impl Daemon {
                         self.actor.rows(),
                         self.actor.cols(),
                         peer,
-                        capability_authorized,
+                        false,
                     ),
                 );
+                if should_challenge_capability(
+                    self.cfg.control_capability,
+                    capability_fd.is_some(),
+                    self.control_peer_identity_authorized(id),
+                ) && self.echo_capability()
+                    && let Some(client) = self.clients.get_mut(&id)
+                {
+                    client.capability_authorized = true;
+                }
             }
             Msg::Packet { id, packet } => self.on_packet(id, packet),
             Msg::Closed { id } => self.on_closed(id),
@@ -891,15 +910,10 @@ impl Daemon {
         stream.read_exact(&mut response).is_ok() && response == challenge
     }
 
-    pub(crate) fn control_peer_authorized(&self, id: u64) -> bool {
+    fn control_peer_identity_authorized(&self, id: u64) -> bool {
         let Some(client) = self.clients.get(&id) else {
             return false;
         };
-        if (self.cfg.control_capability && !client.capability_authorized)
-            || (!self.cfg.control_capability && self.cfg.control_authority.is_none())
-        {
-            return false;
-        }
         let Some(peer) = client.peer.as_ref() else {
             return false;
         };
@@ -929,6 +943,17 @@ impl Daemon {
         )
     }
 
+    pub(crate) fn control_peer_authorized(&self, id: u64) -> bool {
+        let Some(client) = self.clients.get(&id) else {
+            return false;
+        };
+        if (self.cfg.control_capability && !client.capability_authorized)
+            || (!self.cfg.control_capability && self.cfg.control_authority.is_none())
+        {
+            return false;
+        }
+        self.control_peer_identity_authorized(id)
+    }
     pub(crate) fn reject_unauthorized_ownership(&self, id: u64) {
         if let Some(client) = self.clients.get(&id) {
             client.send(encode_accepted_socket_ownership_response(
@@ -1655,6 +1680,25 @@ mod tests {
         let g = new_generation();
         assert_eq!(g.len(), 32);
         assert!(g.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn readiness_capability_descriptor_is_cloexec_before_child_spawn() {
+        let (stream, _peer) = UnixStream::pair().expect("socketpair");
+        let fd = stream.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) }, 0);
+        assert!(set_fd_cloexec(fd));
+        let final_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(final_flags & libc::FD_CLOEXEC, 0);
+    }
+
+    #[test]
+    fn unauthorized_capability_peers_are_not_challenged() {
+        assert!(!should_challenge_capability(true, true, false));
+        assert!(!should_challenge_capability(true, false, true));
+        assert!(should_challenge_capability(true, true, true));
     }
 }
 

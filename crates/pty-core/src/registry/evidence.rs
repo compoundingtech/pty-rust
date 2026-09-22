@@ -85,6 +85,7 @@ pub enum RemoveSessionGenerationResult {
 struct EvidenceMetadata {
     generation: String,
     daemon_pid: Option<i32>,
+    daemon_start_token: Option<String>,
     exited_at: Option<String>,
     exit_code: Option<i32>,
     last_lines: Option<Vec<String>>,
@@ -143,6 +144,17 @@ fn read_evidence_metadata(name: &str) -> EvidenceMetadataRead {
             _ => return EvidenceMetadataRead::Invalid,
         },
     };
+    let daemon_start_token = match record.get("daemonStartToken") {
+        Some(Value::String(token)) if !token.is_empty() => Some(token.to_string()),
+        Some(_) => return EvidenceMetadataRead::Invalid,
+        None => record
+            .get("recovery")
+            .and_then(Value::as_object)
+            .and_then(|recovery| recovery.get("processStartToken"))
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string),
+    };
     let exited_at = record.get("exitedAt");
     let exit_code = record.get("exitCode");
     if exited_at.is_some() != exit_code.is_some() {
@@ -178,6 +190,7 @@ fn read_evidence_metadata(name: &str) -> EvidenceMetadataRead {
     EvidenceMetadataRead::Valid(EvidenceMetadata {
         generation: generation.to_string(),
         daemon_pid,
+        daemon_start_token,
         exited_at,
         exit_code,
         last_lines,
@@ -185,8 +198,14 @@ fn read_evidence_metadata(name: &str) -> EvidenceMetadataRead {
 }
 
 fn generation_is_alive(name: &str, metadata: &EvidenceMetadata) -> bool {
-    read_session_pid(name).is_some_and(pid_alive)
-        || metadata.daemon_pid.is_some_and(pid_alive)
+    let daemon_pid_is_alive = |pid| {
+        metadata.daemon_start_token.as_deref().is_some_and(|token| {
+            pid_alive(pid)
+                && super::list::read_process_start_token(pid).as_deref() == Some(token)
+        })
+    };
+    read_session_pid(name).is_some_and(daemon_pid_is_alive)
+        || metadata.daemon_pid.is_some_and(daemon_pid_is_alive)
         || (socket_path(name).exists() && socket_reachable(&socket_path(name)))
 }
 

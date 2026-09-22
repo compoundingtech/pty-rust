@@ -46,6 +46,21 @@ fn snapshot_preserves_bounded_combined_exit_evidence() {
 }
 
 #[test]
+fn snapshot_ignores_a_live_pid_from_another_daemon_generation() {
+    root();
+    let name = unique_name("evidence-pid-reuse");
+    let mut metadata = terminal_metadata("generation-a");
+    metadata.daemon_pid = Some(std::process::id() as i32);
+    metadata.daemon_start_token = Some("stale-generation-token".to_string());
+    registry::write_metadata_publication(&name, &metadata).unwrap();
+
+    assert!(matches!(
+        registry::get_session_exit_evidence(&name),
+        SessionExitEvidenceResult::Snapshot { .. }
+    ));
+}
+
+#[test]
 fn removal_refuses_a_replacement_generation_then_removes_the_exact_one() {
     root();
     let name = unique_name("evidence-generation");
