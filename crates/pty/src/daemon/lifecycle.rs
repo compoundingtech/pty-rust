@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn substrate_adapter_clients_share_lifecycle_authority() {
+    fn substrate_adapter_clients_share_lifecycle_state() {
         let pair = open(24, 80).unwrap();
         let session = SessionRef::new("/tmp", "daemon-adapter-lifecycle", "generation-a");
         let child = pair.slave.spawn_command(shell_exec("sleep", &["30".to_string()])).unwrap();
