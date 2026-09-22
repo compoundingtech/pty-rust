@@ -128,6 +128,21 @@ fn evidence_is_dispatched_and_reports_a_tagged_semantic_result() {
     assert_eq!(out.stderr, "");
 }
 
+#[test]
+fn readiness_rejects_an_invalid_stable_id_before_socket_access() {
+    let rig = Rig::new();
+    let out = rig.run_stdin(
+        &["readiness", "ownership", "--id", "../outside"],
+        r#"{"expectedGeneration":"generation","connection":{"localAddress":"127.0.0.1","localPort":41000,"remoteAddress":"127.0.0.1","remotePort":3000}}"#,
+    );
+    assert_eq!(out.code, 1);
+    assert_eq!(
+        out.stderr,
+        "Invalid session name \"../outside\". Names may only contain letters, numbers, dots, hyphens, and underscores.\n"
+    );
+    assert_eq!(out.stdout, "");
+}
+
 /// node: tests/nesting-prevention.test.ts:213-241 — the interactive picker
 /// refuses to open inside a session unless `--force`.
 #[test]

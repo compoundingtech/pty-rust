@@ -1316,8 +1316,7 @@ pub fn write_fake_metadata(dir: &Path, name: &str, meta: FakeMeta) {
     std::fs::write(dir.join(format!("{name}.json")), Value::Object(m).to_string()).unwrap();
 }
 
-/// The GEOMETRY wire type (10), which pty-core's protocol enum keeps as an
-/// unknown byte.
+/// The GEOMETRY wire type (10).
 pub const GEOMETRY: MessageType = MessageType::Geometry;
 
 /// A readable name for a wire type in sequence assertions.
@@ -1331,6 +1330,8 @@ pub fn type_name(t: MessageType) -> &'static str {
         MessageType::Screen => "SCREEN",
         MessageType::Peek => "PEEK",
         MessageType::Status => "STATUS",
+        MessageType::AcceptedSocketOwnership => "ACCEPTED_SOCKET_OWNERSHIP",
+        MessageType::LifecycleCas => "LIFECYCLE_CAS",
         MessageType::Geometry => "GEOMETRY",
         MessageType::Unknown(_) => "UNKNOWN",
     }

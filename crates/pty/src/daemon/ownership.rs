@@ -234,6 +234,11 @@ fn inspect_linux(
             };
             let target = match std::fs::read_link(fd.path()) {
                 Ok(target) => target,
+                // Descriptor tables are live: an unrelated descriptor may
+                // close after readdir returned its name. The vanished entry
+                // cannot own the still-established tuple, so skip it while
+                // retaining fail-closed handling for every other read error.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => return unavailable(format!("fd-table-unreadable:{pid}")),
             };
             let target = target.to_string_lossy();

@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 
 use pty_core::client::{compare_and_set_lifecycle, query_accepted_socket_ownership};
 use pty_core::protocol::{AcceptedSocketOwnershipRequest, LifecycleCompareAndSetRequest};
+use pty_core::registry::validate_name;
 use super::{CliError, CliResult};
 
 pub fn run(args: &[String]) -> CliResult {
@@ -51,6 +52,7 @@ pub fn run(args: &[String]) -> CliResult {
             "pty readiness {operation}: missing required --id <stable-id>."
         )));
     };
+    validate_name(&id).map_err(CliError)?;
 
     let mut input = String::new();
     std::io::stdin()
