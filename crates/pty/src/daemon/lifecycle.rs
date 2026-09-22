@@ -1036,10 +1036,12 @@ mod tests {
         }
 
         first.terminate().unwrap();
-        assert!(matches!(
-            second_stream.recv_timeout(Duration::from_secs(2)).unwrap(),
-            SessionEvent::Lifecycle(Lifecycle::Exited(_))
-        ));
+        let event = second_stream.recv_timeout(Duration::from_secs(2)).unwrap();
+        let exit = match event {
+            SessionEvent::OutputClosed => second_stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+            event => event,
+        };
+        assert!(matches!(exit, SessionEvent::Lifecycle(Lifecycle::Exited(_))));
         assert!(matches!(second.lifecycle(), Ok(Lifecycle::Exited(_))));
     }
 }
