@@ -7,3 +7,4 @@ description = "Allocate a pseudo-terminal and start a child in it. No terminal e
 
 [dependencies]
 portable-pty.workspace = true
+libc.workspace = true

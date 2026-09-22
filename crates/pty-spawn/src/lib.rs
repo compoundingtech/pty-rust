@@ -61,6 +61,13 @@ pub fn shell_exec(command: &str, args: &[String]) -> CommandBuilder {
     cmd.args(args);
     cmd
 }
+/// Typed two-plane ownership boundary for externally-owned PTYs.
+pub mod substrate;
+
+pub use substrate::{
+    AttachStream, ExitStatus, Lifecycle, SessionClient, SessionError, SessionEvent, SessionOwner,
+    SessionRef, external_owned, external_owned_pair, external_owned_pair_attached,
+};
 
 #[cfg(test)]
 mod tests {
