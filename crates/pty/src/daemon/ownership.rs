@@ -10,6 +10,17 @@ use std::path::Path;
 use pty_core::proctable::{LiveIdentity, ProcTable};
 use pty_core::protocol::{AcceptedSocketOwnershipResult, TcpConnectionTuple};
 
+// Discovery needs the complete PID topology, including unrelated rows that
+// cannot prove a live identity. Only a verified root-to-owner chain can grant
+// positive ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreeEntry {
+    pid: i32,
+    ppid: i32,
+    identity: Option<LiveIdentity>,
+    zombie: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeIdentity {
     pid: i32,
@@ -40,16 +51,22 @@ fn inspect_with(
     if let Some(reason) = validate_tuple(tuple) {
         return unavailable(reason);
     }
-    let before = match exact_tree(root_pid, root_identity, &read_table()) {
+    let before = match tree_snapshot(root_pid, root_identity, &read_table()) {
         Ok(tree) => tree,
         Err(reason) => return unavailable(reason),
     };
-    let pids: Vec<i32> = before.iter().map(|entry| entry.pid).collect();
+    let pids: Vec<i32> = before
+        .iter()
+        // A zombie has already closed every descriptor. Keep it in the
+        // topology snapshot, but never ask procfs for sockets it cannot own.
+        .filter(|entry| !entry.zombie)
+        .map(|entry| entry.pid)
+        .collect();
     let observed = inspect_backend(&pids, tuple, proc_root);
     if matches!(observed, AcceptedSocketOwnershipResult::Unavailable { .. }) {
         return observed;
     }
-    let middle = match exact_tree(root_pid, root_identity, &read_table()) {
+    let middle = match tree_snapshot(root_pid, root_identity, &read_table()) {
         Ok(tree) => tree,
         Err(reason) => return unavailable(reason),
     };
@@ -61,24 +78,27 @@ fn inspect_with(
         AcceptedSocketOwnershipResult::Owned { pid } => pid,
         AcceptedSocketOwnershipResult::Unavailable { .. } => unreachable!(),
     };
-    let Some(owner) = before.iter().find(|entry| entry.pid == owned_pid) else {
-        return unavailable("backend-returned-non-descendant");
+    let owner_chain = match verified_chain(root_pid, owned_pid, &before) {
+        Ok(chain) => chain,
+        Err(reason) => return unavailable(reason),
     };
-    if !middle.contains(owner) {
-        return unavailable("process-tree-changed");
+    match verified_chain(root_pid, owned_pid, &middle) {
+        Ok(chain) if chain == owner_chain => {}
+        Ok(_) => return unavailable("process-tree-changed"),
+        Err(reason) => return unavailable(reason),
     }
     let confirmed = inspect_backend(&[owned_pid], tuple, proc_root);
     if confirmed != (AcceptedSocketOwnershipResult::Owned { pid: owned_pid }) {
         return unavailable("socket-ownership-changed");
     }
-    let after = match exact_tree(root_pid, root_identity, &read_table()) {
+    let after = match tree_snapshot(root_pid, root_identity, &read_table()) {
         Ok(tree) => tree,
         Err(reason) => return unavailable(reason),
     };
-    if after.contains(owner) {
-        confirmed
-    } else {
-        unavailable("process-tree-changed")
+    match verified_chain(root_pid, owned_pid, &after) {
+        Ok(chain) if chain == owner_chain => confirmed,
+        Ok(_) => unavailable("process-tree-changed"),
+        Err(reason) => unavailable(reason),
     }
 }
 
@@ -112,11 +132,11 @@ fn validate_tuple(tuple: &TcpConnectionTuple) -> Option<&'static str> {
     None
 }
 
-fn exact_tree(
+fn tree_snapshot(
     root_pid: i32,
     root_identity: &LiveIdentity,
     table: &ProcTable,
-) -> Result<Vec<TreeIdentity>, String> {
+) -> Result<Vec<TreeEntry>, String> {
     if !table.is_readable() {
         return Err("process-table-unknown".to_string());
     }
@@ -134,7 +154,7 @@ fn exact_tree(
     }
     let mut queue = VecDeque::from([root_pid]);
     let mut seen = HashSet::new();
-    let mut identities = Vec::new();
+    let mut entries = Vec::new();
     while let Some(pid) = queue.pop_front() {
         if !seen.insert(pid) {
             continue;
@@ -142,17 +162,52 @@ fn exact_tree(
         let Some(row) = by_pid.get(&pid) else {
             return Err("process-tree-changed".to_string());
         };
-        if row.is_zombie() || row.identity.is_none() {
-            return Err(format!("process-identity-unavailable:{pid}"));
-        }
-        identities.push(TreeIdentity {
+        entries.push(TreeEntry {
             pid,
-            identity: row.identity.clone().expect("checked"),
+            ppid: row.ppid,
+            identity: row.identity.clone(),
+            zombie: row.is_zombie(),
         });
         queue.extend(children.get(&pid).into_iter().flatten().copied());
     }
-    identities.sort_by_key(|entry| entry.pid);
-    Ok(identities)
+    entries.sort_by_key(|entry| entry.pid);
+    Ok(entries)
+}
+
+// Reconstruct the security-relevant ancestry and require every member to be a
+// live, start-identified process. Comparing this chain around both socket
+// lookups fences owner reuse, reparenting, and root-generation changes without
+// making unrelated descendants part of the authority proof.
+fn verified_chain(
+    root_pid: i32,
+    owner_pid: i32,
+    tree: &[TreeEntry],
+) -> Result<Vec<TreeIdentity>, String> {
+    let by_pid: HashMap<i32, &TreeEntry> = tree.iter().map(|entry| (entry.pid, entry)).collect();
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pid = owner_pid;
+    loop {
+        if !seen.insert(pid) {
+            return Err("process-tree-changed".to_string());
+        }
+        let Some(entry) = by_pid.get(&pid) else {
+            return Err(if pid == owner_pid {
+                "backend-returned-non-descendant".to_string()
+            } else {
+                "process-tree-changed".to_string()
+            });
+        };
+        let Some(identity) = entry.identity.clone().filter(|_| !entry.zombie) else {
+            return Err(format!("process-identity-unavailable:{pid}"));
+        };
+        chain.push(TreeIdentity { pid, identity });
+        if pid == root_pid {
+            chain.reverse();
+            return Ok(chain);
+        }
+        pid = entry.ppid;
+    }
 }
 
 fn inspect_backend(
@@ -462,14 +517,83 @@ mod tests {
                         "{pid} 1 {pid} S owner\n{helper_pid} {pid} {pid} S helper"
                     ))
                 } else {
-                    pty_core::proctable::table_from_shape(&format!(
-                        "{pid} 1 {pid} S owner"
-                    ))
+                    pty_core::proctable::table_from_shape(&format!("{pid} 1 {pid} S owner"))
                 }
             },
             Path::new("/proc"),
         );
         assert_eq!(result, AcceptedSocketOwnershipResult::Owned { pid });
+    }
+
+    #[test]
+    fn unrelated_unverifiable_descendants_keep_a_stable_socket_owner_valid() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let server_address = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(server_address).unwrap();
+        let client_address = client.local_addr().unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
+        let tuple = TcpConnectionTuple {
+            local_address: client_address.ip().to_string(),
+            local_port: client_address.port(),
+            remote_address: server_address.ip().to_string(),
+            remote_port: server_address.port(),
+        };
+        let pid = std::process::id() as i32;
+        let zombie_pid = pid + 1_000_000;
+        let identityless_pid = pid + 2_000_000;
+        let result = inspect_with(
+            pid,
+            &LiveIdentity::new("owner"),
+            &tuple,
+            || {
+                pty_core::proctable::table_from_shape(&format!(
+                    "{pid} 1 {pid} S owner\n\
+                     {zombie_pid} {pid} {pid} Z zombie\n\
+                     {identityless_pid} {pid} {pid} S -"
+                ))
+            },
+            Path::new("/proc"),
+        );
+        assert_eq!(result, AcceptedSocketOwnershipResult::Owned { pid });
+    }
+
+    #[test]
+    fn unverifiable_socket_owner_ancestor_fails_closed() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let server_address = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(server_address).unwrap();
+        let client_address = client.local_addr().unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
+        let tuple = TcpConnectionTuple {
+            local_address: client_address.ip().to_string(),
+            local_port: client_address.port(),
+            remote_address: server_address.ip().to_string(),
+            remote_port: server_address.port(),
+        };
+        let owner_pid = std::process::id() as i32;
+        let ancestor_pid = owner_pid + 1_000_000;
+        let root_pid = owner_pid + 2_000_000;
+        for ancestor_state in ["Z ancestor", "S -"] {
+            let result = inspect_with(
+                root_pid,
+                &LiveIdentity::new("root"),
+                &tuple,
+                || {
+                    pty_core::proctable::table_from_shape(&format!(
+                        "{root_pid} 1 {root_pid} S root\n\
+                         {ancestor_pid} {root_pid} {root_pid} {ancestor_state}\n\
+                         {owner_pid} {ancestor_pid} {root_pid} S owner"
+                    ))
+                },
+                Path::new("/proc"),
+            );
+            assert_eq!(
+                result,
+                AcceptedSocketOwnershipResult::Unavailable {
+                    reason: format!("process-identity-unavailable:{ancestor_pid}")
+                }
+            );
+        }
     }
 
     #[test]
