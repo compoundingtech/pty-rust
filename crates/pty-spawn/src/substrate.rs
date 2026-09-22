@@ -46,11 +46,53 @@ pub struct ExitStatus {
 impl ExitStatus {
     fn from_portable(status: PortableExitStatus) -> Self {
         if status.success() {
-            Self { code: Some(0), signal: None }
-        } else {
-            Self { code: Some(status.exit_code() as i32), signal: None }
+            return Self { code: Some(0), signal: None };
+        }
+        let signal = status.signal().and_then(signal_number);
+        Self {
+            code: signal.is_none().then_some(status.exit_code() as i32),
+            signal,
         }
     }
+
+    #[cfg(unix)]
+    fn from_wait_status(status: i32) -> Self {
+        if libc::WIFSIGNALED(status) {
+            Self { code: None, signal: Some(libc::WTERMSIG(status)) }
+        } else if libc::WIFEXITED(status) {
+            Self { code: Some(libc::WEXITSTATUS(status)), signal: None }
+        } else {
+            Self { code: None, signal: None }
+        }
+    }
+}
+
+fn signal_number(name: &str) -> Option<i32> {
+    let name = name.strip_prefix("SIG").unwrap_or(name);
+    Some(match name {
+        "ABRT" | "Aborted" => libc::SIGABRT,
+        "ALRM" | "Alarm clock" => libc::SIGALRM,
+        "BUS" | "Bus error" => libc::SIGBUS,
+        "CHLD" => libc::SIGCHLD,
+        "CONT" => libc::SIGCONT,
+        "FPE" | "Floating point exception" => libc::SIGFPE,
+        "HUP" | "Hangup" => libc::SIGHUP,
+        "ILL" | "Illegal instruction" => libc::SIGILL,
+        "INT" | "Interrupt" => libc::SIGINT,
+        "KILL" | "Killed" => libc::SIGKILL,
+        "PIPE" | "Broken pipe" => libc::SIGPIPE,
+        "QUIT" | "Quit" => libc::SIGQUIT,
+        "SEGV" | "Segmentation fault" => libc::SIGSEGV,
+        "STOP" | "Stopped" => libc::SIGSTOP,
+        "TERM" | "Terminated" => libc::SIGTERM,
+        "TRAP" | "Trace/breakpoint trap" => libc::SIGTRAP,
+        "TSTP" | "Stopped (signal)" => libc::SIGTSTP,
+        "TTIN" => libc::SIGTTIN,
+        "TTOU" => libc::SIGTTOU,
+        "USR1" | "User defined signal 1" => libc::SIGUSR1,
+        "USR2" | "User defined signal 2" => libc::SIGUSR2,
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +174,11 @@ impl SessionClient {
 
     pub fn terminate(&self) -> Result<(), SessionError> {
         self.request(CommandKind::Terminate)
+    }
+
+    /// Ask the owner actor to send the daemon's traditional hangup.
+    pub fn hangup(&self) -> Result<(), SessionError> {
+        self.request(CommandKind::Hangup)
     }
 
     pub fn lifecycle(&self) -> Result<Lifecycle, SessionError> {
@@ -220,7 +267,7 @@ enum Command {
     OwnerLost,
 }
 
-enum CommandKind { Input(Vec<u8>), Resize(PtySize), Terminate }
+enum CommandKind { Input(Vec<u8>), Resize(PtySize), Terminate, Hangup }
 
 impl SessionOwner {
     /// Attach an equal client and its independent event stream.
@@ -267,7 +314,8 @@ fn actor(
                     Lifecycle::Running => match kind {
                         CommandKind::Input(bytes) => writer.write_all(&bytes).and_then(|_| writer.flush()).map_err(|e| SessionError::Io(e.to_string())),
                         CommandKind::Resize(size) => master.resize(size).map_err(|e| SessionError::Io(e.to_string())),
-                        CommandKind::Terminate => kill_child(child_pid).map_err(|e| SessionError::Io(e.to_string())),
+                        CommandKind::Terminate => kill_child(child_pid, libc::SIGTERM).map_err(|e| SessionError::Io(e.to_string())),
+                        CommandKind::Hangup => kill_child(child_pid, libc::SIGHUP).map_err(|e| SessionError::Io(e.to_string())),
                     },
                     Lifecycle::Exited(status) => Err(SessionError::Exited(status)),
                     Lifecycle::OwnerLost => Err(SessionError::OwnerLost),
@@ -288,7 +336,7 @@ fn actor(
                 if matches!(lifecycle, Lifecycle::Running) {
                     lifecycle = Lifecycle::OwnerLost;
                     broadcast(&mut attachments, SessionEvent::Lifecycle(lifecycle));
-                    let _ = kill_child(child_pid);
+                    let _ = kill_child(child_pid, libc::SIGTERM);
                 }
             }
             _ => {}
@@ -313,10 +361,10 @@ fn read_master(mut reader: Box<dyn Read + Send>, tx: Sender<Command>) {
     }
     let _ = tx.send(Command::ReaderClosed);
 }
-fn kill_child(pid: Option<u32>) -> io::Result<()> {
+fn kill_child(pid: Option<u32>, signal: libc::c_int) -> io::Result<()> {
     let Some(pid) = pid else { return Ok(()) };
     // SAFETY: the pid came from the child owned by this session.
-    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
     if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
@@ -325,8 +373,34 @@ fn kill_child(pid: Option<u32>) -> io::Result<()> {
 }
 
 fn reap_child(mut child: Box<dyn Child + Send + Sync>, tx: Sender<Command>) {
-    let status = child.wait().map(ExitStatus::from_portable).unwrap_or(ExitStatus { code: None, signal: None });
+    #[cfg(unix)]
+    let status = child
+        .process_id()
+        .and_then(wait_unix)
+        .or_else(|| child.wait().ok().map(ExitStatus::from_portable))
+        .unwrap_or(ExitStatus { code: None, signal: None });
+    #[cfg(not(unix))]
+    let status = child
+        .wait()
+        .map(ExitStatus::from_portable)
+        .unwrap_or(ExitStatus { code: None, signal: None });
     let _ = tx.send(Command::Reaped(status));
+}
+
+#[cfg(unix)]
+fn wait_unix(pid: u32) -> Option<ExitStatus> {
+    let mut raw = 0;
+    loop {
+        // SAFETY: pid came from the child owned by this substrate actor.
+        let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut raw, 0) };
+        if result == pid as libc::pid_t {
+            return Some(ExitStatus::from_wait_status(raw));
+        }
+        if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return None;
+    }
 }
 
 

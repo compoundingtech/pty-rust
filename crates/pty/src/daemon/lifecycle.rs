@@ -18,13 +18,13 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use portable_pty::MasterPty;
 use pty_core::events::{Event, EventWriter};
 use pty_core::protocol::{Packet, PacketReader, encode_data, encode_exit};
 use pty_core::registry::{
     self, MutateOptions, MutateStatus, SESSION_EXIT_LAST_LINES_LIMIT, SessionGenerationOwner,
     SessionMetadata, TagMap,
 };
+use pty_spawn::substrate::{ExitStatus, Lifecycle, SessionEvent, SessionOwner, SessionRef};
 use pty_terminal::{TerminalActor, serialize};
 
 use super::DaemonConfig;
@@ -40,8 +40,8 @@ use super::tree::{
 pub(crate) enum Msg {
     PtyData(Vec<u8>),
     PtyEof,
-    /// The raw `waitpid` status, `None` when the wait itself failed.
-    ChildExited(Option<i32>),
+    /// The typed child status from the substrate reaper.
+    ChildExited(ExitStatus),
     Connect {
         id: u64,
         tx: Sender<Out>,
@@ -81,8 +81,9 @@ pub(crate) struct Daemon {
     pub(crate) generation: String,
     pub(crate) cfg: DaemonConfig,
     pub(crate) actor: TerminalActor,
-    pub(crate) master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// The substrate owner is the sole PTY master reader/writer/reaper.
+    _owner: SessionOwner,
+    pub(crate) session: pty_spawn::substrate::SessionClient,
     pub(crate) child_pid: i32,
     pub(crate) clients: BTreeMap<u64, Client>,
     pub(crate) attach_counter: u64,
@@ -91,7 +92,7 @@ pub(crate) struct Daemon {
     pub(crate) exited: bool,
     pub(crate) exit_code: i32,
     pub(crate) events: EventWriter,
-    child_status: Option<Option<i32>>,
+    child_status: Option<ExitStatus>,
     pty_eof: bool,
     rx: Receiver<Msg>,
     external_kill: bool,
@@ -302,22 +303,16 @@ pub(crate) fn run(
             cfg.command
         )
     })?;
-    drop(pair.slave);
     let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
-    // The child is reaped by the waiter thread below, never through this handle.
-    std::mem::forget(child);
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("Failed to read the PTY for session \"{name}\": {e}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("Failed to write the PTY for session \"{name}\": {e}"))?;
+    let session = SessionRef::new(registry::session_dir(), name.clone(), generation.clone());
+    let owner = pty_spawn::external_owned_pair(session.clone(), pair, child)
+        .map_err(|e| format!("Failed to hand PTY to the session substrate for \"{name}\": {e}"))?;
 
     let (tx, rx) = mpsc::channel::<Msg>();
-    spawn_pty_reader(reader, tx.clone());
-    spawn_child_waiter(child_pid, tx.clone());
+    let (session_client, session_stream) = owner
+        .attach(&session)
+        .map_err(|e| format!("Failed to attach daemon actor to session \"{name}\": {e}"))?;
+    spawn_session_bridge(session_stream, tx.clone());
 
     let listener_fd = listener.as_raw_fd();
     spawn_acceptor(listener, tx.clone());
@@ -329,8 +324,8 @@ pub(crate) fn run(
         generation,
         cfg,
         actor: terminal_actor(rows, cols),
-        master: pair.master,
-        writer,
+        _owner: owner,
+        session: session_client,
         child_pid,
         clients: BTreeMap::new(),
         attach_counter: 0,
@@ -351,6 +346,7 @@ pub(crate) fn run(
         activity_persist_at: None,
         listener_fd,
     };
+
     readiness.notify();
     Ok(daemon.serve())
 }
@@ -375,43 +371,28 @@ fn terminal_actor(rows: u16, cols: u16) -> TerminalActor {
     actor
 }
 
-fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: Sender<Msg>) {
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 16384];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(Msg::PtyData(buf[..n].to_vec())).is_err() {
-                        return;
-                    }
+fn spawn_session_bridge(stream: pty_spawn::substrate::AttachStream, tx: Sender<Msg>) {
+    std::thread::spawn(move || loop {
+        match stream.recv() {
+            Ok(SessionEvent::Data(bytes)) => {
+                if tx.send(Msg::PtyData(bytes)).is_err() {
+                    return;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
             }
+            Ok(SessionEvent::Lifecycle(Lifecycle::Running)) => {}
+            Ok(SessionEvent::Lifecycle(Lifecycle::Exited(status))) => {
+                let _ = tx.send(Msg::ChildExited(status));
+                return;
+            }
+            Ok(SessionEvent::Lifecycle(Lifecycle::OwnerLost)) | Err(_) => {
+                let _ = tx.send(Msg::PtyEof);
+                return;
+            }
+            Ok(SessionEvent::Geometry(_)) => {}
         }
-        let _ = tx.send(Msg::PtyEof);
     });
 }
 
-fn spawn_child_waiter(pid: i32, tx: Sender<Msg>) {
-    std::thread::spawn(move || {
-        let mut status = 0i32;
-        loop {
-            // SAFETY: waitpid on our own child.
-            let r = unsafe { libc::waitpid(pid, &mut status, 0) };
-            if r == pid {
-                let _ = tx.send(Msg::ChildExited(Some(status)));
-                return;
-            }
-            if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            let _ = tx.send(Msg::ChildExited(None));
-            return;
-        }
-    });
-}
 
 /// Will this `accept` failure pass on its own?
 ///
@@ -588,8 +569,7 @@ impl Daemon {
         if bytes.is_empty() || self.child_status.is_some() {
             return;
         }
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        let _ = self.session.input(bytes.to_vec());
     }
 
     /// The serving loop, then the shutdown. Returns the process exit status.
@@ -755,7 +735,9 @@ impl Daemon {
     ///
     /// node: src/server.ts:571-598
     fn finalize_exit(&mut self) {
-        let (code, signal) = decode_wait_status(self.child_status.flatten());
+        let status = self.child_status.unwrap_or(ExitStatus { code: None, signal: None });
+        let signal = status.signal;
+        let code = signal.map_or(status.code.unwrap_or(-1), |signal| 128 + signal);
         self.exited = true;
         self.exit_code = code;
         self.exit_drain_deadline = None;
@@ -922,7 +904,7 @@ impl Daemon {
         }
         registry::cleanup_owned_socket(&self.name, &self.owner());
         if self.child_status.is_none() {
-            kill(self.child_pid, libc::SIGHUP);
+            let _ = self.session.hangup();
         }
         let descendant_wait = self.external_kill.then(|| {
             let ids = descendants.lock().map(|d| d.clone()).unwrap_or_default();
@@ -965,6 +947,8 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use pty_spawn::{external_owned_pair, open, shell_exec};
 
     #[test]
     fn wait_status_maps_signals_to_128_plus() {
@@ -981,6 +965,71 @@ mod tests {
         let g = new_generation();
         assert_eq!(g.len(), 32);
         assert!(g.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn substrate_adapter_fences_generation_and_forwards_owner_loss() {
+        let pair = open(24, 80).unwrap();
+        let child = pair.slave.spawn_command(shell_exec("cat", &[])).unwrap();
+        let session = SessionRef::new("/tmp", "daemon-adapter-test", "generation-a");
+        let owner = external_owned_pair(session.clone(), pair, child).unwrap();
+        let (daemon_client, daemon_stream) = owner.attach(&session).unwrap();
+        let (peer_client, peer_stream) = owner.attach(&session).unwrap();
+        let stale = SessionRef::new("/tmp", "daemon-adapter-test", "generation-b");
+        assert!(matches!(
+            owner.attach(&stale),
+            Err(pty_spawn::substrate::SessionError::StaleGeneration { .. })
+        ));
+        assert_eq!(daemon_client.session(), peer_client.session());
+        assert!(matches!(
+            peer_stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Lifecycle(Lifecycle::Running)
+        ));
+
+        let (tx, rx) = mpsc::channel();
+        spawn_session_bridge(daemon_stream, tx);
+        peer_client.input(b"equal\n".to_vec()).unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Msg::PtyData(bytes) if !bytes.is_empty()
+        ));
+        assert!(matches!(
+            peer_stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Data(bytes) if !bytes.is_empty()
+        ));
+
+        owner.lose_ownership();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Msg::PtyEof
+        ));
+        assert_eq!(
+            daemon_client.input(Vec::new()),
+            Err(pty_spawn::substrate::SessionError::OwnerLost)
+        );
+    }
+
+    #[test]
+    fn substrate_adapter_clients_share_lifecycle_authority() {
+        let pair = open(24, 80).unwrap();
+        let session = SessionRef::new("/tmp", "daemon-adapter-lifecycle", "generation-a");
+        let child = pair.slave.spawn_command(shell_exec("sleep", &["30".to_string()])).unwrap();
+        let owner = external_owned_pair(session.clone(), pair, child).unwrap();
+        let (first, first_stream) = owner.attach(&session).unwrap();
+        let (second, second_stream) = owner.attach(&session).unwrap();
+        for stream in [&first_stream, &second_stream] {
+            assert!(matches!(
+                stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+                SessionEvent::Lifecycle(Lifecycle::Running)
+            ));
+        }
+
+        first.terminate().unwrap();
+        assert!(matches!(
+            second_stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Lifecycle(Lifecycle::Exited(_))
+        ));
+        assert!(matches!(second.lifecycle(), Ok(Lifecycle::Exited(_))));
     }
 }
 

@@ -47,7 +47,7 @@ impl Daemon {
     }
 
     pub(crate) fn resize_pty(&self, rows: u16, cols: u16) {
-        let _ = self.master.resize(PtySize {
+        let _ = self.session.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
