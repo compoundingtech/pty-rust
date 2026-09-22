@@ -10,7 +10,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -195,16 +195,15 @@ fn start_owner(
 ) -> io::Result<SessionOwner> {
     let reader = master.try_clone_reader().map_err(io::Error::other)?;
     let writer = master.take_writer().map_err(io::Error::other)?;
+    let child_pid = child.process_id();
     let (tx, rx) = mpsc::channel();
-    let child = Arc::new(Mutex::new(child));
     let reader_tx = tx.clone();
     thread::Builder::new().name("pty-substrate-reader".into()).spawn(move || read_master(reader, reader_tx)).map_err(io::Error::other)?;
     let reaper_tx = tx.clone();
-    let reaper_child = Arc::clone(&child);
-    thread::Builder::new().name("pty-substrate-reaper".into()).spawn(move || reap_child(reaper_child, reaper_tx)).map_err(io::Error::other)?;
+    thread::Builder::new().name("pty-substrate-reaper".into()).spawn(move || reap_child(child, reaper_tx)).map_err(io::Error::other)?;
     let actor_tx = tx.clone();
     let actor_session = session.clone();
-    thread::Builder::new().name("pty-substrate-owner".into()).spawn(move || actor(actor_session, master, writer, child, rx)).map_err(io::Error::other)?;
+    thread::Builder::new().name("pty-substrate-owner".into()).spawn(move || actor(actor_session, master, writer, child_pid, rx)).map_err(io::Error::other)?;
     drop(actor_tx);
     Ok(SessionOwner { inner: Arc::new(OwnerInner { tx }) })
 }
@@ -248,7 +247,7 @@ fn actor(
     session: SessionRef,
     master: Box<dyn MasterPty + Send>,
     mut writer: Box<dyn Write + Send>,
-    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    child_pid: Option<u32>,
     rx: Receiver<Command>,
 ) {
     let mut lifecycle = Lifecycle::Running;
@@ -268,7 +267,7 @@ fn actor(
                     Lifecycle::Running => match kind {
                         CommandKind::Input(bytes) => writer.write_all(&bytes).and_then(|_| writer.flush()).map_err(|e| SessionError::Io(e.to_string())),
                         CommandKind::Resize(size) => master.resize(size).map_err(|e| SessionError::Io(e.to_string())),
-                        CommandKind::Terminate => child.lock().map_err(|_| SessionError::Closed).and_then(|mut c| c.kill().map_err(|e| SessionError::Io(e.to_string()))),
+                        CommandKind::Terminate => kill_child(child_pid).map_err(|e| SessionError::Io(e.to_string())),
                     },
                     Lifecycle::Exited(status) => Err(SessionError::Exited(status)),
                     Lifecycle::OwnerLost => Err(SessionError::OwnerLost),
@@ -288,8 +287,8 @@ fn actor(
             Command::OwnerLost => {
                 if matches!(lifecycle, Lifecycle::Running) {
                     lifecycle = Lifecycle::OwnerLost;
-                    let _ = child.lock().map_err(|_| ()).and_then(|mut c| c.kill().map_err(|_| ()));
                     broadcast(&mut attachments, SessionEvent::Lifecycle(lifecycle));
+                    let _ = kill_child(child_pid);
                 }
             }
             _ => {}
@@ -314,17 +313,22 @@ fn read_master(mut reader: Box<dyn Read + Send>, tx: Sender<Command>) {
     }
     let _ = tx.send(Command::ReaderClosed);
 }
-
-fn reap_child(child: Arc<Mutex<Box<dyn Child + Send + Sync>>>, tx: Sender<Command>) {
-    loop {
-        let status = child.lock().ok().and_then(|mut c| c.try_wait().ok().flatten());
-        if let Some(status) = status {
-            let _ = tx.send(Command::Reaped(ExitStatus::from_portable(status)));
-            return;
-        }
-        thread::sleep(Duration::from_millis(5));
+fn kill_child(pid: Option<u32>) -> io::Result<()> {
+    let Some(pid) = pid else { return Ok(()) };
+    // SAFETY: the pid came from the child owned by this session.
+    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
+
+fn reap_child(mut child: Box<dyn Child + Send + Sync>, tx: Sender<Command>) {
+    let status = child.wait().map(ExitStatus::from_portable).unwrap_or(ExitStatus { code: None, signal: None });
+    let _ = tx.send(Command::Reaped(status));
+}
+
 
 #[cfg(test)]
 mod tests {

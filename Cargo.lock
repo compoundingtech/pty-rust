@@ -1210,6 +1210,7 @@ dependencies = [
 name = "pty-spawn"
 version = "0.13.0-rust"
 dependencies = [
+ "libc",
  "portable-pty",
 ]
 
