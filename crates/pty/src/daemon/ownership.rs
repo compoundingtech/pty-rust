@@ -74,7 +74,16 @@ fn inspect_with(
         AcceptedSocketOwnershipResult::NotOwned if before != middle => {
             return unavailable("process-tree-changed");
         }
-        AcceptedSocketOwnershipResult::NotOwned => return observed,
+        AcceptedSocketOwnershipResult::NotOwned => {
+            if let Some(pid) = before
+                .iter()
+                .find(|entry| !entry.zombie && entry.identity.is_none())
+                .map(|entry| entry.pid)
+            {
+                return unavailable(format!("process-identity-unavailable:{pid}"));
+            }
+            return observed;
+        }
         AcceptedSocketOwnershipResult::Owned { pid } => pid,
         AcceptedSocketOwnershipResult::Unavailable { .. } => unreachable!(),
     };
@@ -630,6 +639,48 @@ mod tests {
             result,
             AcceptedSocketOwnershipResult::Unavailable {
                 reason: "process-tree-changed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn identityless_live_descendant_keeps_a_negative_lookup_fail_closed() {
+        use std::process::{Command, Stdio};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let server_address = listener.local_addr().unwrap();
+        let tuple = TcpConnectionTuple {
+            local_address: server_address.ip().to_string(),
+            local_port: 1,
+            remote_address: server_address.ip().to_string(),
+            remote_port: server_address.port(),
+        };
+        let pid = std::process::id() as i32;
+        let mut helper = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let helper_pid = helper.id() as i32;
+        let result = inspect_with(
+            pid,
+            &LiveIdentity::new("owner"),
+            &tuple,
+            || {
+                pty_core::proctable::table_from_shape(&format!(
+                    "{pid} 1 {pid} S owner\n{helper_pid} {pid} {pid} S -"
+                ))
+            },
+            Path::new("/proc"),
+        );
+        let _ = helper.kill();
+        let _ = helper.wait();
+        assert_eq!(
+            result,
+            AcceptedSocketOwnershipResult::Unavailable {
+                reason: format!("process-identity-unavailable:{helper_pid}")
             }
         );
     }
