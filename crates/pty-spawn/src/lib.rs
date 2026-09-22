@@ -66,7 +66,7 @@ pub mod substrate;
 
 pub use substrate::{
     AttachStream, ExitStatus, Lifecycle, SessionClient, SessionError, SessionEvent, SessionOwner,
-    SessionRef, external_owned, external_owned_pair,
+    SessionRef, external_owned, external_owned_pair, external_owned_pair_attached,
 };
 
 #[cfg(test)]

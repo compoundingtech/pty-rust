@@ -220,7 +220,7 @@ pub fn external_owned(
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
 ) -> io::Result<SessionOwner> {
-    start_owner(session, master, child)
+    start_owner(session, master, child, None)
 }
 
 /// Convenience constructor for callers that already opened a pair and spawned
@@ -232,13 +232,29 @@ pub fn external_owned_pair(
     child: Box<dyn Child + Send + Sync>,
 ) -> io::Result<SessionOwner> {
     drop(pair.slave);
-    start_owner(session, pair.master, child)
+    start_owner(session, pair.master, child, None)
+}
+
+/// Transfer a pair and atomically pre-register its first equal attachment.
+/// Output produced immediately after spawn is queued for this stream rather
+/// than falling into the gap between owner startup and a later attach request.
+pub fn external_owned_pair_attached(
+    session: SessionRef,
+    pair: PtyPair,
+    child: Box<dyn Child + Send + Sync>,
+) -> io::Result<(SessionOwner, SessionClient, AttachStream)> {
+    drop(pair.slave);
+    let (events, rx) = mpsc::channel();
+    let owner = start_owner(session.clone(), pair.master, child, Some(events))?;
+    let client = SessionClient { session, tx: owner.inner.tx.clone() };
+    Ok((owner, client, AttachStream { rx }))
 }
 
 fn start_owner(
     session: SessionRef,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    initial_attachment: Option<Sender<SessionEvent>>,
 ) -> io::Result<SessionOwner> {
     let reader = master.try_clone_reader().map_err(io::Error::other)?;
     let writer = master.take_writer().map_err(io::Error::other)?;
@@ -250,7 +266,7 @@ fn start_owner(
     thread::Builder::new().name("pty-substrate-reaper".into()).spawn(move || reap_child(child, reaper_tx)).map_err(io::Error::other)?;
     let actor_tx = tx.clone();
     let actor_session = session.clone();
-    thread::Builder::new().name("pty-substrate-owner".into()).spawn(move || actor(actor_session, master, writer, child_pid, rx)).map_err(io::Error::other)?;
+    thread::Builder::new().name("pty-substrate-owner".into()).spawn(move || actor(actor_session, master, writer, child_pid, initial_attachment, rx)).map_err(io::Error::other)?;
     drop(actor_tx);
     Ok(SessionOwner { inner: Arc::new(OwnerInner { tx }) })
 }
@@ -295,10 +311,12 @@ fn actor(
     master: Box<dyn MasterPty + Send>,
     mut writer: Box<dyn Write + Send>,
     child_pid: Option<u32>,
+    initial_attachment: Option<Sender<SessionEvent>>,
     rx: Receiver<Command>,
 ) {
     let mut lifecycle = Lifecycle::Running;
-    let mut attachments: Vec<Sender<SessionEvent>> = Vec::new();
+    let mut attachments: Vec<Sender<SessionEvent>> = initial_attachment.into_iter().collect();
+    broadcast(&mut attachments, SessionEvent::Lifecycle(lifecycle));
     while let Ok(command) = rx.recv() {
         match command {
             Command::Attach { session: requested, events, reply } => {
@@ -417,6 +435,27 @@ mod tests {
         (session.clone(), external_owned_pair(session, pair, child).unwrap())
     }
 
+    #[test]
+    fn pre_registered_attachment_keeps_immediate_output() {
+        let pair = open(24, 80).unwrap();
+        let args = ["-c", "printf immediate; exec cat"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let child = pair.slave.spawn_command(shell_exec("sh", &args)).unwrap();
+        let session = SessionRef::new("/private", "initial", "generation-a");
+        let (owner, client, stream) = external_owned_pair_attached(session, pair, child).unwrap();
+        assert_eq!(
+            stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Lifecycle(Lifecycle::Running)
+        );
+        assert!(matches!(
+            stream.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SessionEvent::Data(bytes) if bytes.windows(b"immediate".len()).any(|window| window == b"immediate")
+        ));
+        client.terminate().unwrap();
+        drop(owner);
+    }
     #[test]
     fn equal_clients_receive_the_same_typed_output() {
         let (session, owner) = owner("equal", "cat");

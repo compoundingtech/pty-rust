@@ -305,13 +305,10 @@ pub(crate) fn run(
     })?;
     let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
     let session = SessionRef::new(registry::session_dir(), name.clone(), generation.clone());
-    let owner = pty_spawn::external_owned_pair(session.clone(), pair, child)
-        .map_err(|e| format!("Failed to hand PTY to the session substrate for \"{name}\": {e}"))?;
-
+    let (owner, session_client, session_stream) =
+        pty_spawn::external_owned_pair_attached(session, pair, child)
+            .map_err(|e| format!("Failed to hand PTY to the session substrate for \"{name}\": {e}"))?;
     let (tx, rx) = mpsc::channel::<Msg>();
-    let (session_client, session_stream) = owner
-        .attach(&session)
-        .map_err(|e| format!("Failed to attach daemon actor to session \"{name}\": {e}"))?;
     spawn_session_bridge(session_stream, tx.clone());
 
     let listener_fd = listener.as_raw_fd();
