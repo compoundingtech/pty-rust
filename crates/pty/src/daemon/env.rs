@@ -72,6 +72,15 @@ pub fn build_child_env_from(
             .cloned()
             .collect()
     };
+    for key in [
+        "PTY_SERVER_CONFIG",
+        READY_FD_ENV,
+        "PTY_READINESS_CAP_FD",
+        "PTY_CAPABILITY_FD",
+        "PTY_CAPABILITY_HOLD_FD",
+    ] {
+        env.remove(key);
+    }
     if cfg.env.is_none() {
         for key in cfg.unset_env() {
             env.remove(key);
@@ -210,6 +219,9 @@ mod tests {
             &src(&[
                 ("NO_COLOR", "1"),
                 ("PTY_SERVER_CONFIG", "{}"),
+                ("PTY_READINESS_CAP_FD", "4"),
+                ("PTY_CAPABILITY_FD", "7"),
+                ("PTY_CAPABILITY_HOLD_FD", "8"),
                 ("HOME", "/h"),
                 ("SECRET", "s"),
             ]),
@@ -218,6 +230,9 @@ mod tests {
         assert_eq!(env.get("ASSIGNMENT_WINS").unwrap(), "explicit");
         assert!(!env.contains_key("NO_COLOR"));
         assert!(!env.contains_key("PTY_SERVER_CONFIG"));
+        assert!(!env.contains_key("PTY_READINESS_CAP_FD"));
+        assert!(!env.contains_key("PTY_CAPABILITY_FD"));
+        assert!(!env.contains_key("PTY_CAPABILITY_HOLD_FD"));
         assert_eq!(env.get("PTY_SESSION").unwrap(), "sess");
         assert_eq!(env.get("PTY_SESSION_GENERATION").unwrap(), "gen1");
         assert_eq!(env.get("TERM").unwrap(), DEFAULT_CHILD_TERM);

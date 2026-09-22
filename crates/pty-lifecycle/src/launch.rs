@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use pty_core::registry::{self, EnvMap, TagMap};
 
 use super::config::DaemonConfig;
+use crate::StartupLeaseOptions;
 
 /// `DEFAULT_START_TIMEOUT_MS`.
 pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,6 +49,8 @@ pub struct SpawnParams {
     pub unset_env: Vec<String>,
     /// The verbatim replacement environment; exclusive with the three above.
     pub env: Option<EnvMap>,
+    /// Daemon-owned startup deadline and lifecycle tag.
+    pub startup_lease: Option<StartupLeaseOptions>,
     /// Variables removed from the daemon's (and so the child's) environment.
     pub scrub_env: Vec<String>,
     /// The pid that already holds `<name>.lock` for this creation; carried
@@ -86,10 +89,7 @@ impl SpawnParams {
 /// records simply have fewer of them.
 ///
 /// node: src/cli.ts:3874-3884 (`persistedLaunchOptions`)
-pub fn apply_persisted_launch_options(
-    params: &mut SpawnParams,
-    meta: &registry::SessionMetadata,
-) {
+pub fn apply_persisted_launch_options(params: &mut SpawnParams, meta: &registry::SessionMetadata) {
     if let Some(rows) = meta.rows {
         params.rows = rows;
     }
@@ -202,6 +202,7 @@ pub fn config_for(params: &SpawnParams) -> DaemonConfig {
         extra_env: (!params.extra_env.is_empty()).then(|| params.extra_env.clone()),
         unset_env: (!params.unset_env.is_empty()).then(|| params.unset_env.clone()),
         env: params.env.clone(),
+        startup_lease: params.startup_lease.clone(),
         generation: None,
         respawn: params.respawn,
     }
@@ -389,7 +390,9 @@ pub fn spawn_daemon(
         unsafe {
             libc::close(read_fd);
         }
-        return Err(SpawnError::Io(format!("cannot create readiness pipe: {error}")));
+        return Err(SpawnError::Io(format!(
+            "cannot create readiness pipe: {error}"
+        )));
     }
     let (ready_read_fd, ready_write_fd) = (ready_fds[0], ready_fds[1]);
     // SAFETY: both descriptors are freshly created and owned here.

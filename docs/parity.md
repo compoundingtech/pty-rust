@@ -72,7 +72,7 @@ Two facts from this table shape the plan:
 | Command (Node) | Rust status | Gap |
 |---|---|---|
 | `pty` / `i` / `interactive` — session manager TUI | missing | Needs the new TUI library (section 9). `--preselect-new`, `--filter-tag`, `--force`, theme cycling, relay hosts, attach-and-return. |
-| `run` | partial (M) | Missing `--env`, `--unset-env`, `-a` semantics, `--isolate-env` semantics, auto display name, display name validation, legacy positional name with hint, `Session "<id>" created.`, foreground attach, `Command not found`, `already in use` text, id alphabet, cwd validation text, creation lock, event lock, `PTY_CREATION_LOCK_OWNER_PID`. Rust extra: `--rows/--cols`. |
+| `run` | partial (M) | Startup lease flags `--startup-timeout-ms` + `--lifecycle-tag` match Node, including paired validation and persisted starting state. Remaining gaps: legacy positional display name with hint and some presentation text. Rust extra: `--rows/--cols`. |
 | `attach` / `a` | partial (L) | Missing `-r/--auto-restart`, `--no-restart`, `--force`, nesting guard, dead-session prompt with `lastLines`, `--remote`, `--attach-stream-fd-v1`, reconnect loop, exact `[detached]` / `[<name> exited with code N]` lines, `TERMINAL_SANITIZE` bytes, `\x1b[2J\x1b[H` before SCREEN. |
 | `exec` | missing (S) | Rewrites command under lock with `expectedGeneration`, appends `session_exec`, runs the command. |
 | `peek` | partial (M) | Missing multiple `--wait`, float `-t`, `--remote`, `lastLines` fallback, exit diagnostics, 200 ms poll, `--full` honoured by the daemon, viewport-only default, `TERMINAL_SANITIZE` after ANSI output. |
@@ -91,7 +91,8 @@ Two facts from this table shape the plan:
 | `emit` | missing (S) | `user.*` validation, `--json`, `--text`, default ref from `PTY_SESSION`. |
 | `rename` | partial (S) | Missing `--show`, `--clear`, inside-session single-arg form, validation, `display_name_change` event, lock, exact stdout text. |
 | `metadata patch` | missing (S) | `--id`, JSON patch on stdin, `{changed, metadata}` reply, validation text, `metadata_change` event. `st2` calls this. |
-| `evidence snapshot` / `remove` | deferred | Tagged JSON results, strict reader, exact-generation remove. Documented as absent. Section 12. |
+| `readiness ownership` / `cas` | parity | Machine JSON stdin/stdout, wire tags 8/9, generation fencing, exact accepted TCP ownership, and lifecycle CAS terminal outcomes. |
+| `evidence snapshot` / `remove` | parity | Bounded strict metadata reader and exact-generation removal under event then creation locks; replacement generations are refused. |
 | `up` / `down` | partial (S) | Node binds by the `(ptyfile, ptyfile.session)` tag pair, syncs tags, prints `● <label> (started)` lines. Rust binds by name. |
 | `test` | dropped | A vitest wrapper for the Node repository. |
 | `completions <shell>` | missing (S) | fish, bash, zsh. Output must equal the checked-in files byte for byte. Exit 2 on a bad shell. |
@@ -152,6 +153,7 @@ gap is in what the daemon does with the frames.
 | Child spawn `/bin/sh -c 'exec "$@"' sh <cmd> <args>` with `command` resolved to an absolute path | partial | Rust spawns argv as typed. |
 | Env policy: inherited → `unsetEnv` → `extraEnv` → force `PTY_SESSION` + `PTY_SESSION_GENERATION` → `TERM` default; `--isolate-env` allow-list | missing | Rust forces `TERM=xterm-256color` always and adds nothing else. |
 | `generation` token per daemon incarnation | missing | Needed by `exec`, `evidence`, `rm`, `gc`, locks. |
+| Daemon-owned startup lease | parity | `starting` carries generation, boot identity, and monotonic deadline; terminal persistence precedes teardown; deadline containment is fail closed and response/persistence release is exactly once. |
 | cwd validation messages | missing | |
 | `SIGTERM`/`SIGINT` = external kill: preserve unless ephemeral; child gets `SIGHUP`; descendants `TERM` ≤ 1.5 s then `KILL` ≤ 0.5 s, deepest first, start-token checked | partial | Rust: `SIGHUP` then `SIGKILL` to the child after 500 ms, no descendants walk. `pty-kill-releases-socket-test` pins the tree case. |
 | Shutdown backstop `PTY_SHUTDOWN_DEADLINE_MS` (5 s) | missing | |
@@ -332,7 +334,7 @@ Decided on 2026-08-29. Each row records the decision.
 | Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
 | `gc`: permanent respawn, flapping classifier, abandoned reap | L | Kept for the shared-input/SCG reconciler contract. `gc` respawns stopped `strategy=permanent` sessions under their stable id, re-reads bound `pty.toml` definitions with last-known-good fallback, persists the Node-compatible fast-fail tags/events and flapping stop, and reaps cwd-gone or opt-in idle permanents before respawn. The accepted tuning flags are active and validated. |
 | `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite, so `recovery.metadataRevision` goes stale for a session a Rust binary writes to — accepted, decision 0005. |
-| `evidence snapshot` / `remove` | M | Deferred and documented as absent. Its user is not known. |
+| `evidence snapshot` / `remove` | M | Kept. Dotfiles consumes generation-fenced terminal evidence before removing a retained generation. |
 | `--attach-stream-fd-v1` | M | Kept. An eval cell and relays use it. |
 | `PTY_SPAWNER_PID` watchdog | S | Kept. Small. |
 | Rust `ATTACH` geometry-neutral flag and `stats.clients.geometryNeutral` | S | Dropped. Node's readonly role covers `peek -f`. |

@@ -147,11 +147,7 @@ fn attach_session(
 /// Show what the session last printed, then offer to start it again.
 ///
 /// node: src/cli.ts:1808-1853
-fn handle_dead_session(
-    name: &str,
-    meta: Option<SessionMetadata>,
-    auto_restart: bool,
-) -> CliResult {
+fn handle_dead_session(name: &str, meta: Option<SessionMetadata>, auto_restart: bool) -> CliResult {
     let Some(meta) = meta else {
         eprintln!("Session \"{name}\" exited (no metadata available).");
         let _ = registry::cleanup_all(name);

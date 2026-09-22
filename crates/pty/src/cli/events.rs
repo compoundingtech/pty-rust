@@ -142,11 +142,11 @@ fn cmd_events(
         let Some(name) = name else {
             return Err("--wait requires a session name.".into());
         };
-        let deadline = (timeout > 0.0).then(|| {
-            Instant::now() + Duration::from_secs_f64(timeout.min(u32::MAX as f64))
-        });
+        let deadline = (timeout > 0.0)
+            .then(|| Instant::now() + Duration::from_secs_f64(timeout.min(u32::MAX as f64)));
         exit_zero_on_sigint();
-        let (_follower, rx) = EventFollower::channel(FollowerOptions::names(vec![name.to_string()]));
+        let (_follower, rx) =
+            EventFollower::channel(FollowerOptions::names(vec![name.to_string()]));
         loop {
             let recv = match deadline {
                 Some(d) => {

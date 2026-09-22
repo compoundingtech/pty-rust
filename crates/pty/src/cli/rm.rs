@@ -28,10 +28,7 @@ pub fn run(args: &[String]) -> CliResult {
     // its socket alive briefly so attached clients receive the exit packet,
     // then cleans up. Wait on the old generation's daemon so an immediate
     // same-name `pty run` cannot publish a socket the old daemon unlinks.
-    let generation = session
-        .metadata
-        .as_ref()
-        .and_then(|m| m.generation.clone());
+    let generation = session.metadata.as_ref().and_then(|m| m.generation.clone());
     let daemon_pid = session
         .pid
         .or_else(|| session.metadata.as_ref().and_then(|m| m.daemon_pid))

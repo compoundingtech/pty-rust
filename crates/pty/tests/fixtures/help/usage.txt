@@ -18,6 +18,8 @@ Create sessions:
   pty run --cwd /path -- <command>        Run in a specific directory
   pty run --isolate-env -- <command>      Scrub the child env to a safe allow-list
                                           (intended for remote-reachable sessions)
+  pty run --startup-timeout-ms N --lifecycle-tag key ...
+                                          Arm a daemon-owned hard startup lease
   pty run --force -- <command>            Create even from inside another pty session (nested)
 
 Attach & interact:
@@ -61,6 +63,8 @@ Observe:
 Modify:
   pty metadata patch --id <id>            Atomically merge displayName/tags from JSON stdin
   pty evidence snapshot --id <id>         Read exact-generation retained exit evidence as JSON
+  pty readiness ownership --id <id>        Prove exact held TCP connection ownership
+  pty readiness cas --id <id>              Generation-fenced lifecycle tag CAS
   pty rename <label>                      Inside a session: set its displayName
   pty rename <ref> <label>                Outside: set displayName on <ref>
   pty rename --show <ref>                 Print the current displayName

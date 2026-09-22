@@ -155,9 +155,7 @@ pub fn run(argv: &[String]) -> CliResult {
         }
         Selector::Filter(filter) => registry::list_sessions()
             .into_iter()
-            .filter(|s| {
-                matches_all_tags(s.metadata.as_ref().and_then(|m| m.tags.as_ref()), filter)
-            })
+            .filter(|s| matches_all_tags(s.metadata.as_ref().and_then(|m| m.tags.as_ref()), filter))
             .map(|s| s.name)
             .collect(),
         Selector::All => {
@@ -184,10 +182,8 @@ pub fn run(argv: &[String]) -> CliResult {
             .map(|n| (n.clone(), current_tags(n)))
             .collect();
         if parsed.json {
-            let obj: Map<String, Value> = out
-                .iter()
-                .map(|(n, t)| (n.clone(), tags_json(t)))
-                .collect();
+            let obj: Map<String, Value> =
+                out.iter().map(|(n, t)| (n.clone(), tags_json(t))).collect();
             println!("{}", Value::Object(obj));
             return Ok(0);
         }

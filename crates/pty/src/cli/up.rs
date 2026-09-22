@@ -264,11 +264,8 @@ fn cmd_up(dir: Option<&str>, names: &[String]) -> CliResult {
             continue;
         }
 
-        let mut params = SpawnParams::new(
-            &name,
-            "/bin/sh",
-            &["-c".to_string(), sess.command.clone()],
-        );
+        let mut params =
+            SpawnParams::new(&name, "/bin/sh", &["-c".to_string(), sess.command.clone()]);
         params.display_command = sess.command.clone();
         params.cwd = sess
             .cwd

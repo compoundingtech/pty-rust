@@ -11,6 +11,7 @@
 //! speaks Node's texts. The interactive picker is the one thing left that
 //! reports itself unimplemented.
 
+pub mod ctl;
 pub mod argv;
 pub mod ask;
 pub mod completions;
@@ -18,10 +19,12 @@ pub mod deferred;
 pub mod down;
 pub mod emit;
 pub mod events;
+pub mod evidence;
 pub mod gc;
 pub mod help;
 pub mod list;
 pub mod metadata;
+pub mod readiness;
 pub mod remote_serve;
 pub mod rename;
 pub mod rm;
@@ -238,8 +241,9 @@ pub fn dispatch(mut args: Vec<String>) -> i32 {
     // `dispatch_args`, as Node does.
     let rest = if args.len() > 1 { &args[1..] } else { &[][..] };
     let result = match command.as_str() {
-        "interactive" | "i" => interactive(interactive_opts),
         "__daemon" => Ok(crate::daemon::daemon_main()),
+        "interactive" | "i" => interactive(interactive_opts),
+        "ctl" => ctl::run(rest),
         "run" => run::run(rest),
         "attach" | "a" => attach::run(rest),
         "exec" => exec::run(rest),
@@ -260,7 +264,8 @@ pub fn dispatch(mut args: Vec<String>) -> i32 {
         "down" => down::run(rest),
         "rename" => rename::run(rest),
         "metadata" => metadata::run(rest),
-        "evidence" => deferred::run("evidence"),
+        "readiness" => readiness::run(rest),
+        "evidence" => evidence::run(rest),
         "rm" | "remove" => rm::run(rest),
         "test" => deferred::run("test"),
         "completions" => Ok(completions::run(rest)),

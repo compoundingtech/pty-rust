@@ -36,8 +36,8 @@ pub fn run(args: &[String]) -> CliResult {
 
         // Strip `strategy` so `pty gc` does not treat the session as
         // supervised on its next tick.
-        let was_permanent = tags.and_then(|t| t.get("strategy")).map(String::as_str)
-            == Some("permanent");
+        let was_permanent =
+            tags.and_then(|t| t.get("strategy")).map(String::as_str) == Some("permanent");
         if was_permanent {
             let _ = update_tags(
                 &existing_session.name,
@@ -72,7 +72,10 @@ pub fn run(args: &[String]) -> CliResult {
                     stopped += 1;
                 }
                 Err(busy) => {
-                    eprintln!("  \u{2717} {label}: {}", busy.message(&existing_session.name));
+                    eprintln!(
+                        "  \u{2717} {label}: {}",
+                        busy.message(&existing_session.name)
+                    );
                 }
             }
         }

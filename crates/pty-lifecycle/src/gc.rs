@@ -12,8 +12,8 @@ use pty_core::registry::{
     events_path, has_process_exited_for_reap, is_keep_expired, is_keep_requested, lock_or_refusal,
     metadata_matches_observation, metadata_path, now_epoch_ms, parse_iso8601_ms, pid_alive,
     probe_sockets_within_budget, read_metadata, read_metadata_map, read_pid, read_pid_with,
-    recovery_revision_path, session_dir, socket_path, socket_reachable, update_tags,
-    with_both_locks, write_metadata, write_metadata_map,
+    read_signal_target_with, recovery_revision_path, session_dir, socket_path, socket_reachable,
+    update_tags, with_both_locks, write_metadata, write_metadata_map,
 };
 use sha2::{Digest, Sha256};
 
@@ -916,8 +916,8 @@ fn reap_observed_session(session: &SessionInfo, mode: ReapMode) -> Reap {
         } else if !metadata_matches_observation(observed, &current) {
             return Err("stale");
         }
-        let current_pid =
-            read_pid_with(name, Some(&current)).filter(|pid| !has_process_exited_for_reap(*pid));
+        let current_pid = read_signal_target_with(name, Some(&current))
+            .filter(|pid| !has_process_exited_for_reap(*pid));
         let running_now =
             session.is_running() || current_pid.is_some() || socket_reachable(&socket_path(name));
         if running_now {
@@ -1035,9 +1035,7 @@ pub fn prune_orphan_layout_tags(dry_run: bool) -> Vec<PrunedTags> {
             .filter(|key| match orphan_layout_tag_pid(key) {
                 None => false,
                 Some(None) => true,
-                Some(Some(pid)) => {
-                    pid <= 0 || !i32::try_from(pid).map(pid_alive).unwrap_or(false)
-                }
+                Some(Some(pid)) => pid <= 0 || !i32::try_from(pid).map(pid_alive).unwrap_or(false),
             })
             .cloned()
             .collect();

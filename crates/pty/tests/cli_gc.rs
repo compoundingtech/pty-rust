@@ -12,7 +12,7 @@ mod cli_common;
 use std::process::Stdio;
 
 use cli_common::{DEAD_PID, Rig, iso_now, wait_until};
-use pty_core::registry::{now_epoch_ms, parse_iso8601_ms};
+use pty_core::registry::{now_epoch_ms, parse_iso8601_ms, read_process_start_token};
 use serde_json::{Value, json};
 
 const DAY_MS: i64 = 86_400_000;
@@ -280,6 +280,8 @@ fn permanent_respawn_timestamp_is_taken_at_its_reconciliation() {
         "a-slow-abandon",
         json!({
             "cwd": gone,
+            "daemonPid": delayed.id(),
+            "daemonStartToken": read_process_start_token(delayed.id() as i32).unwrap(),
             "tags": {"strategy": "permanent"}
         }),
     );

@@ -382,7 +382,8 @@ fn session_json(s: &SessionInfo) -> Value {
     );
     m.insert(
         "cwd".into(),
-        meta.map(|m| Value::from(m.cwd.as_str())).unwrap_or(Value::Null),
+        meta.map(|m| Value::from(m.cwd.as_str()))
+            .unwrap_or(Value::Null),
     );
     m.insert(
         "createdAt".into(),
@@ -449,10 +450,7 @@ fn remote_host_json(h: &RemoteHost) -> Value {
     );
     m.insert(
         "error".into(),
-        h.error
-            .as_deref()
-            .map(Value::from)
-            .unwrap_or(Value::Null),
+        h.error.as_deref().map(Value::from).unwrap_or(Value::Null),
     );
     Value::Object(m)
 }
@@ -691,7 +689,11 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
             println!("\x1b[1m{}\x1b[0m \x1b[31m(error: {err})\x1b[0m", host.label);
             continue;
         }
-        println!("\x1b[1m{}\x1b[0m ({} sessions):", host.label, host.sessions.len());
+        println!(
+            "\x1b[1m{}\x1b[0m ({} sessions):",
+            host.label,
+            host.sessions.len()
+        );
         let mut sorted: Vec<&RemoteSession> = host.sessions.iter().collect();
         sorted.sort_by(|a, b| {
             let ka = a.display_name.as_deref().unwrap_or(&a.name);
@@ -699,7 +701,11 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
             ka.cmp(kb)
         });
         for s in sorted {
-            let icon = if s.status == "running" { "\u{25cf}" } else { "\u{25cb}" };
+            let icon = if s.status == "running" {
+                "\u{25cf}"
+            } else {
+                "\u{25cb}"
+            };
             let cwd = s.cwd.as_deref().map(short_path).unwrap_or_default();
             let cmd = s.command.as_deref().unwrap_or("");
             let dn = s.display_name.as_deref().filter(|d| !d.is_empty());

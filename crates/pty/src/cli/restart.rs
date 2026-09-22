@@ -20,7 +20,13 @@ const USAGE: &str = "Usage: pty restart [-y] [--force] <name>";
 ///
 /// node: src/cli.ts:3850-3857
 fn stateful_agent_reason(meta: &SessionMetadata) -> Option<&'static str> {
-    if meta.tags.as_ref().and_then(|t| t.get("role")).map(String::as_str) == Some("agent") {
+    if meta
+        .tags
+        .as_ref()
+        .and_then(|t| t.get("role"))
+        .map(String::as_str)
+        == Some("agent")
+    {
         return Some("role=agent tag");
     }
     let argv = std::iter::once(meta.command.clone())
@@ -101,9 +107,11 @@ pub fn run(args: &[String]) -> CliResult {
     if session.status == SessionStatus::Running
         && let Some(pid) = session.pid
     {
-        if !yes && ask::declined(&ask::ask(&format!(
-            "Session \"{name}\" is running. Kill and restart? [Y/n] "
-        ))) {
+        if !yes
+            && ask::declined(&ask::ask(&format!(
+                "Session \"{name}\" is running. Kill and restart? [Y/n] "
+            )))
+        {
             return Ok(0);
         }
         // SAFETY: kill(2) with a pid read from the registry; an error only

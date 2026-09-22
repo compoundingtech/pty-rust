@@ -440,7 +440,8 @@ impl Conn {
     /// STATUS round trip.
     pub fn query_status(&mut self) -> Value {
         self.status();
-        self.wait_status(Duration::from_secs(3)).expect("STATUS reply")
+        self.wait_status(Duration::from_secs(3))
+            .expect("STATUS reply")
     }
 
     pub fn types(&self) -> Vec<MessageType> {

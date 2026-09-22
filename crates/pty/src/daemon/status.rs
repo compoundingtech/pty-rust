@@ -58,7 +58,10 @@ impl Daemon {
                 _ => {}
             }
         }
-        let created_at = meta.as_ref().map(|m| m.created_at.clone()).filter(|c| !c.is_empty());
+        let created_at = meta
+            .as_ref()
+            .map(|m| m.created_at.clone())
+            .filter(|c| !c.is_empty());
         let uptime_seconds = created_at.as_deref().and_then(|c| {
             let created = registry::parse_iso8601_ms(c)?;
             Some(((registry::now_epoch_ms() - created) as f64 / 1000.0).floor() as i64)

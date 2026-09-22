@@ -195,6 +195,11 @@ pub struct ProcTable {
     readable: bool,
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn pid_listing_is_complete(written: i32, capacity: i32) -> bool {
+    written > 0 && written < capacity
+}
+
 impl ProcTable {
     /// Read the table once.
     pub fn read() -> Self {
@@ -227,16 +232,34 @@ impl ProcTable {
         if bytes <= 0 {
             return Self::unreadable();
         }
-        let mut pids = vec![0i32; (bytes as usize / size_of::<i32>()) + 64];
-        let cap = (pids.len() * size_of::<i32>()) as i32;
-        // SAFETY: the buffer and its length agree.
-        let written = unsafe {
-            libc::proc_listpids(PROC_ALL_PIDS, 0, pids.as_mut_ptr() as *mut libc::c_void, cap)
-        };
-        if written <= 0 {
+        let mut slots = (bytes as usize / size_of::<i32>()) + 64;
+        let mut pids = Vec::new();
+        let mut complete = false;
+        for _ in 0..4 {
+            pids.resize(slots, 0i32);
+            let cap = (pids.len() * size_of::<i32>()) as i32;
+            // SAFETY: the buffer and its length agree.
+            let written = unsafe {
+                libc::proc_listpids(
+                    PROC_ALL_PIDS,
+                    0,
+                    pids.as_mut_ptr() as *mut libc::c_void,
+                    cap,
+                )
+            };
+            if written <= 0 {
+                return Self::unreadable();
+            }
+            if pid_listing_is_complete(written, cap) {
+                pids.truncate(written as usize / size_of::<i32>());
+                complete = true;
+                break;
+            }
+            slots = slots.saturating_mul(2);
+        }
+        if !complete {
             return Self::unreadable();
         }
-        pids.truncate(written as usize / size_of::<i32>());
 
         let _ = SZOMB;
         let mut rows = Vec::with_capacity(pids.len());
@@ -744,6 +767,13 @@ mod tests {
     }
 
     // ---- the truncation guard -------------------------------------------
+
+    #[test]
+    fn a_full_pid_buffer_is_not_a_complete_process_table() {
+        assert!(!pid_listing_is_complete(4096, 4096));
+        assert!(!pid_listing_is_complete(8192, 4096));
+        assert!(pid_listing_is_complete(4092, 4096));
+    }
 
     /// `ps` always lists at least the process that ran it. A listing without
     /// our own pid was truncated or never produced, and reading it as "the

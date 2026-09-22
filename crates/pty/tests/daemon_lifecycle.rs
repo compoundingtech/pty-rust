@@ -12,15 +12,23 @@ mod daemon_support;
 use std::time::{Duration, Instant};
 
 use daemon_support::*;
-use pty_core::protocol::MessageType::*;
+use pty_core::registry;
+use pty_core::protocol::{
+    LifecycleCompareAndSetRequest, LifecycleCompareAndSetResult, MessageType::*,
+    encode_lifecycle_compare_and_set_request,
+};
 use serde_json::json;
 
 const T: Duration = Duration::from_secs(8);
+const STARTUP_TAG: &str = "run.lifecycle";
 const PRESERVE: &[(&str, &str)] = &[("PTY_REAP_ON_EXIT", "false")];
 
 fn wait_exited(d: &Daemon) -> serde_json::Value {
     assert!(
-        wait_until(T, || d.meta().map(|m| m["exitedAt"].is_string()).unwrap_or(false)),
+        wait_until(T, || d
+            .meta()
+            .map(|m| m["exitedAt"].is_string())
+            .unwrap_or(false)),
         "session {} never recorded an exit",
         d.name
     );
@@ -61,11 +69,30 @@ fn publication_order_and_shapes() {
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["generation", "daemonPid", "command", "args", "displayCommand", "cwd", "rows", "cols",
-         "ephemeral", "createdAt", "tags", "displayName"]
+        [
+            "generation",
+            "daemonPid",
+            "daemonStartToken",
+            "command",
+            "args",
+            "displayCommand",
+            "cwd",
+            "rows",
+            "cols",
+            "ephemeral",
+            "createdAt",
+            "tags",
+            "displayName"
+        ]
     );
     assert_eq!(m["generation"].as_str().unwrap().len(), 32);
     assert_eq!(m["daemonPid"], d.pid);
+    // Additive Rust identity proof: older/Node readers tolerate unknown
+    // metadata keys, while Rust also accepts Node's recovery token shape.
+    assert_eq!(
+        m["daemonStartToken"].as_str(),
+        registry::read_process_start_token(d.pid).as_deref()
+    );
     assert_eq!(m["ephemeral"], false);
     assert_eq!(m["tags"], json!({"team": "a", "keep": "true"}));
 
@@ -177,8 +204,14 @@ fn failed_child_spawn_never_signals_launcher_ready() {
     let mut signal = Vec::new();
     use std::io::Read;
     ready.read_to_end(&mut signal).unwrap();
-    assert!(signal.is_empty(), "failed child spawn reported launcher readiness");
-    assert!(read_meta(&root, &name).is_some(), "pre-spawn metadata was published");
+    assert!(
+        signal.is_empty(),
+        "failed child spawn reported launcher readiness"
+    );
+    assert!(
+        read_meta(&root, &name).is_some(),
+        "pre-spawn metadata was published"
+    );
     assert_eq!(events_of_type(&root, &name, "session_start").len(), 1);
 }
 
@@ -209,12 +242,7 @@ fn process_name(pid: i32) -> Option<String> {
     }
     // `ps -o comm=` prints a path on some machines and a bare name on
     // others; the question is what the process is CALLED either way.
-    Some(
-        name.rsplit('/')
-            .next()
-            .unwrap_or(&name)
-            .to_string(),
-    )
+    Some(name.rsplit('/').next().unwrap_or(&name).to_string())
 }
 
 /// node: tests/exit-signal.test.ts:49-71
@@ -248,7 +276,11 @@ fn a_clean_exit_keeps_the_raw_code_and_last_lines() {
     let root = short_root();
     let d = Daemon::start_env(
         &root,
-        config(&unique_name("sig"), "sh", &["-c", "echo one; echo two; exit 5"]),
+        config(
+            &unique_name("sig"),
+            "sh",
+            &["-c", "echo one; echo two; exit 5"],
+        ),
         PRESERVE,
     );
     let meta = wait_exited(&d);
@@ -262,7 +294,12 @@ fn a_clean_exit_keeps_the_raw_code_and_last_lines() {
     // The exit write appends these four, in this order. `lastOutputAtMs` is
     // last because the child printed and exited inside the one-second
     // debounce, so the exit write carried the stamp rather than a timer.
-    let keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
+    let keys: Vec<&str> = meta
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         &keys[keys.len() - 4..],
         ["exitCode", "exitedAt", "lastLines", "lastOutputAtMs"]
@@ -295,7 +332,10 @@ fn sigterm_records_one_session_exit_and_preserves_the_session() {
     skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
-    let mut d = Daemon::start(&root, config(&unique_name("race"), "/bin/sh", &["-c", "sleep 30"]));
+    let mut d = Daemon::start(
+        &root,
+        config(&unique_name("race"), "/bin/sh", &["-c", "sleep 30"]),
+    );
     std::thread::sleep(Duration::from_millis(200));
     let child = d.child_pid();
     d.signal(libc::SIGTERM);
@@ -315,14 +355,26 @@ fn reap_and_preserve_decisions() {
     let _s = serial();
     // Default: reaped on exit (no files left).
     let root = short_root();
-    let mut d = Daemon::spawn(&root, config(&unique_name("reap"), "sh", &["-c", "exit 3"]), &[]);
+    let mut d = Daemon::spawn(
+        &root,
+        config(&unique_name("reap"), "sh", &["-c", "exit 3"]),
+        &[],
+    );
     assert_eq!(d.wait_exit(T), Some(3));
-    let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name()).collect();
+    let left: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
     assert!(left.is_empty(), "{left:?}");
 
     // PTY_REAP_ON_EXIT=false preserves.
     let root = short_root();
-    let mut d = Daemon::spawn(&root, config(&unique_name("reap"), "sh", &["-c", "exit 3"]), PRESERVE);
+    let mut d = Daemon::spawn(
+        &root,
+        config(&unique_name("reap"), "sh", &["-c", "exit 3"]),
+        PRESERVE,
+    );
     assert_eq!(d.wait_exit(T), Some(3));
     assert_eq!(d.meta().unwrap()["exitCode"], 3);
     assert!(root.join(format!("{}.events.jsonl", d.name)).exists());
@@ -338,24 +390,41 @@ fn reap_and_preserve_decisions() {
 
     // keep applied while running preserves; a `keep=false` reaps.
     let root = short_root();
-    let d0 = Daemon::start(&root, config(&unique_name("reap"), "sh", &["-c", "sleep 0.5; exit 0"]));
+    let d0 = Daemon::start(
+        &root,
+        config(&unique_name("reap"), "sh", &["-c", "sleep 0.5; exit 0"]),
+    );
     let mut m = d0.meta().unwrap();
     m["tags"] = json!({"keep": "yes"});
-    std::fs::write(root.join(format!("{}.json", d0.name)), serde_json::to_string_pretty(&m).unwrap()).unwrap();
+    std::fs::write(
+        root.join(format!("{}.json", d0.name)),
+        serde_json::to_string_pretty(&m).unwrap(),
+    )
+    .unwrap();
     let mut d = d0;
     assert_eq!(d.wait_exit(T), Some(0));
     assert_eq!(d.meta().unwrap()["exitCode"], 0);
 
     // A replacement's generation on disk means: not ours to reap.
     let root = short_root();
-    let d0 = Daemon::start(&root, config(&unique_name("reap"), "sh", &["-c", "sleep 0.5; exit 0"]));
+    let d0 = Daemon::start(
+        &root,
+        config(&unique_name("reap"), "sh", &["-c", "sleep 0.5; exit 0"]),
+    );
     let mut m = d0.meta().unwrap();
     m["generation"] = json!("ffffffffffffffffffffffffffffffff");
-    std::fs::write(root.join(format!("{}.json", d0.name)), serde_json::to_string_pretty(&m).unwrap()).unwrap();
+    std::fs::write(
+        root.join(format!("{}.json", d0.name)),
+        serde_json::to_string_pretty(&m).unwrap(),
+    )
+    .unwrap();
     let mut d = d0;
     assert_eq!(d.wait_exit(T), Some(0));
     assert!(d.meta().is_some());
-    assert!(d.meta().unwrap().get("exitCode").is_none(), "foreign generation must not be touched");
+    assert!(
+        d.meta().unwrap().get("exitCode").is_none(),
+        "foreign generation must not be touched"
+    );
 }
 
 /// node: tests/shutdown-backstop.test.ts:80-122
@@ -364,30 +433,66 @@ fn shutdown_backstop_force_exits_and_reaps_a_frozen_child() {
     skip_without_a_real_machine!();
     let _s = serial();
     let root = short_root();
-    let frozen = script(&root, "frozen.sh", "#!/bin/bash\ntrap '' HUP TERM\nwhile :; do sleep 1; done\n");
+    let child_marker = root.join("frozen-child.pid");
+    let frozen = script(
+        &root,
+        "frozen.sh",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\ntrap '' HUP TERM\nwhile :; do sleep 1; done\n",
+            child_marker.display()
+        ),
+    );
     let mut d = Daemon::start_env(
         &root,
         config(&unique_name("back"), frozen.to_str().unwrap(), &[]),
         &[("PTY_SHUTDOWN_DEADLINE_MS", "300")],
     );
-    std::thread::sleep(Duration::from_millis(200));
-    let child = d.child_pid();
+    assert!(wait_until(T, || child_marker.exists()));
+    let child = std::fs::read_to_string(&child_marker)
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    assert!(pid_alive(child), "frozen child did not remain alive");
     let started = Instant::now();
     d.signal(libc::SIGTERM);
-    assert!(d.wait_exit(Duration::from_secs(4)).is_some(), "daemon still alive");
-    assert!(wait_dead(child, Duration::from_secs(4)), "child still alive");
+    assert!(
+        d.wait_exit(Duration::from_secs(4)).is_some(),
+        "daemon still alive"
+    );
+    assert!(
+        wait_dead(child, Duration::from_secs(4)),
+        "child still alive"
+    );
     assert!(started.elapsed() < Duration::from_secs(4));
     assert!(!d.socket_path().exists());
 
     // With the default deadline a SIGTERM still finishes within 3 s.
     let root = short_root();
-    let frozen = script(&root, "frozen.sh", "#!/bin/bash\ntrap '' HUP TERM\nwhile :; do sleep 1; done\n");
-    let mut d = Daemon::start(&root, config(&unique_name("back"), frozen.to_str().unwrap(), &[]));
-    std::thread::sleep(Duration::from_millis(200));
-    let child = d.child_pid();
+    let child_marker = root.join("frozen-child.pid");
+    let frozen = script(
+        &root,
+        "frozen.sh",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\ntrap '' HUP TERM\nwhile :; do sleep 1; done\n",
+            child_marker.display()
+        ),
+    );
+    let mut d = Daemon::start(
+        &root,
+        config(&unique_name("back"), frozen.to_str().unwrap(), &[]),
+    );
+    assert!(wait_until(T, || child_marker.exists()));
+    let child = std::fs::read_to_string(&child_marker)
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    assert!(pid_alive(child), "frozen child did not remain alive");
     let started = Instant::now();
     d.signal(libc::SIGTERM);
-    assert!(d.wait_exit(Duration::from_secs(3)).is_some(), "daemon still alive");
+    assert!(
+        d.wait_exit(Duration::from_secs(3)).is_some(),
+        "daemon still alive"
+    );
     assert!(wait_dead(child, Duration::from_secs(1)));
     assert!(started.elapsed() < Duration::from_secs(3));
 }
@@ -411,12 +516,19 @@ fn spawner_pid_watchdog() {
     assert!(d.alive());
     spawner.kill().unwrap();
     spawner.wait().unwrap();
-    assert!(d.wait_exit(Duration::from_secs(12)).is_some(), "daemon outlived its spawner");
+    assert!(
+        d.wait_exit(Duration::from_secs(12)).is_some(),
+        "daemon outlived its spawner"
+    );
     // An external stop: metadata is kept.
     assert!(d.meta().is_some());
 
     // Already dead at boot → exits before serving.
-    let dead = std::process::Command::new("true").spawn().unwrap().wait_with_output().unwrap();
+    let dead = std::process::Command::new("true")
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
     let _ = dead;
     let dead_pid = {
         let mut c = std::process::Command::new("true").spawn().unwrap();
@@ -459,14 +571,25 @@ fn child_environment_policy() {
     let d = Daemon::start_env(
         &root,
         cfg,
-        &[("NO_COLOR", "1"), ("SECRET_TOKEN", "s3"), ("TERM", ""), ("ASSIGNMENT_WINS", "inherited")],
+        &[
+            ("NO_COLOR", "1"),
+            ("SECRET_TOKEN", "s3"),
+            ("TERM", ""),
+            ("ASSIGNMENT_WINS", "inherited"),
+        ],
     );
     assert!(wait_until(T, || out.exists()));
     std::thread::sleep(Duration::from_millis(100));
     let env = std::fs::read_to_string(&out).unwrap();
-    let get = |k: &str| env.lines().find_map(|l| l.strip_prefix(&format!("{k}=")).map(str::to_string));
+    let get = |k: &str| {
+        env.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")).map(str::to_string))
+    };
     assert_eq!(get("PTY_SESSION").as_deref(), Some(d.name.as_str()));
-    assert_eq!(get("PTY_SESSION_GENERATION"), d.meta().unwrap()["generation"].as_str().map(str::to_string));
+    assert_eq!(
+        get("PTY_SESSION_GENERATION"),
+        d.meta().unwrap()["generation"].as_str().map(str::to_string)
+    );
     assert_eq!(get("TERM").as_deref(), Some("xterm-256color"));
     assert_eq!(get("ASSIGNMENT_WINS").as_deref(), Some("explicit"));
     assert_eq!(get("NO_COLOR"), None);
@@ -475,7 +598,10 @@ fn child_environment_policy() {
     assert_eq!(get("PTY_SERVER_CONFIG"), None);
     let m = d.meta().unwrap();
     assert_eq!(m["unsetEnv"], json!(["NO_COLOR", "ASSIGNMENT_WINS"]));
-    assert_eq!(m["extraEnv"], json!({"ASSIGNMENT_WINS": "explicit", "PTY_SESSION": "spoof"}));
+    assert_eq!(
+        m["extraEnv"],
+        json!({"ASSIGNMENT_WINS": "explicit", "PTY_SESSION": "spoof"})
+    );
     drop(d);
 
     // isolateEnv keeps only the allow-list.
@@ -543,7 +669,10 @@ fn terminal_events_reach_the_log() {
         config(
             &unique_name("ev"),
             "sh",
-            &["-c", "printf '\\a'; sleep 0.05; printf '\\033]0;first\\007'; sleep 0.05; printf '\\033]0;first\\007'; sleep 0.05; printf '\\033]0;second\\007'; sleep 0.05; printf '\\033]9;hello\\007'; sleep 30"],
+            &[
+                "-c",
+                "printf '\\a'; sleep 0.05; printf '\\033]0;first\\007'; sleep 0.05; printf '\\033]0;first\\007'; sleep 0.05; printf '\\033]0;second\\007'; sleep 0.05; printf '\\033]9;hello\\007'; sleep 30",
+            ],
         ),
     );
     assert!(wait_until(T, || !d.events("notification").is_empty()));
@@ -551,7 +680,13 @@ fn terminal_events_reach_the_log() {
     let types: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
     assert_eq!(
         types,
-        ["session_start", "bell", "title_change", "title_change", "notification"]
+        [
+            "session_start",
+            "bell",
+            "title_change",
+            "title_change",
+            "notification"
+        ]
     );
     assert_eq!(events[2]["value"], "first");
     assert_eq!(events[3]["value"], "second");
@@ -582,13 +717,26 @@ fn kill_terminates_a_deep_tree_and_releases_the_name() {
     let (first_pid, first_ready) = (root.join("first.pid"), root.join("first.ready"));
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", &name, "--", tree.to_str().unwrap(), "launcher",
-          first_pid.to_str().unwrap(), first_ready.to_str().unwrap()],
+        &[
+            "run",
+            "-d",
+            "--id",
+            &name,
+            "--",
+            tree.to_str().unwrap(),
+            "launcher",
+            first_pid.to_str().unwrap(),
+            first_ready.to_str().unwrap(),
+        ],
         &[],
     );
     assert_eq!(code, 0, "{e}");
     assert!(wait_until(T, || first_ready.exists()));
-    let leaf: i32 = std::fs::read_to_string(&first_pid).unwrap().trim().parse().unwrap();
+    let leaf: i32 = std::fs::read_to_string(&first_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     assert!(pid_alive(leaf));
 
     let (_o, e, code) = run_pty(&root, &["kill", &name], &[]);
@@ -599,13 +747,26 @@ fn kill_terminates_a_deep_tree_and_releases_the_name() {
     let (second_pid, second_ready) = (root.join("second.pid"), root.join("second.ready"));
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", &name, "--", tree.to_str().unwrap(), "launcher",
-          second_pid.to_str().unwrap(), second_ready.to_str().unwrap()],
+        &[
+            "run",
+            "-d",
+            "--id",
+            &name,
+            "--",
+            tree.to_str().unwrap(),
+            "launcher",
+            second_pid.to_str().unwrap(),
+            second_ready.to_str().unwrap(),
+        ],
         &[],
     );
     assert_eq!(code, 0, "{e}");
     assert!(wait_until(T, || second_ready.exists()));
-    let leaf2: i32 = std::fs::read_to_string(&second_pid).unwrap().trim().parse().unwrap();
+    let leaf2: i32 = std::fs::read_to_string(&second_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     assert_ne!(leaf, leaf2);
     let _ = run_pty(&root, &["kill", &name], &[]);
     assert!(wait_dead(leaf2, Duration::from_secs(4)));
@@ -622,15 +783,26 @@ fn run_waits_for_the_publication_of_the_replacement() {
     let _s = serial();
     let root = short_root();
     let name = unique_name("ready");
-    let (_o, e, code) = run_pty(&root, &["run", "-d", "--id", &name, "--", "sh", "-c", "exit 3"], PRESERVE);
+    let (_o, e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", &name, "--", "sh", "-c", "exit 3"],
+        PRESERVE,
+    );
     assert_eq!(code, 0, "{e}");
     let m = read_meta(&root, &name).unwrap();
     let pid = m["daemonPid"].as_i64().unwrap() as i32;
-    assert!(wait_until(T, || read_meta(&root, &name).unwrap()["exitCode"] == 3));
+    assert!(wait_until(
+        T,
+        || read_meta(&root, &name).unwrap()["exitCode"] == 3
+    ));
     assert!(wait_dead(pid, T));
     let old_generation = m["generation"].clone();
 
-    let (_o, e, code) = run_pty(&root, &["run", "-d", "--id", &name, "--", "sleep", "30"], PRESERVE);
+    let (_o, e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", &name, "--", "sleep", "30"],
+        PRESERVE,
+    );
     assert_eq!(code, 0, "{e}");
     let m = read_meta(&root, &name).unwrap();
     let new_pid = m["daemonPid"].as_i64().unwrap() as i32;
@@ -638,12 +810,19 @@ fn run_waits_for_the_publication_of_the_replacement() {
     assert_ne!(new_pid, pid);
     assert_ne!(m["generation"], old_generation);
     assert!(m.get("exitCode").is_none(), "{m}");
-    let pidfile: i32 = std::fs::read_to_string(root.join(format!("{name}.pid"))).unwrap().trim().parse().unwrap();
+    let pidfile: i32 = std::fs::read_to_string(root.join(format!("{name}.pid")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     assert_eq!(pidfile, new_pid);
     let starts = events_of_type(&root, &name, "session_start");
     assert_eq!(starts.len(), 1);
     assert!(starts[0]["ts"].as_str().unwrap() >= m["createdAt"].as_str().unwrap());
-    assert_eq!(m["command"].as_str().map(|c| c.ends_with("/sleep")), Some(true));
+    assert_eq!(
+        m["command"].as_str().map(|c| c.ends_with("/sleep")),
+        Some(true)
+    );
     let _ = run_pty(&root, &["kill", &name], &[]);
 }
 
@@ -656,13 +835,33 @@ fn run_reports_an_immediately_exiting_daemon_with_its_stderr() {
     let name = unique_name("early");
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", &name, "--cwd", "/no/such/dir/here", "--", "sleep", "30"],
+        &[
+            "run",
+            "-d",
+            "--id",
+            &name,
+            "--cwd",
+            "/no/such/dir/here",
+            "--",
+            "sleep",
+            "30",
+        ],
         &[],
     );
     assert_ne!(code, 0);
-    assert!(e.contains("Daemon process exited immediately (code 1)."), "{e}");
-    assert!(e.contains("Working directory does not exist: /no/such/dir/here"), "{e}");
-    let (_o, e, code) = run_pty(&root, &["run", "-d", "--id", &name, "--", "no-such-command-xyz"], &[]);
+    assert!(
+        e.contains("Daemon process exited immediately (code 1)."),
+        "{e}"
+    );
+    assert!(
+        e.contains("Working directory does not exist: /no/such/dir/here"),
+        "{e}"
+    );
+    let (_o, e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", &name, "--", "no-such-command-xyz"],
+        &[],
+    );
     assert_ne!(code, 0);
     assert!(e.contains("Command not found: no-such-command-xyz"), "{e}");
 }
@@ -683,7 +882,16 @@ fn node_attach_stream_against_the_rust_daemon() {
     let name = unique_name("node");
     let (_o, e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", &name, "--", "sh", "-c", "echo LAUNCHER_READY; sleep 0.5; echo tail; exit 3"],
+        &[
+            "run",
+            "-d",
+            "--id",
+            &name,
+            "--",
+            "sh",
+            "-c",
+            "echo LAUNCHER_READY; sleep 0.5; echo tail; exit 3",
+        ],
         &[],
     );
     assert_eq!(code, 0, "{e}");
@@ -711,16 +919,124 @@ fn node_attach_stream_against_the_rust_daemon() {
         });
     }
     let out = cmd.output().unwrap();
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(out.stdout.is_empty());
-    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let bytes = std::fs::read(&out_path).unwrap();
     let mut reader = pty_core::protocol::PacketReader::new();
     let packets = reader.feed(&bytes).unwrap();
     let types: Vec<_> = packets.iter().map(|p| p.type_).collect();
     assert_eq!(&types[..2], &[Geometry, Screen], "{types:?}");
     assert_eq!(types.last(), Some(&Exit), "{types:?}");
-    assert!(types[2..types.len() - 1].iter().all(|t| *t == Data), "{types:?}");
+    assert!(
+        types[2..types.len() - 1].iter().all(|t| *t == Data),
+        "{types:?}"
+    );
     assert!(String::from_utf8_lossy(&packets[1].payload).contains("LAUNCHER_READY"));
-    assert_eq!(pty_core::protocol::decode_exit(&packets.last().unwrap().payload), 3);
+    assert_eq!(
+        pty_core::protocol::decode_exit(&packets.last().unwrap().payload),
+        3
+    );
+}
+
+#[test]
+fn startup_deadline_returns_before_waiting_for_terminal_persistence() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-response");
+    let mut cfg = config(&name, "sleep", &["30"]);
+    cfg["startupLease"] = json!({
+        "timeoutMs": 1_000,
+        "lifecycleTag": STARTUP_TAG,
+    });
+    let mut daemon = Daemon::start(&root, cfg);
+    assert!(wait_until(T, || daemon.meta().is_some()));
+    let starting = daemon.meta().unwrap()["tags"][STARTUP_TAG]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let starting_json: serde_json::Value = serde_json::from_str(&starting).unwrap();
+    let generation = starting_json["generation"].as_str().unwrap().to_string();
+    let deadline = starting_json["deadlineMonotonicNs"]
+        .as_str()
+        .unwrap()
+        .parse::<u128>()
+        .unwrap();
+
+    // Keep the terminal write blocked while the request crosses the deadline.
+    let lock = root.join(format!("{name}.lock"));
+    std::fs::write(&lock, std::process::id().to_string()).unwrap();
+    while pty_lifecycle::monotonic_now_ns().unwrap() < deadline {
+        std::thread::yield_now();
+    }
+
+    let mut connection = daemon.connect();
+    connection.send(&encode_lifecycle_compare_and_set_request(
+        &LifecycleCompareAndSetRequest {
+            expected_generation: generation,
+            tag: STARTUP_TAG.to_string(),
+            expected_value: starting.clone(),
+            value: r#"{"_tag":"ready"}"#.to_string(),
+        },
+    ));
+    assert!(connection.wait_for(T, |packets| {
+        packets.iter().any(|packet| packet.type_ == LifecycleCas)
+    }));
+    let packet = connection
+        .packets
+        .iter()
+        .find(|packet| packet.type_ == LifecycleCas)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<LifecycleCompareAndSetResult>(&packet.payload).unwrap(),
+        LifecycleCompareAndSetResult::DeadlineExpired {
+            value: starting.clone()
+        }
+    );
+    assert!(
+        daemon.alive(),
+        "response release alone must not bypass terminal persistence"
+    );
+
+    std::fs::remove_file(lock).unwrap();
+    assert_eq!(daemon.wait_exit(T), Some(124));
+    let terminal = daemon.meta().unwrap()["tags"][STARTUP_TAG]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&terminal).unwrap()["_tag"],
+        "terminal"
+    );
+}
+
+#[test]
+fn natural_exit_persists_terminal_startup_state() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let name = unique_name("startup-exit");
+    let mut cfg = config(&name, "sh", &["-c", "exit 7"]);
+    cfg["startupLease"] = json!({
+        "timeoutMs": 30_000,
+        "lifecycleTag": STARTUP_TAG,
+    });
+    let mut daemon = Daemon::start(&root, cfg);
+    assert_eq!(daemon.wait_exit(T), Some(7));
+    let metadata = daemon.meta().unwrap();
+    let terminal: serde_json::Value =
+        serde_json::from_str(metadata["tags"][STARTUP_TAG].as_str().unwrap()).unwrap();
+    assert_eq!(terminal["_tag"], "terminal");
+    assert_eq!(terminal["cause"], "exit");
+    assert_eq!(terminal["generation"], metadata["generation"]);
 }

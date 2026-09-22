@@ -306,7 +306,6 @@ fn cmd_gc(
     Ok(0)
 }
 
-
 /// `path.basename(root)` with `[^A-Za-z0-9._-]+` → `-` and edge dashes
 /// stripped.
 ///

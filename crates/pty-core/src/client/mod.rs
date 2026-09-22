@@ -17,6 +17,7 @@
 pub mod attach;
 pub mod connection;
 pub mod peek;
+pub mod readiness;
 pub mod remote;
 pub mod sanitize;
 pub mod send;
@@ -38,6 +39,10 @@ pub use connection::{
     peek_screen_bytes_in, peek_screen_in, send_data,
 };
 pub use peek::{PeekOutcome, PeekParams, PeekWaitError, follow, peek, peek_wait, strip_ansi};
+pub use readiness::{
+    READINESS_TIMEOUT, compare_and_set_lifecycle, compare_and_set_lifecycle_with_capability_fd,
+    query_accepted_socket_ownership, query_accepted_socket_ownership_with_capability_fd,
+};
 pub use remote::{
     RemoteDialer, RemoteError, RemoteSessionRow, RouteRefusedError, dial_and_route,
     fetch_remote_list,
@@ -89,6 +94,10 @@ pub enum ClientError {
     StatsTimeout(String),
     /// The STATUS payload was not JSON.
     InvalidStats(String),
+    /// A readiness control request produced no matching packet in its budget.
+    ReadinessTimeout(String),
+    /// A readiness control response was not one of the tagged JSON outcomes.
+    InvalidReadiness(String),
 }
 
 impl fmt::Display for ClientError {
@@ -110,6 +119,12 @@ impl fmt::Display for ClientError {
             ClientError::StatsTimeout(name) => write!(f, "Timeout querying stats for \"{name}\""),
             ClientError::InvalidStats(name) => {
                 write!(f, "Invalid stats response from \"{name}\"")
+            }
+            ClientError::ReadinessTimeout(name) => {
+                write!(f, "Timeout querying readiness control for \"{name}\"")
+            }
+            ClientError::InvalidReadiness(name) => {
+                write!(f, "Invalid readiness control response from \"{name}\"")
             }
         }
     }

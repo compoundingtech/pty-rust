@@ -100,7 +100,12 @@ pub fn run(args: &[String]) -> CliResult {
 
     let name = resolve_ref(&reference)?;
     if follow {
-        let params = client::PeekParams { name: &name, plain, full, socket: None };
+        let params = client::PeekParams {
+            name: &name,
+            plain,
+            full,
+            socket: None,
+        };
         return match client::follow(params, &client::ClientIo::default()) {
             Ok(client::PeekOutcome::Exited(code)) => Ok(code.max(0)),
             Ok(_) => Ok(0),
@@ -122,7 +127,12 @@ pub fn run(args: &[String]) -> CliResult {
             }
         };
     }
-    let params = client::PeekParams { name: &name, plain, full, socket: None };
+    let params = client::PeekParams {
+        name: &name,
+        plain,
+        full,
+        socket: None,
+    };
     match client::peek(params, &client::ClientIo::default()) {
         Ok(client::PeekOutcome::Exited(code)) => Ok(code.max(0)),
         Ok(_) => Ok(0),
@@ -139,7 +149,11 @@ pub fn run(args: &[String]) -> CliResult {
                         println!("{}", lines.join("\n"));
                     }
                     _ => {
-                        let status = if meta.exited_at.is_some() { "exited" } else { "vanished" };
+                        let status = if meta.exited_at.is_some() {
+                            "exited"
+                        } else {
+                            "vanished"
+                        };
                         eprintln!("Session \"{name}\" has {status} with no saved output.");
                     }
                 }

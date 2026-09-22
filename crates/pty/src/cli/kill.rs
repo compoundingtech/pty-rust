@@ -43,7 +43,8 @@ pub fn run(args: &[String]) -> CliResult {
     // Drop the `strategy` tag so `pty gc` does not start the session again
     // on its next pass.
     let tags = session.metadata.as_ref().and_then(|m| m.tags.as_ref());
-    let was_permanent = tags.and_then(|t| t.get("strategy")).map(String::as_str) == Some("permanent");
+    let was_permanent =
+        tags.and_then(|t| t.get("strategy")).map(String::as_str) == Some("permanent");
     if was_permanent {
         let _ = registry::update_tags(&name, &Default::default(), &["strategy".to_string()]);
     }
@@ -89,9 +90,7 @@ pub fn run(args: &[String]) -> CliResult {
     let verified_empty = verified_empty(&after, escalated.as_deref());
     report(&name, &after, escalated.as_deref(), verified_empty);
 
-    if was_permanent
-        && let Some(path) = tags.and_then(|t| t.get("ptyfile"))
-    {
+    if was_permanent && let Some(path) = tags.and_then(|t| t.get("ptyfile")) {
         eprintln!("Note: this session is managed by {path}");
         eprintln!("The strategy tag will be restored on the next 'pty up'.");
     }
@@ -202,7 +201,9 @@ fn report(name: &str, after: &Aftermath, escalated: Option<&[i32]>, verified_emp
             // The daemon left something behind and the escalation cleared it.
             // Say so: a silent success here would hide that the teardown needed
             // a second pass, which is the fact somebody debugging wants.
-            Some(_) => println!("Session \"{name}\" killed (the escalation stopped the remainder)."),
+            Some(_) => {
+                println!("Session \"{name}\" killed (the escalation stopped the remainder).")
+            }
             None => println!("Session \"{name}\" killed."),
         }
         return;
@@ -288,7 +289,11 @@ mod tests {
     #[test]
     fn a_reused_pid_is_not_a_survivor() {
         let before = vec![id(10, "tok:10")];
-        let after = aftermath_with(&before, |_| Some(LiveIdentity::new("tok:different")), |_| false);
+        let after = aftermath_with(
+            &before,
+            |_| Some(LiveIdentity::new("tok:different")),
+            |_| false,
+        );
         assert!(after.all_gone());
     }
 
@@ -327,11 +332,22 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id() as i32;
         let table = ProcTable::read();
-        let identity = table.identity(pid).known().expect("live pid has an identity");
-        let before = vec![ProcessIdentity { pid, identity, depth: 1 }];
+        let identity = table
+            .identity(pid)
+            .known()
+            .expect("live pid has an identity");
+        let before = vec![ProcessIdentity {
+            pid,
+            identity,
+            depth: 1,
+        }];
 
         let alive = aftermath(&before);
-        assert_eq!(alive.survived, vec![pid], "a running process reads as a survivor");
+        assert_eq!(
+            alive.survived,
+            vec![pid],
+            "a running process reads as a survivor"
+        );
         assert!(alive.unknown.is_empty());
 
         let _ = child.kill();
@@ -354,11 +370,20 @@ mod tests {
     /// real Mac.
     #[test]
     fn a_real_zombie_is_not_a_survivor() {
-        let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
         let pid = child.id() as i32;
         let table = ProcTable::read();
-        let identity = table.identity(pid).known().expect("live pid has an identity");
-        let before = vec![ProcessIdentity { pid, identity: identity.clone(), depth: 1 }];
+        let identity = table
+            .identity(pid)
+            .known()
+            .expect("live pid has an identity");
+        let before = vec![ProcessIdentity {
+            pid,
+            identity: identity.clone(),
+            depth: 1,
+        }];
 
         // Let it exit. It stays a zombie because nothing has waited on it.
         for _ in 0..200 {
@@ -371,7 +396,10 @@ mod tests {
         // is exactly why the identity check alone is not enough. On macOS it
         // is not listed at all. Both are fine; neither is asserted.
         let after = aftermath(&before);
-        assert!(after.all_gone(), "a zombie must not be reported, got {after:?}");
+        assert!(
+            after.all_gone(),
+            "a zombie must not be reported, got {after:?}"
+        );
 
         let _ = child.wait();
     }
@@ -384,15 +412,30 @@ mod tests {
     #[test]
     fn a_survivor_of_the_escalation_is_never_a_verified_empty_tree() {
         let clean = Aftermath::default();
-        assert!(clean.all_gone(), "precondition: the snapshot says nothing is left");
+        assert!(
+            clean.all_gone(),
+            "precondition: the snapshot says nothing is left"
+        );
         assert!(
             !verified_empty(&clean, Some(&[4321])),
             "a process that survived SIGKILL to its group must not read as success"
         );
-        assert!(verified_empty(&clean, Some(&[])), "an escalation that cleared everything is success");
-        assert!(verified_empty(&clean, None), "no escalation needed is success");
         assert!(
-            !verified_empty(&Aftermath { survived: vec![1], unknown: vec![] }, Some(&[])),
+            verified_empty(&clean, Some(&[])),
+            "an escalation that cleared everything is success"
+        );
+        assert!(
+            verified_empty(&clean, None),
+            "no escalation needed is success"
+        );
+        assert!(
+            !verified_empty(
+                &Aftermath {
+                    survived: vec![1],
+                    unknown: vec![]
+                },
+                Some(&[])
+            ),
             "the snapshot still decides when the sweep found nothing"
         );
     }

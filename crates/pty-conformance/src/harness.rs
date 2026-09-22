@@ -79,11 +79,19 @@ pub fn pty_bin() -> &'static Path {
             && !p.is_empty()
         {
             let p = PathBuf::from(p);
-            assert!(p.is_absolute(), "PTY_TEST_BIN must be an absolute path: {}", p.display());
+            assert!(
+                p.is_absolute(),
+                "PTY_TEST_BIN must be an absolute path: {}",
+                p.display()
+            );
             assert!(p.exists(), "PTY_TEST_BIN does not exist: {}", p.display());
             return p;
         }
-        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
         let p = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target")
             .join(profile)
@@ -146,7 +154,10 @@ pub fn deadline() -> Duration {
 /// False when `PTY_TEST_BIN` names a binary, because then the profile is the
 /// caller's business.
 pub fn unoptimized_binary_under_test() -> bool {
-    cfg!(debug_assertions) && std::env::var("PTY_TEST_BIN").map(|v| v.is_empty()).unwrap_or(true)
+    cfg!(debug_assertions)
+        && std::env::var("PTY_TEST_BIN")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
 }
 
 /// A fixture's throughput budget, widened for an unoptimized build.
@@ -266,7 +277,11 @@ fn mkdtemp(prefix: &str) -> PathBuf {
     let mut buf = template.into_bytes_with_nul();
     // SAFETY: buf is a NUL-terminated template ending in XXXXXX.
     let p = unsafe { libc::mkdtemp(buf.as_mut_ptr() as *mut libc::c_char) };
-    assert!(!p.is_null(), "mkdtemp failed: {}", std::io::Error::last_os_error());
+    assert!(
+        !p.is_null(),
+        "mkdtemp failed: {}",
+        std::io::Error::last_os_error()
+    );
     // SAFETY: mkdtemp rewrote the template in place; it is still NUL-terminated.
     let s = unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_string();
     PathBuf::from(s)
@@ -456,7 +471,10 @@ impl Rig {
         if prefix.is_empty() {
             return ambient;
         }
-        let mut parts: Vec<String> = prefix.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let mut parts: Vec<String> = prefix
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         parts.push(ambient);
         parts.join(":")
     }
@@ -569,8 +587,17 @@ impl Rig {
 
     /// [`Rig::run`] with a custom timeout, for commands that are expected
     /// to block (an attach without a tty) and are killed on purpose.
-    pub fn run_with_timeout(&self, mut cmd: Command, stdin: Option<Vec<u8>>, timeout: Duration) -> Out {
-        cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+    pub fn run_with_timeout(
+        &self,
+        mut cmd: Command,
+        stdin: Option<Vec<u8>>,
+        timeout: Duration,
+    ) -> Out {
+        cmd.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         let mut child: Child = cmd.spawn().expect("spawn pty binary");
@@ -630,7 +657,13 @@ impl Rig {
     }
 
     /// [`Rig::pty_tty`] with extra environment.
-    pub fn pty_tty_env(&self, extra: &[(&str, &str)], args: &[&str], rows: u16, cols: u16) -> Session {
+    pub fn pty_tty_env(
+        &self,
+        extra: &[(&str, &str)],
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+    ) -> Session {
         // `env -u` scrubs the ambient variables the testkit would otherwise
         // pass through; the rig's fixed variables are set on the same line.
         let mut env_args: Vec<String> = Vec::new();
@@ -672,7 +705,14 @@ impl Rig {
     /// (no terminal emulation), for tests about exact escape sequences
     /// (`attach` sanitize/exit trailers, `peek -f`). Environment as
     /// [`Rig::pty_tty_env`]; `unset` removes variables.
-    pub fn pty_tty_raw(&self, extra: &[(&str, &str)], unset: &[&str], args: &[&str], rows: u16, cols: u16) -> TtyProc {
+    pub fn pty_tty_raw(
+        &self,
+        extra: &[(&str, &str)],
+        unset: &[&str],
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+    ) -> TtyProc {
         let mut env = self.base_env();
         for (k, v) in extra {
             env.insert((*k).into(), (*v).into());
@@ -687,7 +727,12 @@ impl Rig {
     /// wait for its socket and metadata to appear.
     pub fn daemon(&self, id: &str, cmd: &[&str], opts: DaemonOpts) -> Daemon {
         let d = self.daemon_try(id, cmd, opts);
-        assert_eq!(d.launch.status, 0, "pty run -d --id {id} failed: {}", d.launch.summary());
+        assert_eq!(
+            d.launch.status,
+            0,
+            "pty run -d --id {id} failed: {}",
+            d.launch.summary()
+        );
         self.wait_for_daemon(&d);
         d
     }
@@ -812,7 +857,9 @@ impl Rig {
     /// was preserved).
     pub fn wait_for_exit(&self, id: &str) {
         wait_until(&format!("{id} to exit"), || {
-            self.meta(id).map(|m| m.get("exitCode").is_some()).unwrap_or(false)
+            self.meta(id)
+                .map(|m| m.get("exitCode").is_some())
+                .unwrap_or(false)
         });
     }
 
@@ -826,7 +873,9 @@ impl Rig {
     /// Wait until `list --json` reports `id` with `status`.
     pub fn wait_for_status(&self, id: &str, status: &str) {
         wait_until(&format!("{id} to be {status}"), || {
-            self.list_entry(id).map(|e| e["status"] == status).unwrap_or(false)
+            self.list_entry(id)
+                .map(|e| e["status"] == status)
+                .unwrap_or(false)
         });
     }
 
@@ -843,7 +892,9 @@ impl Rig {
         let mut pids = Vec::new();
         let mut stack = dirs;
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {
@@ -871,7 +922,9 @@ impl Rig {
         for &pid in &pids {
             kill_pid(pid, libc::SIGTERM);
         }
-        let _ = poll_for(Duration::from_secs(2), || pids.iter().all(|&p| !pid_alive(p)));
+        let _ = poll_for(Duration::from_secs(2), || {
+            pids.iter().all(|&p| !pid_alive(p))
+        });
         for &pid in &pids {
             if pid_alive(pid) {
                 kill_pid(pid, libc::SIGKILL);
@@ -907,8 +960,8 @@ pub struct Conn {
 impl Conn {
     /// Connect to a daemon socket.
     pub fn open(path: &Path) -> Conn {
-        let stream = UnixStream::connect(path)
-            .unwrap_or_else(|e| panic!("connect {}: {e}", path.display()));
+        let stream =
+            UnixStream::connect(path).unwrap_or_else(|e| panic!("connect {}: {e}", path.display()));
         Conn {
             stream,
             reader: PacketReader::new(),
@@ -943,28 +996,33 @@ impl Conn {
 
     /// Send an ATTACH with a terminal size.
     pub fn attach(&mut self, rows: u16, cols: u16) {
-        self.write_raw(&protocol::encode_attach(rows, cols)).expect("send ATTACH");
+        self.write_raw(&protocol::encode_attach(rows, cols))
+            .expect("send ATTACH");
     }
 
     /// Join as a read-only client. Node has no read-only ATTACH: a PEEK makes
     /// the socket read-only, and the daemon keeps streaming DATA to it.
     pub fn attach_neutral(&mut self, _rows: u16, _cols: u16) {
-        self.write_raw(&protocol::encode_peek(false, false)).expect("send PEEK");
+        self.write_raw(&protocol::encode_peek(false, false))
+            .expect("send PEEK");
     }
 
     /// Send a PEEK request.
     pub fn peek(&mut self, plain: bool, full: bool) {
-        self.write_raw(&protocol::encode_peek(plain, full)).expect("send PEEK");
+        self.write_raw(&protocol::encode_peek(plain, full))
+            .expect("send PEEK");
     }
 
     /// Send a RESIZE.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        self.write_raw(&protocol::encode_resize(rows, cols)).expect("send RESIZE");
+        self.write_raw(&protocol::encode_resize(rows, cols))
+            .expect("send RESIZE");
     }
 
     /// Send DATA.
     pub fn data(&mut self, bytes: &[u8]) {
-        self.write_raw(&protocol::encode_data(bytes)).expect("send DATA");
+        self.write_raw(&protocol::encode_data(bytes))
+            .expect("send DATA");
     }
 
     /// Send a DETACH.
@@ -974,7 +1032,8 @@ impl Conn {
 
     /// Send a STATUS request.
     pub fn status(&mut self) {
-        self.write_raw(&protocol::encode_status()).expect("send STATUS");
+        self.write_raw(&protocol::encode_status())
+            .expect("send STATUS");
     }
 
     /// Shut down the write half (signals EOF to the daemon).
@@ -1111,7 +1170,12 @@ pub fn data_bytes(packets: &[Packet]) -> Vec<u8> {
 /// Assert the exit status.
 #[track_caller]
 pub fn expect_status(out: &Out, status: i32) {
-    assert_eq!(out.status, status, "unexpected exit status: {}", out.summary());
+    assert_eq!(
+        out.status,
+        status,
+        "unexpected exit status: {}",
+        out.summary()
+    );
 }
 
 /// Assert a non-zero exit status.
@@ -1139,7 +1203,10 @@ pub fn expect_contains(hay: &str, needle: &str) {
 /// Assert `hay` does not contain `needle`.
 #[track_caller]
 pub fn expect_not_contains(hay: &str, needle: &str) {
-    assert!(!hay.contains(needle), "did not expect {needle:?} in:\n{hay}");
+    assert!(
+        !hay.contains(needle),
+        "did not expect {needle:?} in:\n{hay}"
+    );
 }
 
 /// Assert `hay` matches the regex `re`.
@@ -1158,7 +1225,10 @@ pub fn expect_not_regex(hay: &str, re: &str) {
 
 /// Number of non-overlapping matches of `re` in `hay`.
 pub fn count_regex(hay: &str, re: &str) -> usize {
-    regex::Regex::new(re).expect("valid regex").find_iter(hay).count()
+    regex::Regex::new(re)
+        .expect("valid regex")
+        .find_iter(hay)
+        .count()
 }
 
 /// Assert status 0 and parse stdout as JSON.
@@ -1166,14 +1236,16 @@ pub fn count_regex(hay: &str, re: &str) -> usize {
 pub fn expect_json(out: &Out) -> Value {
     assert_eq!(out.status, 0, "expected success: {}", out.summary());
     let s = out.stdout();
-    serde_json::from_str(&s).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", out.summary()))
+    serde_json::from_str(&s)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", out.summary()))
 }
 
 /// Parse stdout as JSON without checking the status.
 #[track_caller]
 pub fn parse_json(out: &Out) -> Value {
     let s = out.stdout();
-    serde_json::from_str(&s).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", out.summary()))
+    serde_json::from_str(&s)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", out.summary()))
 }
 
 /// stdout split into lines (a trailing newline does not add an empty line).
@@ -1196,12 +1268,18 @@ pub fn unique_id(prefix: &str) -> String {
 
 /// Path of the Node reference checkout, when `PTY_NODE_CHECKOUT` is set.
 pub fn node_checkout() -> Option<PathBuf> {
-    std::env::var("PTY_NODE_CHECKOUT").ok().filter(|s| !s.is_empty()).map(PathBuf::from)
+    std::env::var("PTY_NODE_CHECKOUT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The workspace root (two levels above this crate).
 pub fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 /// This crate's `fixtures/` directory.
@@ -1266,7 +1344,9 @@ impl FakeMeta {
     }
 
     pub fn tag(mut self, k: &str, v: &str) -> Self {
-        self.tags.get_or_insert_with(Vec::new).push((k.into(), v.into()));
+        self.tags
+            .get_or_insert_with(Vec::new)
+            .push((k.into(), v.into()));
         self
     }
 
@@ -1313,7 +1393,11 @@ pub fn write_fake_metadata(dir: &Path, name: &str, meta: FakeMeta) {
     for (k, v) in meta.extra {
         m.insert(k, v);
     }
-    std::fs::write(dir.join(format!("{name}.json")), Value::Object(m).to_string()).unwrap();
+    std::fs::write(
+        dir.join(format!("{name}.json")),
+        Value::Object(m).to_string(),
+    )
+    .unwrap();
 }
 
 /// The GEOMETRY wire type (10), which pty-core's protocol enum keeps as an
@@ -1331,6 +1415,8 @@ pub fn type_name(t: MessageType) -> &'static str {
         MessageType::Screen => "SCREEN",
         MessageType::Peek => "PEEK",
         MessageType::Status => "STATUS",
+        MessageType::AcceptedSocketOwnership => "ACCEPTED_SOCKET_OWNERSHIP",
+        MessageType::LifecycleCas => "LIFECYCLE_CAS",
         MessageType::Geometry => "GEOMETRY",
         MessageType::Unknown(_) => "UNKNOWN",
     }
@@ -1343,12 +1429,18 @@ pub fn sequence_names(seq: &[MessageType]) -> Vec<&'static str> {
 
 /// Parse a `"80 9f a0"` hex string into bytes.
 pub fn parse_hex(s: &str) -> Vec<u8> {
-    s.split_whitespace().map(|h| u8::from_str_radix(h, 16).expect("hex byte")).collect()
+    s.split_whitespace()
+        .map(|h| u8::from_str_radix(h, 16).expect("hex byte"))
+        .collect()
 }
 
 /// Render bytes as a `"80 9f a0"` hex string.
 pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A process running inside a real pty, with its raw output captured
@@ -1438,7 +1530,11 @@ impl TtyProc {
         let start = Instant::now();
         loop {
             self.pump();
-            if self.output.windows(needle.len().max(1)).any(|w| w == needle) {
+            if self
+                .output
+                .windows(needle.len().max(1))
+                .any(|w| w == needle)
+            {
                 return true;
             }
             if start.elapsed() > timeout {

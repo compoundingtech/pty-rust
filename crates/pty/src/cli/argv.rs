@@ -179,7 +179,10 @@ mod tests {
 
     #[test]
     fn cursor_basics() {
-        let args: Vec<String> = ["--wait", "bell", "name"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["--wait", "bell", "name"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut a = Argv::new(&args);
         assert!(a.at_dash());
         assert_eq!(a.take_value(), Some("bell"));

@@ -16,6 +16,41 @@ pub struct ProcessIdentity {
     pub depth: u32,
 }
 
+
+pub fn capture_process_identity(pid: i32) -> Option<ProcessIdentity> {
+    let row = pty_core::proctable::process(pid).known()?;
+    if row.is_zombie() {
+        return None;
+    }
+    Some(ProcessIdentity {
+        pid,
+        identity: row.identity?,
+        depth: 0,
+    })
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompleteProcessTreeSnapshot {
+    Complete {
+        identities: Vec<ProcessIdentity>,
+    },
+    Unavailable {
+        reason: String,
+        identities: Vec<ProcessIdentity>,
+    },
+}
+
+impl CompleteProcessTreeSnapshot {
+    pub fn identities(&self) -> &[ProcessIdentity] {
+        match self {
+            Self::Complete { identities } | Self::Unavailable { identities, .. } => identities,
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete { .. })
+    }
+}
+
 /// Walk a tree from `root_pid`, breadth first, recording depth.
 fn walk(root_pid: i32, table: &ProcTable) -> Vec<(i32, u32)> {
     let mut children: std::collections::HashMap<i32, Vec<i32>> = Default::default();
@@ -152,10 +187,11 @@ pub fn snapshot_from_table(root_pid: i32, table: &ProcTable) -> Vec<ProcessIdent
     let mut out: Vec<ProcessIdentity> = walk(root_pid, table)
         .into_iter()
         .filter_map(|(pid, depth)| {
-            table
-                .identity(pid)
-                .known()
-                .map(|identity| ProcessIdentity { pid, identity, depth })
+            table.identity(pid).known().map(|identity| ProcessIdentity {
+                pid,
+                identity,
+                depth,
+            })
         })
         .collect();
     out.sort_by(|a, b| b.depth.cmp(&a.depth).then(b.pid.cmp(&a.pid)));
@@ -165,6 +201,236 @@ pub fn snapshot_from_table(root_pid: i32, table: &ProcTable) -> Vec<ProcessIdent
 /// The live descendant snapshot of `root_pid`. One table read.
 pub fn snapshot_descendant_processes(root_pid: i32) -> Vec<ProcessIdentity> {
     snapshot_from_table(root_pid, &ProcTable::read())
+}
+
+/// Snapshot every live descendant, keeping unreadable containment distinct
+/// from a genuinely empty tree.
+pub fn snapshot_complete_from_table(
+    root_pid: i32,
+    table: &ProcTable,
+) -> CompleteProcessTreeSnapshot {
+    if !table.is_readable() {
+        return CompleteProcessTreeSnapshot::Unavailable {
+            reason: "process-table-unreadable".to_string(),
+            identities: Vec::new(),
+        };
+    }
+    let root_available = matches!(
+        table.row(root_pid),
+        pty_core::proctable::Answer::Known(row)
+            if !row.is_zombie() && row.identity.is_some()
+    );
+    let observed = snapshot_from_table(root_pid, table);
+    if !root_available {
+        return CompleteProcessTreeSnapshot::Unavailable {
+            reason: "root-identity-unavailable".to_string(),
+            identities: observed,
+        };
+    }
+    for (pid, _) in walk(root_pid, table) {
+        if let pty_core::proctable::Answer::Known(row) = table.row(pid)
+            && !row.is_zombie()
+            && row.identity.is_none()
+        {
+            return CompleteProcessTreeSnapshot::Unavailable {
+                reason: format!("process-identity-unavailable:{pid}"),
+                identities: observed,
+            };
+        }
+    }
+    CompleteProcessTreeSnapshot::Complete {
+        identities: observed,
+    }
+}
+
+pub fn snapshot_descendant_processes_complete(root_pid: i32) -> CompleteProcessTreeSnapshot {
+    snapshot_complete_from_table(root_pid, &ProcTable::read())
+}
+
+/// A complete snapshot whose root must still be the process captured at
+/// spawn. A reused root pid is never accepted as a new containment root.
+pub fn snapshot_descendant_processes_complete_for(
+    root: &ProcessIdentity,
+) -> CompleteProcessTreeSnapshot {
+    let table = ProcTable::read();
+    if table.identity(root.pid).known().as_ref() != Some(&root.identity) {
+        return CompleteProcessTreeSnapshot::Unavailable {
+            reason: "root-identity-changed".to_string(),
+            identities: Vec::new(),
+        };
+    }
+    snapshot_complete_from_table(root.pid, &table)
+}
+
+/// Authenticate a control peer as live and outside the spawned child's exact
+/// process tree. Unknown/truncated ancestry fails closed.
+pub fn control_peer_is_outside_tree(root: &ProcessIdentity, peer_pid: i32) -> bool {
+    control_peer_is_outside_tree_in(root, peer_pid, &ProcTable::read())
+}
+
+fn control_peer_is_outside_tree_in(
+    root: &ProcessIdentity,
+    peer_pid: i32,
+    table: &ProcTable,
+) -> bool {
+    if !table.is_readable()
+        || table.identity(root.pid).known().as_ref() != Some(&root.identity)
+        || peer_pid <= 1
+    {
+        return false;
+    }
+    let mut pid = peer_pid;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if pid == root.pid || !seen.insert(pid) {
+            return false;
+        }
+        let Some(row) = table.row(pid).known() else {
+            return false;
+        };
+        if row.is_zombie() {
+            return false;
+        }
+        if row.ppid <= 1 {
+            return true;
+        }
+        pid = row.ppid;
+    }
+}
+
+fn merge_identities(left: &mut Vec<ProcessIdentity>, right: &[ProcessIdentity]) {
+    for candidate in right {
+        if !left
+            .iter()
+            .any(|id| id.pid == candidate.pid && id.identity == candidate.identity)
+        {
+            left.push(candidate.clone());
+        }
+    }
+    left.sort_by(|a, b| b.depth.cmp(&a.depth).then(b.pid.cmp(&a.pid)));
+}
+
+fn same_identities(left: &[ProcessIdentity], right: &[ProcessIdentity]) -> bool {
+    left == right
+}
+
+/// Freeze the child process group and every discovered descendant, rescanning
+/// until two complete identity snapshots agree. Every raw root/group signal
+/// is fenced by the root identity captured at spawn.
+pub fn freeze_descendant_processes(root: &ProcessIdentity) -> CompleteProcessTreeSnapshot {
+    let first = snapshot_descendant_processes_complete_for(root);
+    let mut observed = first.identities().to_vec();
+    let mut previous_complete = match &first {
+        CompleteProcessTreeSnapshot::Complete { identities } => Some(identities.clone()),
+        CompleteProcessTreeSnapshot::Unavailable { .. } => None,
+    };
+    let unavailable_reason = match &first {
+        CompleteProcessTreeSnapshot::Unavailable { reason, .. } => reason.clone(),
+        CompleteProcessTreeSnapshot::Complete { .. } => "process-tree-did-not-quiesce".to_string(),
+    };
+    let attempts = if first.is_complete() { 8 } else { 1 };
+    // The PTY leader is its process-group leader. Freeze the group first, then
+    // the exact root and any out-of-group descendants. Never signal the group
+    // after the captured leader identity has disappeared.
+    if !signal_group_for_root(root, libc::SIGSTOP)
+        || signal_process_identities(std::slice::from_ref(root), libc::SIGSTOP).is_empty()
+    {
+        return CompleteProcessTreeSnapshot::Unavailable {
+            reason: "root-freeze-failed".to_string(),
+            identities: observed,
+        };
+    }
+    for _ in 0..attempts {
+        if signal_process_identities(&observed, libc::SIGSTOP).len() != observed.len() {
+            return CompleteProcessTreeSnapshot::Unavailable {
+                reason: "descendant-freeze-unverified".to_string(),
+                identities: observed,
+            };
+        }
+        let next = snapshot_descendant_processes_complete_for(root);
+        merge_identities(&mut observed, next.identities());
+        match next {
+            CompleteProcessTreeSnapshot::Complete { identities } => {
+                if previous_complete
+                    .as_ref()
+                    .is_some_and(|previous| same_identities(previous, &identities))
+                {
+                    return CompleteProcessTreeSnapshot::Complete { identities };
+                }
+                previous_complete = Some(identities);
+            }
+            CompleteProcessTreeSnapshot::Unavailable { reason, .. } => {
+                return CompleteProcessTreeSnapshot::Unavailable {
+                    reason,
+                    identities: observed,
+                };
+            }
+        }
+    }
+    CompleteProcessTreeSnapshot::Unavailable {
+        reason: unavailable_reason,
+        identities: observed,
+    }
+}
+
+pub fn resume_frozen_descendants(root: &ProcessIdentity, identities: &[ProcessIdentity]) {
+    let _ = signal_group_for_root(root, libc::SIGCONT);
+    signal_process_identities(std::slice::from_ref(root), libc::SIGCONT);
+    signal_process_identities(identities, libc::SIGCONT);
+}
+
+fn signal_group_for_root(root: &ProcessIdentity, signal: i32) -> bool {
+    if !is_same_process(root) {
+        return false;
+    }
+    signal_group(root.pid, signal);
+    true
+}
+
+fn process_group_exists(root: &ProcessIdentity) -> Option<bool> {
+    if root.pid <= 1 || !is_same_process(root) {
+        return None;
+    }
+    // SAFETY: signal zero observes the process group without changing it.
+    if unsafe { libc::kill(-root.pid, 0) } == 0 {
+        return Some(true);
+    }
+    Some(std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+/// Bounded process-group fallback used only when exact containment was not
+/// provable. Every observation and signal remains fenced by the root's
+/// captured start identity. `false` means teardown could not be verified.
+pub fn terminate_process_group(
+    root: &ProcessIdentity,
+    term_wait: Duration,
+    kill_wait: Duration,
+) -> bool {
+    match process_group_exists(root) {
+        Some(false) => return true,
+        Some(true) => {}
+        None => return false,
+    }
+    if !signal_group_for_root(root, libc::SIGTERM) {
+        return false;
+    }
+    let deadline = Instant::now() + term_wait;
+    while process_group_exists(root) == Some(true) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    match process_group_exists(root) {
+        Some(false) => return true,
+        Some(true) => {}
+        None => return false,
+    }
+    if !signal_group_for_root(root, libc::SIGKILL) {
+        return false;
+    }
+    let deadline = Instant::now() + kill_wait;
+    while process_group_exists(root) == Some(true) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    process_group_exists(root) == Some(false)
 }
 
 /// Is this still the same process, and still running?
@@ -188,7 +454,7 @@ pub fn snapshot_descendant_processes(root_pid: i32) -> Vec<ProcessIdentity> {
 /// "do not signal", never "it is gone". Every caller here wants the safe
 /// direction for a signal; a caller that needs the difference asks
 /// `proctable` and reads the three cases.
-fn is_same_process(id: &ProcessIdentity) -> bool {
+pub(crate) fn is_same_process(id: &ProcessIdentity) -> bool {
     match pty_core::proctable::process(id.pid) {
         pty_core::proctable::Answer::Known(row) if !row.is_zombie() => {
             row.identity.as_ref() == Some(&id.identity)
@@ -309,7 +575,11 @@ mod tests {
             .and_then(|r| r.identity);
         // On macOS it may already be gone, and then there is nothing to pin.
         if let Some(identity) = identity {
-            let id = ProcessIdentity { pid, identity, depth: 1 };
+            let id = ProcessIdentity {
+                pid,
+                identity,
+                depth: 1,
+            };
             let deadline = Instant::now() + Duration::from_secs(5);
             while is_same_process(&id) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
@@ -335,6 +605,42 @@ mod tests {
         }];
         assert!(signal_process_identities(&ids, 0).is_empty());
         assert!(terminate_process_identities(&ids, Duration::ZERO, Duration::ZERO).is_empty());
+    }
+
+    #[test]
+    fn reused_root_identity_blocks_pid_and_group_signals() {
+        let root = ProcessIdentity {
+            pid: std::process::id() as i32,
+            identity: LiveIdentity::new("not-the-live-root"),
+            depth: 0,
+        };
+        assert!(!signal_group_for_root(&root, 0));
+        assert!(!terminate_process_group(
+            &root,
+            Duration::ZERO,
+            Duration::ZERO
+        ));
+        assert!(matches!(
+            snapshot_descendant_processes_complete_for(&root),
+            CompleteProcessTreeSnapshot::Unavailable { reason, .. }
+                if reason == "root-identity-changed"
+        ));
+    }
+
+    #[test]
+    fn control_peers_inside_the_child_tree_are_rejected() {
+        let table = pty_core::proctable::table_from_shape(
+            "10 1 10 S linux:daemon\n20 10 20 S linux:child\n30 20 20 S linux:grandchild\n40 10 40 S linux:caller\n",
+        );
+        let root = ProcessIdentity {
+            pid: 20,
+            identity: LiveIdentity::new("linux:child"),
+            depth: 0,
+        };
+        assert!(!control_peer_is_outside_tree_in(&root, 20, &table));
+        assert!(!control_peer_is_outside_tree_in(&root, 30, &table));
+        assert!(control_peer_is_outside_tree_in(&root, 40, &table));
+        assert!(!control_peer_is_outside_tree_in(&root, 99, &table));
     }
 }
 
@@ -403,9 +709,8 @@ mod group_tests {
     /// Measured on Linux 2026-09-03: the row reads `<pid> <ppid> <pgid> Z`.
     #[test]
     fn a_zombie_is_not_a_group_member() {
-        let rows = pty_core::proctable::table_from_shape(
-            "100 1 100 Ss\n200 100 200 Sl\n300 200 200 Z\n",
-        );
+        let rows =
+            pty_core::proctable::table_from_shape("100 1 100 Ss\n200 100 200 Sl\n300 200 200 Z\n");
         assert_eq!(
             members_of_groups(&[200], &rows),
             vec![200],
@@ -459,7 +764,10 @@ mod group_tests {
     #[test]
     fn my_own_group_is_never_signalled() {
         let (_, sent) = sweep(&[200], 200, vec![vec![]]);
-        assert!(sent.is_empty(), "the command must survive to print its result");
+        assert!(
+            sent.is_empty(),
+            "the command must survive to print its result"
+        );
     }
 
     #[test]

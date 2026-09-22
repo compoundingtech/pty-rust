@@ -15,6 +15,7 @@
 
 pub mod atomic;
 pub mod cleanup;
+pub mod evidence;
 pub mod list;
 pub mod lock;
 pub mod metadata;
@@ -29,12 +30,17 @@ pub use cleanup::{
     SessionGenerationOwner, cleanup, cleanup_all, cleanup_all_while_locked, cleanup_owned_all,
     cleanup_owned_socket, cleanup_socket, is_current_generation_owner,
 };
+pub use evidence::{
+    EvidenceStream, EvidenceUnavailableReason, RemoveSessionGenerationResult, SessionExitEvidence,
+    SessionExitEvidenceResult, SessionExitEvidenceTail, SessionExitStatus,
+    get_session_exit_evidence, remove_session_generation,
+};
 pub use list::{
     DEFAULT_SOCKET_PROBE_BUDGET, ListOptions, SessionInfo, SessionStatus, all_session_names,
     ambiguous_reference_message, get_session, get_session_by_name, has_process_exited_for_reap,
     list_sessions, list_sessions_in, list_sessions_with, pid_alive, probe_sockets_within_budget,
-    read_pid, read_pid_with, read_process_start_token, read_session_pid, resolve_ref,
-    session_exists, socket_reachable, wait_for_process_exit,
+    read_pid, read_pid_with, read_process_start_token, read_session_pid, read_signal_target_with,
+    resolve_ref, session_exists, socket_reachable, wait_for_process_exit,
 };
 pub use lock::{
     EVENT_LOCK_WAIT, LockBusy, LockGuard, LockRefusal, METADATA_PATCH_LOCK_WAIT,
@@ -50,8 +56,8 @@ pub use metadata::{
 };
 pub use mutate::{
     MetadataChangeSnapshot, MetadataPatch, MetadataPatchEvent, MetadataPatchResult, MutateOptions,
-    MutateStatus, apply_metadata_patch_by_id, metadata_matches_observation,
-    mutate_metadata_under_lock, mutate_metadata_under_lock_with,
+    MutateStatus, TagCompareAndSetResult, apply_metadata_patch_by_id, compare_and_set_tag_value,
+    metadata_matches_observation, mutate_metadata_under_lock, mutate_metadata_under_lock_with,
     mutate_metadata_under_lock_with_wait, patch_metadata_by_id, set_display_name, update_tags,
 };
 pub use names::{

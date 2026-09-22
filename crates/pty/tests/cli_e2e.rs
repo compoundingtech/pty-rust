@@ -88,7 +88,18 @@ fn run_ls_peek_send_kill_lifecycle() {
     // Spawn a persistent bash session.
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "-d", "--rows", "24", "--cols", "80", "--", "bash", "--norc", "--noprofile"],
+        &[
+            "run",
+            "-d",
+            "--rows",
+            "24",
+            "--cols",
+            "80",
+            "--",
+            "bash",
+            "--norc",
+            "--noprofile",
+        ],
     );
     let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
@@ -97,7 +108,10 @@ fn run_ls_peek_send_kill_lifecycle() {
     // ls shows it running.
     let ls = ok_pty(&root, &["ls"]);
     assert!(ls.contains(&name), "ls missing session:\n{ls}");
-    assert!(ls.contains("Active sessions:"), "session not running:\n{ls}");
+    assert!(
+        ls.contains("Active sessions:"),
+        "session not running:\n{ls}"
+    );
 
     // peek shows the bash prompt.
     let mut prompt_seen = false;
@@ -115,7 +129,14 @@ fn run_ls_peek_send_kill_lifecycle() {
     // send a command, then peek for its output.
     let (_o, _e, code) = run_pty(
         &root,
-        &["send", &name, "--seq", "echo hello-e2e", "--seq", "key:return"],
+        &[
+            "send",
+            &name,
+            "--seq",
+            "echo hello-e2e",
+            "--seq",
+            "key:return",
+        ],
     );
     assert_eq!(code, 0);
 
@@ -209,7 +230,16 @@ fn restart_rename_rm() {
     // A session that prints its own pid so we can tell restarts apart.
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", "svc", "--", "sh", "-c", "echo pid-$$; cat"],
+        &[
+            "run",
+            "-d",
+            "--id",
+            "svc",
+            "--",
+            "sh",
+            "-c",
+            "echo pid-$$; cat",
+        ],
     );
     let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
@@ -243,8 +273,11 @@ fn restart_rename_rm() {
     // restart respawns with a new pid.
     // `pty restart` attaches after the respawn. Run it as a session would,
     // so it takes the documented "not attached" path instead of blocking.
-    let (_o, _e, code) =
-        run_pty_env(&root, &["restart", "-y", "svc"], &[("PTY_SESSION", "outer")]);
+    let (_o, _e, code) = run_pty_env(
+        &root,
+        &["restart", "-y", "svc"],
+        &[("PTY_SESSION", "outer")],
+    );
     assert_eq!(code, 0, "restart failed: {_e}");
     let pid2 = wait_pid(&pid1);
     assert_ne!(pid1, pid2, "restart should change the pid");
@@ -253,7 +286,10 @@ fn restart_rename_rm() {
     // kill, then rm removes it entirely.
     let (_o, e, code) = run_pty(&root, &["rm", "svc"]);
     assert_eq!(code, 1);
-    assert_eq!(e, "Session \"svc\" is still running. Use \"pty kill svc\" first.");
+    assert_eq!(
+        e,
+        "Session \"svc\" is still running. Use \"pty kill svc\" first."
+    );
     let (_o, _e, code) = run_pty(&root, &["kill", "svc"]);
     assert_eq!(code, 0);
     let (_o, e, code) = run_pty(&root, &["rm", "svc"]);
@@ -306,7 +342,8 @@ fn peek_follow_streams_live_output() {
     )
     .expect("spawn pty peek -f");
 
-    s.wait_for_text("streamed-3", 8000).expect("followed live output");
+    s.wait_for_text("streamed-3", 8000)
+        .expect("followed live output");
     s.close();
 
     let _ = run_pty(&root, &["kill", "fol"]);
@@ -324,14 +361,18 @@ fn stats_json_matches_node_contract() {
     let root = unique_root();
     let (_n, _e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", "sj", "--rows", "30", "--cols", "100", "--", "cat"],
+        &[
+            "run", "-d", "--id", "sj", "--rows", "30", "--cols", "100", "--", "cat",
+        ],
     );
     assert_eq!(code, 0);
     // wait until up
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         if run_pty(&root, &["stats", "--json", "sj"]).2 == 0
-            && run_pty(&root, &["stats", "--json", "sj"]).0.contains("\"terminal\"")
+            && run_pty(&root, &["stats", "--json", "sj"])
+                .0
+                .contains("\"terminal\"")
         {
             break;
         }
@@ -369,12 +410,21 @@ fn stats_json_matches_node_contract() {
     assert!(v["createdAt"].is_string());
 
     // OMIT-when-unset.
-    assert!(v["clients"].get("geometryNeutral").is_none(), "geometryNeutral should be omitted");
-    assert!(v.get("capabilities").is_none(), "capabilities should be omitted");
+    assert!(
+        v["clients"].get("geometryNeutral").is_none(),
+        "geometryNeutral should be omitted"
+    );
+    assert!(
+        v.get("capabilities").is_none(),
+        "capabilities should be omitted"
+    );
 
     // Exited session (preserve mode) → the small gone shape.
-    let (_n, _e, code) =
-        run_pty_env(&root, &["run", "-d", "--id", "sg", "--", "sh", "-c", "exit 6"], PRESERVE);
+    let (_n, _e, code) = run_pty_env(
+        &root,
+        &["run", "-d", "--id", "sg", "--", "sh", "-c", "exit 6"],
+        PRESERVE,
+    );
     assert_eq!(code, 0);
     let start = Instant::now();
     let mut gone = String::new();
@@ -406,7 +456,10 @@ fn version_is_semver_with_rust_tag_and_sha() {
     let root = unique_root();
     for form in ["version", "--version", "-v", "-V"] {
         let out = ok_pty(&root, &[form]);
-        assert!(re.is_match(&out), "`pty {form}` not 0.13.x-rust+<sha>: {out:?}");
+        assert!(
+            re.is_match(&out),
+            "`pty {form}` not 0.13.x-rust+<sha>: {out:?}"
+        );
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -418,19 +471,28 @@ fn ls_json_matches_node_shape() {
     // unset; status enum running|exited|vanished.
     let _serial = serial();
     let root = unique_root();
-    let (_n, _e, code) = run_pty(&root, &["run", "-d", "--id", "jr", "--no-display-name", "--", "cat"]);
+    let (_n, _e, code) = run_pty(
+        &root,
+        &["run", "-d", "--id", "jr", "--no-display-name", "--", "cat"],
+    );
     assert_eq!(code, 0);
     // Wait until it's up.
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        if run_pty(&root, &["ls", "--json"]).0.contains("\"status\":\"running\"") {
+        if run_pty(&root, &["ls", "--json"])
+            .0
+            .contains("\"status\":\"running\"")
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     let running = ok_pty(&root, &["ls", "--json"]);
     assert!(running.contains("\"name\":\"jr\""), "json: {running}");
-    assert!(running.contains("\"status\":\"running\""), "json: {running}");
+    assert!(
+        running.contains("\"status\":\"running\""),
+        "json: {running}"
+    );
     assert!(running.contains("\"exitCode\":null"), "json: {running}");
     assert!(running.contains("\"exitedAt\":null"), "json: {running}");
     assert!(running.contains("\"createdAt\":\""), "json: {running}");
@@ -446,8 +508,21 @@ fn ls_json_matches_node_shape() {
     );
 
     // Exited session (preserve mode so it stays visible as exited).
-    let (_n, _e, code) =
-        run_pty_env(&root, &["run", "-d", "--id", "je", "--no-display-name", "--", "sh", "-c", "exit 5"], PRESERVE);
+    let (_n, _e, code) = run_pty_env(
+        &root,
+        &[
+            "run",
+            "-d",
+            "--id",
+            "je",
+            "--no-display-name",
+            "--",
+            "sh",
+            "-c",
+            "exit 5",
+        ],
+        PRESERVE,
+    );
     assert_eq!(code, 0);
     let start = Instant::now();
     let mut exited_json = String::new();
@@ -458,9 +533,18 @@ fn ls_json_matches_node_shape() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(exited_json.contains("\"status\":\"exited\""), "json: {exited_json}");
-    assert!(exited_json.contains("\"exitCode\":5"), "json: {exited_json}");
-    assert!(exited_json.contains("\"exitedAt\":\""), "json: {exited_json}");
+    assert!(
+        exited_json.contains("\"status\":\"exited\""),
+        "json: {exited_json}"
+    );
+    assert!(
+        exited_json.contains("\"exitCode\":5"),
+        "json: {exited_json}"
+    );
+    assert!(
+        exited_json.contains("\"exitedAt\":\""),
+        "json: {exited_json}"
+    );
 
     let _ = run_pty(&root, &["kill", "jr"]);
     let _ = std::fs::remove_dir_all(&root);
@@ -475,7 +559,16 @@ fn default_reap_removes_session_on_self_exit() {
     let root = unique_root();
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "-d", "--id", "rp", "--", "sh", "-c", "echo GONE; exit 3"],
+        &[
+            "run",
+            "-d",
+            "--id",
+            "rp",
+            "--",
+            "sh",
+            "-c",
+            "echo GONE; exit 3",
+        ],
     );
     let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
@@ -487,7 +580,10 @@ fn default_reap_removes_session_on_self_exit() {
     assert_ne!(peek_code, 0, "reaped session should not be peekable");
     // ls --json omits it.
     let ls = ok_pty(&root, &["ls", "--json"]);
-    assert!(!ls.contains("\"rp\""), "reaped session should be omitted from ls: {ls}");
+    assert!(
+        !ls.contains("\"rp\""),
+        "reaped session should be omitted from ls: {ls}"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -527,7 +623,16 @@ fn post_exit_peek_returns_final_screen() {
     let root = unique_root();
     let (name, _e, code) = run_pty_env(
         &root,
-        &["run", "-d", "--id", "px", "--", "sh", "-c", "echo FINAL-OUTPUT-LINE; exit 7"],
+        &[
+            "run",
+            "-d",
+            "--id",
+            "px",
+            "--",
+            "sh",
+            "-c",
+            "echo FINAL-OUTPUT-LINE; exit 7",
+        ],
         PRESERVE,
     );
     let name = created_id(&name);
@@ -580,7 +685,10 @@ fn run_force_creates_nested_session() {
         "run --force failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Session \"fc\" created.");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Session \"fc\" created."
+    );
     let ls = ok_pty(&root, &["ls"]);
     assert!(
         ls.contains("fc") && ls.contains("Active sessions:"),
@@ -595,9 +703,15 @@ fn run_force_creates_nested_session() {
         .output()
         .expect("spawn pty");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Session \"fd\" created.");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Session \"fd\" created."
+    );
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("fd") && ls.contains("Active sessions:"), "ls:\n{ls}");
+    assert!(
+        ls.contains("fd") && ls.contains("Active sessions:"),
+        "ls:\n{ls}"
+    );
 
     let _ = run_pty(&root, &["kill", "fc"]);
     let _ = run_pty(&root, &["kill", "fd"]);
@@ -675,7 +789,10 @@ fn nesting_prevention_runs_directly_inside_a_session() {
     );
     // No session was created.
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("No active sessions."), "a nested session was created:\n{ls}");
+    assert!(
+        ls.contains("No active sessions."),
+        "a nested session was created:\n{ls}"
+    );
 
     // With -d, it DOES create a background session even inside a session.
     let out = Command::new(pty_bin())
@@ -685,9 +802,15 @@ fn nesting_prevention_runs_directly_inside_a_session() {
         .output()
         .expect("spawn pty");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Session \"nbg\" created.");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Session \"nbg\" created."
+    );
     let ls = ok_pty(&root, &["ls"]);
-    assert!(ls.contains("nbg") && ls.contains("Active sessions:"), "ls:\n{ls}");
+    assert!(
+        ls.contains("nbg") && ls.contains("Active sessions:"),
+        "ls:\n{ls}"
+    );
 
     let _ = run_pty(&root, &["kill", "nbg"]);
     let _ = std::fs::remove_dir_all(&root);
@@ -702,7 +825,18 @@ fn attach_is_interactive_and_detaches() {
     // Spawn a session to attach to.
     let (name, _e, code) = run_pty(
         &root,
-        &["run", "-d", "--rows", "24", "--cols", "80", "--", "bash", "--norc", "--noprofile"],
+        &[
+            "run",
+            "-d",
+            "--rows",
+            "24",
+            "--cols",
+            "80",
+            "--",
+            "bash",
+            "--norc",
+            "--noprofile",
+        ],
     );
     let name = created_id(&name);
     assert_eq!(code, 0, "run failed: {_e}");
@@ -724,14 +858,16 @@ fn attach_is_interactive_and_detaches() {
     s.wait_for_text("$", 8000).expect("attached prompt");
     s.type_str("echo attached-works\r");
     // wait_for_text asserts the live output appeared (errors on timeout).
-    s.wait_for_text("attached-works", 8000).expect("live output");
+    s.wait_for_text("attached-works", 8000)
+        .expect("live output");
 
     // A single Ctrl+\ (0x1c) detaches (after the ~300ms double-tap window)
     // without killing the session — matching the real pty.
     s.type_str("\x1c");
     // Wait past the double-tap window so the detach fires, then verify the
     // detach confirmation was rendered.
-    s.wait_for_text("[detached]", 5000).expect("detach confirmation");
+    s.wait_for_text("[detached]", 5000)
+        .expect("detach confirmation");
     s.close();
 
     // The session must still be alive after detach.
@@ -743,4 +879,50 @@ fn attach_is_interactive_and_detaches() {
 
     let _ = run_pty(&root, &["kill", &name]);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn run_startup_flags_publish_generation_fenced_starting_value() {
+    let _serial = serial();
+    let root = unique_root();
+    let id = format!("startup-cli-{}", std::process::id());
+    let (stdout, stderr, code) = run_pty(
+        &root,
+        &[
+            "run",
+            "-d",
+            "--id",
+            &id,
+            "--startup-timeout-ms",
+            "30000",
+            "--lifecycle-tag",
+            "run.lifecycle",
+            "--",
+            "sleep",
+            "30",
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&id), "{stdout}");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join(format!("{id}.json"))).unwrap()).unwrap();
+    let starting: serde_json::Value =
+        serde_json::from_str(metadata["tags"]["run.lifecycle"].as_str().unwrap()).unwrap();
+    assert_eq!(starting["_tag"], "starting");
+    assert_eq!(starting["generation"], metadata["generation"]);
+    assert!(
+        starting["bootId"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(
+        starting["deadlineMonotonicNs"]
+            .as_str()
+            .unwrap()
+            .parse::<u128>()
+            .is_ok()
+    );
+    let (_, stderr, code) = run_pty(&root, &["kill", &id]);
+    assert_eq!(code, 0, "{stderr}");
+    let _ = std::fs::remove_dir_all(root);
 }

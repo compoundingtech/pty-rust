@@ -15,8 +15,8 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use pty_core::protocol::{
-    Packet, MessageType, decode_cell, decode_peek, decode_size, encode_exit, encode_geometry, encode_screen,
-    encode_status_response,
+    MessageType, Packet, decode_cell, decode_peek, decode_size, encode_exit, encode_geometry,
+    encode_screen, encode_status_response,
 };
 use pty_core::registry::{self, MutateOptions};
 use pty_terminal::{Range, SerializeOpts};
@@ -30,6 +30,9 @@ pub const REDRAW_SETTLE: Duration = Duration::from_millis(80);
 /// Bytes to a client's socket, or an instruction to end/destroy it.
 pub enum Out {
     Bytes(Vec<u8>),
+    /// Write a lifecycle response, then tell the actor it is safe to begin
+    /// deadline teardown. A separate backstop covers a blocked socket writer.
+    BytesThenRelease(Vec<u8>, Sender<super::lifecycle::Msg>),
     /// `socket.end()`: half-close, the peer closes when it is done.
     End,
     /// `socket.destroy()`: close both ways now.
@@ -71,10 +74,17 @@ pub struct Client {
     /// pending cut is superseded.
     pub generation: u64,
     pub phase: Phase,
+    /// Kernel-authenticated identity bound to this connected Unix socket.
+    pub peer: Option<pty_core::unix_peer::PeerCredentials>,
 }
 
 impl Client {
-    pub fn new(tx: Sender<Out>, rows: u16, cols: u16) -> Client {
+    pub fn new(
+        tx: Sender<Out>,
+        rows: u16,
+        cols: u16,
+        peer: Option<pty_core::unix_peer::PeerCredentials>,
+    ) -> Client {
         Client {
             tx,
             role: Role::Command,
@@ -83,6 +93,7 @@ impl Client {
             attach_seq: 0,
             generation: 0,
             phase: Phase::Live,
+            peer,
         }
     }
 
@@ -115,6 +126,20 @@ impl Daemon {
             MessageType::Resize => self.on_resize(id, &packet.payload),
             MessageType::Detach => self.on_detach(id),
             MessageType::Status => self.on_status(id),
+            MessageType::AcceptedSocketOwnership => {
+                if self.control_peer_authorized(id) {
+                    self.on_accepted_socket_ownership(id, &packet.payload);
+                } else {
+                    self.reject_unauthorized_ownership(id);
+                }
+            }
+            MessageType::LifecycleCas => {
+                if self.control_peer_authorized(id) {
+                    self.on_lifecycle_cas(id, &packet.payload);
+                } else {
+                    self.reject_unauthorized_lifecycle(id);
+                }
+            }
             _ => {}
         }
     }
@@ -331,11 +356,10 @@ impl Daemon {
         }
         let screen = match kind {
             CutKind::Attach { .. } => self.actor.serialize(SerializeOpts::ATTACH),
-            CutKind::Peek { plain: true, full } => self.actor.plain(if full {
-                Range::Full
-            } else {
-                Range::Viewport
-            }),
+            CutKind::Peek { plain: true, full } => {
+                self.actor
+                    .plain(if full { Range::Full } else { Range::Viewport })
+            }
             CutKind::Peek { plain: false, full } => self.actor.serialize(if full {
                 SerializeOpts::PEEK_FULL
             } else {

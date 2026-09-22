@@ -1,0 +1,15 @@
+Usage: pty readiness ownership --id <stable-id>
+       pty readiness cas --id <stable-id>
+
+Machine-only readiness control for one exact live daemon generation. Both
+operations read one JSON object from stdin and emit one tagged JSON result.
+
+ownership input:
+  {"expectedGeneration":"<opaque>","connection":{"localAddress":"127.0.0.1","localPort":51000,"remoteAddress":"127.0.0.1","remotePort":3000}}
+
+cas input:
+  {"expectedGeneration":"<opaque>","tag":"run.lifecycle","expectedValue":"<exact>","value":"<exact>"}
+
+Examples:
+  pty readiness ownership --id a1b2c3d4 < ownership.json
+  pty readiness cas --id a1b2c3d4 < transition.json
