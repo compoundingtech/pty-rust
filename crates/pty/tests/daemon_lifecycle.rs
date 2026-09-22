@@ -62,10 +62,13 @@ fn publication_order_and_shapes() {
 
     let m = d.meta().unwrap();
     let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(
-        keys,
-        ["generation", "daemonPid", "command", "args", "displayCommand", "cwd", "rows", "cols",
-         "ephemeral", "createdAt", "tags", "displayName"]
+    assert!(
+        keys == ["generation", "daemonPid", "command", "args", "displayCommand", "cwd", "rows",
+                 "cols", "ephemeral", "createdAt", "tags", "displayName"]
+            || keys == ["generation", "daemonPid", "daemonStartToken", "command", "args",
+                        "displayCommand", "cwd", "rows", "cols", "ephemeral", "createdAt", "tags",
+                        "displayName"],
+        "unexpected metadata publication shape: {keys:?}"
     );
     assert_eq!(m["generation"].as_str().unwrap().len(), 32);
     assert_eq!(m["daemonPid"], d.pid);
