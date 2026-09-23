@@ -99,12 +99,12 @@ fn per_command_help_is_intercepted_first_position_only() {
     }
 }
 
-/// docs/parity.md §12 — recover, evidence and test are documented as absent;
-/// their vendored help still prints.
+/// docs/parity.md §12 — recover and test are documented as absent; their
+/// vendored help still prints.
 #[test]
 fn deferred_verbs_report_their_absence() {
     let rig = Rig::new();
-    for cmd in ["recover", "evidence", "test"] {
+    for cmd in ["recover", "test"] {
         let out = rig.run(&[cmd, "whatever"]);
         assert_eq!(out.code, 1, "{cmd}");
         assert_eq!(
@@ -115,6 +115,32 @@ fn deferred_verbs_report_their_absence() {
         let help = rig.ok(&[cmd, "--help"]);
         assert!(help.stdout.starts_with(&format!("Usage: pty {cmd}")), "{cmd}: {:?}", help.stdout);
     }
+}
+
+#[test]
+fn evidence_is_dispatched_and_reports_a_tagged_semantic_result() {
+    let rig = Rig::new();
+    let out = rig.ok(&["evidence", "snapshot", "--id", "missing"]);
+    assert_eq!(
+        out.stdout,
+        "{\"_tag\":\"unavailable\",\"reason\":\"missing\"}\n"
+    );
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn readiness_rejects_an_invalid_stable_id_before_socket_access() {
+    let rig = Rig::new();
+    let out = rig.run_stdin(
+        &["readiness", "ownership", "--id", "../outside"],
+        r#"{"expectedGeneration":"generation","connection":{"localAddress":"127.0.0.1","localPort":41000,"remoteAddress":"127.0.0.1","remotePort":3000}}"#,
+    );
+    assert_eq!(out.code, 1);
+    assert_eq!(
+        out.stderr,
+        "Invalid session name \"../outside\". Names may only contain letters, numbers, dots, hyphens, and underscores.\n"
+    );
+    assert_eq!(out.stdout, "");
 }
 
 /// node: tests/nesting-prevention.test.ts:213-241 — the interactive picker

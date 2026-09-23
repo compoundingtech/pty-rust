@@ -16,6 +16,10 @@ Flags:
   --tag keep=true      Exempt from reaping: keep metadata/logs after exit
   --cwd <path>         Working directory for the command
   --isolate-env        Scrub the child env to a safe allow-list (for remote-reachable sessions)
+  --lifecycle-tag <key>
+                       Publish daemon-owned Starting/Terminal lifecycle state
+  --startup-timeout-ms <ms>
+                       Add a hard startup deadline (requires --lifecycle-tag)
   --force              Create even from inside another pty session (bypass the nesting guard)
 
 Examples:

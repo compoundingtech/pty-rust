@@ -6,6 +6,7 @@
 
 use std::io::Read;
 
+use crate::StartupLeaseOptions;
 use pty_core::registry::{EnvMap, TagMap};
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,7 @@ pub const CONFIG_FD: i32 = 3;
 
 /// The text Node prints when the config is missing or lacks `name`/`command`.
 pub const CONFIG_REQUIRED: &str = "PTY_SERVER_CONFIG env var required";
+
 
 /// `PTY_SERVER_CONFIG`, key for key. `generation` is absent from a spawner's
 /// config (the daemon makes one) and present only when a restart wants to
@@ -51,6 +53,8 @@ pub struct DaemonConfig {
     pub env: Option<EnvMap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_lease: Option<StartupLeaseOptions>,
     /// Internal launch marker: append `session_respawn` in the daemon's
     /// serialized publication batch. Node spawners omit it.
     #[serde(default, skip_serializing_if = "is_false")]

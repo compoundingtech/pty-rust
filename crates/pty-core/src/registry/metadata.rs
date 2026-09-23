@@ -39,6 +39,11 @@ pub struct SessionMetadata {
     /// only when `recovery.processStartToken` still proves the process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_pid: Option<i32>,
+    /// Start identity of the Rust daemon that published this generation.
+    /// Node generations carry the equivalent token in
+    /// `recovery.processStartToken`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_start_token: Option<String>,
     /// Recovery capability advertised by Node daemons. Opaque here: preserved
     /// verbatim on rewrite, never produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +114,14 @@ impl SessionMetadata {
         self.recovery.as_ref()?.get("processStartToken")?.as_str()
     }
 
+    /// Exact daemon start identity, independent of which runtime published
+    /// the record.
+    pub fn daemon_start_token(&self) -> Option<&str> {
+        self.daemon_start_token
+            .as_deref()
+            .or_else(|| self.process_start_token())
+    }
+
     /// The record as a JSON object in this struct's key order, `None` fields
     /// omitted (for diffing and comparison; see `publication_map` for the
     /// on-disk publication order).
@@ -124,12 +137,13 @@ impl SessionMetadata {
         serde_json::from_value(Value::Object(map)).ok()
     }
 
-    /// The exact object Node's daemon publishes at start-up, in its key
-    /// order: `generation, daemonPid, recovery?, command, args,
-    /// displayCommand, cwd, rows, cols, ephemeral, createdAt, tags?,
-    /// displayName?, isolateEnv?, extraEnv?, unsetEnv?, env?`. `ephemeral`
-    /// is always written (`=== true`); `tags`/`extraEnv`/`unsetEnv` only when
-    /// non-empty; `isolateEnv` only when true. Anything in `extra` follows.
+    /// The Node publication order with one optional Rust identity field after
+    /// `daemonPid`: `generation, daemonPid, daemonStartToken?, recovery?,
+    /// command, args, displayCommand, cwd, rows, cols, ephemeral, createdAt,
+    /// tags?, displayName?, isolateEnv?, extraEnv?, unsetEnv?, env?`.
+    /// `ephemeral` is always written (`=== true`); `tags`/`extraEnv`/
+    /// `unsetEnv` only when non-empty; `isolateEnv` only when true. Anything
+    /// in `extra` follows.
     ///
     /// node: src/server.ts:655-673
     pub fn publication_map(&self) -> Map<String, Value> {
@@ -139,6 +153,9 @@ impl SessionMetadata {
         }
         if let Some(pid) = self.daemon_pid {
             m.insert("daemonPid".into(), Value::from(pid));
+        }
+        if let Some(token) = &self.daemon_start_token {
+            m.insert("daemonStartToken".into(), Value::from(token.as_str()));
         }
         if let Some(r) = &self.recovery {
             m.insert("recovery".into(), r.clone());

@@ -20,6 +20,10 @@ fn main() {
 
     let version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     println!("cargo:rustc-env=PTY_VERSION={version}+{sha}");
+
+    if std::env::var("TARGET").is_ok_and(|target| target.contains("apple-darwin")) {
+        build_darwin_socket_owner(&manifest_dir);
+    }
 }
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
@@ -63,4 +67,37 @@ fn git_short_sha(repo: &Path) -> Option<String> {
         }
     }
     Some(sha)
+}
+
+fn build_darwin_socket_owner(manifest_dir: &Path) {
+    let source = manifest_dir.join("native/darwin_socket_owner.c");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let object = out.join("darwin_socket_owner.o");
+    let archive = out.join("libpty_darwin_socket_owner.a");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let status = Command::new(cc)
+        .args(["-std=c11", "-Wall", "-Wextra", "-c"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .expect("compile Darwin socket ownership boundary");
+    assert!(
+        status.success(),
+        "Darwin socket ownership boundary did not compile"
+    );
+    let ar = std::env::var("AR").unwrap_or_else(|_| "ar".to_string());
+    let status = Command::new(ar)
+        .arg("crus")
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .expect("archive Darwin socket ownership boundary");
+    assert!(
+        status.success(),
+        "Darwin socket ownership boundary did not archive"
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=pty_darwin_socket_owner");
 }

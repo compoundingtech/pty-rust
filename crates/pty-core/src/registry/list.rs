@@ -198,6 +198,39 @@ fn read_pid_with_in(root: &Path, name: &str, metadata: Option<&SessionMetadata>)
     (read_process_start_token(daemon_pid).as_deref() == Some(token)).then_some(daemon_pid)
 }
 
+/// Resolve a daemon pid only when lock-held metadata binds it to the exact
+/// live OS process. Unlike [`read_pid_with`], this is suitable for destructive
+/// signals: an unbound legacy pid sidecar is never authority.
+pub fn read_signal_target_with(
+    name: &str,
+    metadata: Option<&SessionMetadata>,
+) -> Option<i32> {
+    read_signal_target_with_in(&session_dir(), name, metadata)
+}
+
+fn read_signal_target_with_in(
+    root: &Path,
+    name: &str,
+    metadata: Option<&SessionMetadata>,
+) -> Option<i32> {
+    let owned;
+    let retained = match metadata {
+        Some(metadata) => metadata,
+        None => {
+            owned = read_metadata_at(&root.join(format!("{name}.json")))?;
+            &owned
+        }
+    };
+    let daemon_pid = retained.daemon_pid?;
+    if let Some(sidecar_pid) = read_session_pid_at(&root.join(format!("{name}.pid")))
+        && sidecar_pid != daemon_pid
+    {
+        return None;
+    }
+    let token = retained.daemon_start_token()?;
+    (read_process_start_token(daemon_pid).as_deref() == Some(token)).then_some(daemon_pid)
+}
+
 /// [`read_pid_with`] reading the metadata itself when the sidecar is absent.
 pub fn read_pid(name: &str) -> Option<i32> {
     read_pid_with(name, None)
@@ -560,4 +593,47 @@ pub fn resolve_ref(reference: &str) -> Option<String> {
 /// Does `<name>.json` exist?
 pub fn session_exists(name: &str) -> bool {
     metadata_path(name).exists()
+}
+
+#[cfg(test)]
+mod signal_target_tests {
+    use super::*;
+
+    #[test]
+    fn destructive_target_requires_matching_live_start_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "pty-signal-target-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let pid = std::process::id() as i32;
+        std::fs::write(root.join("session.pid"), pid.to_string()).unwrap();
+
+        let unbound = SessionMetadata {
+            daemon_pid: Some(pid),
+            ..Default::default()
+        };
+        assert_eq!(
+            read_signal_target_with_in(&root, "session", Some(&unbound)),
+            None
+        );
+
+        let exact = SessionMetadata {
+            daemon_pid: Some(pid),
+            daemon_start_token: read_process_start_token(pid),
+            ..Default::default()
+        };
+        assert_eq!(
+            read_signal_target_with_in(&root, "session", Some(&exact)),
+            Some(pid)
+        );
+
+        std::fs::write(root.join("session.pid"), (pid.saturating_add(1)).to_string()).unwrap();
+        assert_eq!(
+            read_signal_target_with_in(&root, "session", Some(&exact)),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

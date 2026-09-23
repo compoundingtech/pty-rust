@@ -7,6 +7,7 @@
 mod config;
 mod gc;
 mod launch;
+mod startup;
 
 pub use config::DaemonConfig;
 pub use gc::{
@@ -20,4 +21,9 @@ pub use launch::{
 pub use pty_core::registry::{
     LockBusy, SessionGenerationOwner, cleanup_all, cleanup_owned_all, cleanup_owned_socket,
     cleanup_socket, wait_for_process_exit,
+};
+pub use startup::{
+    ArmedStartupLease, StartupLeaseOptions, StartupLeaseTerminalCause, arm_startup_lease,
+    monotonic_now_ns, read_boot_identity, remaining_lease_delay, startup_lease_deadline_cause,
+    terminal_startup_lease_value,
 };

@@ -1,0 +1,7 @@
+Usage: pty readiness cas --id <stable-id>
+
+Read one exact-generation, exact-value lifecycle tag compare-and-set from stdin
+and emit one tagged JSON result.
+
+Example:
+  pty readiness cas --id a1b2c3d4 < transition.json

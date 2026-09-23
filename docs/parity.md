@@ -91,7 +91,7 @@ Two facts from this table shape the plan:
 | `emit` | missing (S) | `user.*` validation, `--json`, `--text`, default ref from `PTY_SESSION`. |
 | `rename` | partial (S) | Missing `--show`, `--clear`, inside-session single-arg form, validation, `display_name_change` event, lock, exact stdout text. |
 | `metadata patch` | missing (S) | `--id`, JSON patch on stdin, `{changed, metadata}` reply, validation text, `metadata_change` event. `st2` calls this. |
-| `evidence snapshot` / `remove` | deferred | Tagged JSON results, strict reader, exact-generation remove. Documented as absent. Section 12. |
+| `evidence snapshot` / `remove` | parity | Tagged JSON results, strict reader, exact-generation remove, and replacement-safe cleanup are implemented. |
 | `up` / `down` | partial (S) | Node binds by the `(ptyfile, ptyfile.session)` tag pair, syncs tags, prints `● <label> (started)` lines. Rust binds by name. |
 | `test` | dropped | A vitest wrapper for the Node repository. |
 | `completions <shell>` | missing (S) | fish, bash, zsh. Output must equal the checked-in files byte for byte. Exit 2 on a bad shell. |
@@ -332,7 +332,7 @@ Decided on 2026-08-29. Each row records the decision.
 | Legacy positional display name (`pty run mylabel -- cmd`) and the `Hint:` line | S | Dropped. Nothing in the network uses it. |
 | `gc`: permanent respawn, flapping classifier, abandoned reap | L | Kept for the shared-input/SCG reconciler contract. `gc` respawns stopped `strategy=permanent` sessions under their stable id, re-reads bound `pty.toml` definitions with last-known-good fallback, persists the Node-compatible fast-fail tags/events and flapping stop, and reaps cwd-gone or opt-in idle permanents before respawn. The accepted tuning flags are active and validated. |
 | `recover` and the `recovery{}` capability | XL | Deferred and documented as absent. No program in the network calls it. Rust daemons omit the capability; Node `list` handles that. Rust preserves the field on rewrite, so `recovery.metadataRevision` goes stale for a session a Rust binary writes to — accepted, decision 0005. |
-| `evidence snapshot` / `remove` | M | Deferred and documented as absent. Its user is not known. |
+| `evidence snapshot` / `remove` | M | Kept for exact-generation retained exit evidence and replacement-safe cleanup. |
 | `--attach-stream-fd-v1` | M | Kept. An eval cell and relays use it. |
 | `PTY_SPAWNER_PID` watchdog | S | Kept. Small. |
 | Rust `ATTACH` geometry-neutral flag and `stats.clients.geometryNeutral` | S | Dropped. Node's readonly role covers `peek -f`. |

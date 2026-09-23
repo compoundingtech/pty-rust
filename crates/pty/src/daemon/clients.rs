@@ -15,8 +15,8 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use pty_core::protocol::{
-    Packet, MessageType, decode_cell, decode_peek, decode_size, encode_exit, encode_geometry, encode_screen,
-    encode_status_response,
+    MessageType, Packet, decode_cell, decode_peek, decode_size, encode_exit, encode_geometry,
+    encode_screen, encode_status_response,
 };
 use pty_core::registry::{self, MutateOptions};
 use pty_terminal::{Range, SerializeOpts};
@@ -115,6 +115,10 @@ impl Daemon {
             MessageType::Resize => self.on_resize(id, &packet.payload),
             MessageType::Detach => self.on_detach(id),
             MessageType::Status => self.on_status(id),
+            MessageType::AcceptedSocketOwnership => {
+                self.on_accepted_socket_ownership(id, &packet.payload);
+            }
+            MessageType::LifecycleCas => self.on_lifecycle_cas(id, &packet.payload),
             _ => {}
         }
     }
@@ -331,11 +335,10 @@ impl Daemon {
         }
         let screen = match kind {
             CutKind::Attach { .. } => self.actor.serialize(SerializeOpts::ATTACH),
-            CutKind::Peek { plain: true, full } => self.actor.plain(if full {
-                Range::Full
-            } else {
-                Range::Viewport
-            }),
+            CutKind::Peek { plain: true, full } => {
+                self.actor
+                    .plain(if full { Range::Full } else { Range::Viewport })
+            }
             CutKind::Peek { plain: false, full } => self.actor.serialize(if full {
                 SerializeOpts::PEEK_FULL
             } else {

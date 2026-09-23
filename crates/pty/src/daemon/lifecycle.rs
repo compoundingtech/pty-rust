@@ -19,14 +19,23 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pty_core::events::{Event, EventWriter};
-use pty_core::protocol::{Packet, PacketReader, encode_data, encode_exit};
+use pty_core::protocol::{
+    AcceptedSocketOwnershipResult, LifecycleCompareAndSetRequest, LifecycleCompareAndSetResult,
+    Packet, PacketReader, decode_accepted_socket_ownership_request,
+    decode_lifecycle_compare_and_set_request, encode_accepted_socket_ownership_response,
+    encode_data, encode_exit, encode_lifecycle_compare_and_set_response,
+};
 use pty_core::registry::{
     self, MutateOptions, MutateStatus, SESSION_EXIT_LAST_LINES_LIMIT, SessionGenerationOwner,
-    SessionMetadata, TagMap,
+    SessionMetadata, TagCompareAndSetResult, TagMap,
 };
 use pty_spawn::substrate::{ExitStatus, Lifecycle, SessionEvent, SessionOwner, SessionRef};
 use pty_terminal::{TerminalActor, serialize};
 
+use pty_lifecycle::{
+    ArmedStartupLease, StartupLeaseTerminalCause, arm_startup_lease, monotonic_now_ns,
+    remaining_lease_delay, terminal_startup_lease_value,
+};
 use super::DaemonConfig;
 use super::clients::{Client, Out, REDRAW_SETTLE};
 use super::daemon_warn;
@@ -85,6 +94,7 @@ pub(crate) struct Daemon {
     _owner: SessionOwner,
     pub(crate) session: pty_spawn::substrate::SessionClient,
     pub(crate) child_pid: i32,
+    child_identity: Option<ProcessIdentity>,
     pub(crate) clients: BTreeMap<u64, Client>,
     pub(crate) attach_counter: u64,
     pub(crate) last_resize: Option<Instant>,
@@ -109,6 +119,11 @@ pub(crate) struct Daemon {
     /// costs one metadata write per second rather than one per chunk.
     activity_persist_at: Option<Instant>,
     listener_fd: i32,
+    startup_lease: Option<ArmedStartupLease>,
+    startup_lease_timer: Option<Instant>,
+    startup_lease_disarmed: bool,
+    startup_deadline_pending_shutdown: bool,
+    startup_lease_terminal_value: Option<String>,
 }
 
 /// How long the activity write waits after the first chunk of a burst.
@@ -217,6 +232,15 @@ pub(crate) fn run(
         .clone()
         .filter(|g| !g.is_empty())
         .unwrap_or_else(new_generation);
+    let startup_lease = cfg
+        .startup_lease
+        .as_ref()
+        .map(|options| arm_startup_lease(options, &generation))
+        .transpose()?;
+    let mut published_tags = cfg.tags().cloned().unwrap_or_default();
+    if let Some(lease) = &startup_lease {
+        published_tags.insert(lease.lifecycle_tag.clone(), lease.starting_value.clone());
+    }
     let events = EventWriter::new(&name);
     let (rows, cols, cwd) = (cfg.rows(), cfg.cols(), cfg.cwd());
 
@@ -259,6 +283,7 @@ pub(crate) fn run(
     let metadata = SessionMetadata {
         generation: Some(generation.clone()),
         daemon_pid: Some(std::process::id() as i32),
+        daemon_start_token: registry::read_process_start_token(std::process::id() as i32),
         recovery: None,
         command: cfg.command.clone(),
         args: cfg.args.clone(),
@@ -269,7 +294,7 @@ pub(crate) fn run(
         ephemeral: Some(cfg.ephemeral),
         created_at,
         display_name: cfg.display_name().map(str::to_string),
-        tags: cfg.tags().cloned(),
+        tags: (!published_tags.is_empty()).then(|| published_tags.clone()),
         isolate_env: cfg.isolate_env().then_some(true),
         extra_env: cfg.extra_env().cloned(),
         unset_env: (!cfg.unset_env().is_empty()).then(|| cfg.unset_env().to_vec()),
@@ -277,7 +302,10 @@ pub(crate) fn run(
         ..Default::default()
     };
     registry::write_metadata_publication(&name, &metadata).map_err(|e| e.to_string())?;
-    events.append(Event::session_start(&name, cfg.tags()));
+    events.append(Event::session_start(
+        &name,
+        (!published_tags.is_empty()).then_some(&published_tags),
+    ));
     if cfg.respawn {
         events.append(Event::session_respawn(&name));
     }
@@ -291,19 +319,40 @@ pub(crate) fn run(
     for (k, v) in &child_env {
         command.env(k, v);
     }
-    let child = pair.slave.spawn_command(command).map_err(|e| {
-        // Published above but never started: withdraw the liveness signals
-        // so the name reads as gone rather than running. The metadata and
-        // events stay, as they do for the other post-publication failures,
-        // and the next `run` recreates over them.
-        let _ = std::fs::remove_file(&socket_path);
-        let _ = std::fs::remove_file(registry::pid_path(&name));
-        format!(
-            "Failed to spawn PTY shell \"/bin/sh\" for command \"{}\" in cwd \"{cwd}\": {e}",
-            cfg.command
-        )
-    })?;
+    let child = match pair.slave.spawn_command(command) {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(lease) = &startup_lease {
+                let mut terminal_metadata = metadata.clone();
+                terminal_metadata
+                    .tags
+                    .get_or_insert_with(TagMap::new)
+                    .insert(
+                        lease.lifecycle_tag.clone(),
+                        terminal_startup_lease_value(
+                            &generation,
+                            StartupLeaseTerminalCause::Exit,
+                        ),
+                    );
+                let _ = registry::write_metadata_publication(&name, &terminal_metadata);
+            }
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = std::fs::remove_file(registry::pid_path(&name));
+            return Err(format!(
+                "Failed to spawn PTY shell \"/bin/sh\" for command \"{}\" in cwd \"{cwd}\": {error}",
+                cfg.command
+            ));
+        }
+    };
     let child_pid = child.process_id().map(|p| p as i32).unwrap_or(0);
+    let child_identity = pty_core::proctable::process(child_pid)
+        .known()
+        .and_then(|row| row.identity)
+        .map(|identity| ProcessIdentity {
+            pid: child_pid,
+            identity,
+            depth: 0,
+        });
     let session = SessionRef::new(registry::session_dir(), name.clone(), generation.clone());
     let (owner, session_client, session_stream) =
         pty_spawn::external_owned_pair_attached(session, pair, child)
@@ -324,6 +373,7 @@ pub(crate) fn run(
         _owner: owner,
         session: session_client,
         child_pid,
+        child_identity,
         clients: BTreeMap::new(),
         attach_counter: 0,
         last_resize: None,
@@ -342,6 +392,14 @@ pub(crate) fn run(
         last_output_at_ms: None,
         activity_persist_at: None,
         listener_fd,
+        startup_lease_timer: startup_lease
+            .as_ref()
+            .and_then(|lease| lease.deadline_monotonic_ns)
+            .map(|deadline| Instant::now() + remaining_lease_delay(deadline)),
+        startup_lease,
+        startup_lease_disarmed: false,
+        startup_deadline_pending_shutdown: false,
+        startup_lease_terminal_value: None,
     };
 
     readiness.notify();
@@ -593,6 +651,7 @@ impl Daemon {
                 self.exit_shutdown_at,
                 self.exit_meta_retry.map(|(next, _)| next),
                 self.activity_persist_at,
+                self.startup_lease_timer,
             ]
             .into_iter()
             .flatten()
@@ -706,6 +765,205 @@ impl Daemon {
         );
     }
 
+    pub(crate) fn on_accepted_socket_ownership(&mut self, id: u64, payload: &[u8]) {
+        let unavailable = |reason: &str| AcceptedSocketOwnershipResult::Unavailable {
+            reason: reason.to_string(),
+        };
+        let result = match decode_accepted_socket_ownership_request(payload) {
+            None => unavailable("invalid-request"),
+            Some(request) if request.expected_generation != self.generation => {
+                unavailable("generation-mismatch")
+            }
+            Some(_) if self.exited => unavailable("child-exited"),
+            Some(request) => match registry::read_metadata(&self.name) {
+                None => unavailable("metadata-unavailable"),
+                Some(metadata)
+                    if metadata.generation.as_deref() != Some(self.generation.as_str()) =>
+                {
+                    unavailable("generation-mismatch")
+                }
+                Some(_) => match &self.child_identity {
+                    None => unavailable("process-identity-unavailable"),
+                    Some(child) => super::ownership::inspect_accepted_socket_ownership(
+                        child.pid,
+                        &child.identity,
+                        &request.connection,
+                    ),
+                },
+            },
+        };
+        if let Some(client) = self.clients.get(&id) {
+            client.send(encode_accepted_socket_ownership_response(&result));
+        }
+    }
+
+    pub(crate) fn on_lifecycle_cas(&mut self, id: u64, payload: &[u8]) {
+        let result = match decode_lifecycle_compare_and_set_request(payload) {
+            Some(request) => self.compare_and_set_lifecycle(&request),
+            None => LifecycleCompareAndSetResult::InvalidRequest {
+                reason: "invalid request payload".to_string(),
+            },
+        };
+        if let Some(client) = self.clients.get(&id) {
+            client.send(encode_lifecycle_compare_and_set_response(&result));
+        }
+    }
+
+    fn compare_and_set_lifecycle(
+        &mut self,
+        request: &LifecycleCompareAndSetRequest,
+    ) -> LifecycleCompareAndSetResult {
+        if request.expected_generation != self.generation {
+            return LifecycleCompareAndSetResult::GenerationMismatch;
+        }
+        let Some(current) = registry::read_metadata(&self.name) else {
+            return LifecycleCompareAndSetResult::Missing;
+        };
+        if current.generation.as_deref() != Some(self.generation.as_str()) {
+            return LifecycleCompareAndSetResult::GenerationMismatch;
+        }
+        if self.exited {
+            let value = self
+                .settle_startup_lifecycle(StartupLeaseTerminalCause::Exit, true)
+                .unwrap_or_else(|| {
+                    terminal_startup_lease_value(
+                        &self.generation,
+                        StartupLeaseTerminalCause::Exit,
+                    )
+                });
+            return LifecycleCompareAndSetResult::Terminal { value };
+        }
+        let expired = self.startup_lease.as_ref().is_some_and(|lease| {
+            !self.startup_lease_disarmed
+                && lease.deadline_monotonic_ns.is_some_and(|deadline| {
+                    monotonic_now_ns().is_none_or(|now| now >= deadline)
+                })
+        });
+        if expired {
+            if self
+                .settle_startup_lifecycle(StartupLeaseTerminalCause::Deadline, false)
+                .is_none()
+            {
+                return LifecycleCompareAndSetResult::Busy;
+            }
+            self.startup_deadline_pending_shutdown = true;
+            self.startup_lease_timer = Some(Instant::now() + Duration::from_millis(25));
+            let value = self
+                .startup_lease_terminal_value
+                .clone()
+                .expect("settled startup deadline has a terminal value");
+            return LifecycleCompareAndSetResult::DeadlineExpired { value };
+        }
+
+        let result = registry::compare_and_set_tag_value(
+            &self.name,
+            &request.expected_generation,
+            &request.tag,
+            &request.expected_value,
+            &request.value,
+        );
+        let changed = matches!(&result, TagCompareAndSetResult::Changed { .. });
+        match result {
+            TagCompareAndSetResult::Changed { value }
+            | TagCompareAndSetResult::Unchanged { value } => {
+                if let Some(lease) = &self.startup_lease
+                    && request.tag == lease.lifecycle_tag
+                    && request.expected_value == lease.starting_value
+                    && request.value != lease.starting_value
+                {
+                    self.startup_lease_disarmed = true;
+                    self.startup_lease_timer = None;
+                }
+                if request.tag
+                    == self
+                        .startup_lease
+                        .as_ref()
+                        .map(|lease| lease.lifecycle_tag.as_str())
+                        .unwrap_or("")
+                    && serde_json::from_str::<serde_json::Value>(&request.value)
+                        .ok()
+                        .is_some_and(|lifecycle| {
+                            lifecycle.get("_tag").and_then(|tag| tag.as_str())
+                                == Some("terminal")
+                                && lifecycle
+                                    .get("generation")
+                                    .and_then(|generation| generation.as_str())
+                                    == Some(self.generation.as_str())
+                        })
+                {
+                    self.startup_lease_terminal_value = Some(request.value.clone());
+                }
+                if changed {
+                    LifecycleCompareAndSetResult::Changed { value }
+                } else {
+                    LifecycleCompareAndSetResult::Unchanged { value }
+                }
+            }
+            TagCompareAndSetResult::ValueMismatch { value } => {
+                LifecycleCompareAndSetResult::ValueMismatch { value }
+            }
+            TagCompareAndSetResult::Missing => LifecycleCompareAndSetResult::Missing,
+            TagCompareAndSetResult::GenerationMismatch => {
+                LifecycleCompareAndSetResult::GenerationMismatch
+            }
+            TagCompareAndSetResult::Busy | TagCompareAndSetResult::Stale => {
+                LifecycleCompareAndSetResult::Busy
+            }
+        }
+    }
+
+    fn settle_startup_lifecycle(
+        &mut self,
+        cause: StartupLeaseTerminalCause,
+        force: bool,
+    ) -> Option<String> {
+        let lease = self.startup_lease.as_ref()?;
+        if let Some(value) = &self.startup_lease_terminal_value {
+            return Some(value.clone());
+        }
+        if self.startup_lease_disarmed && !force {
+            return None;
+        }
+        let terminal = terminal_startup_lease_value(&self.generation, cause);
+        let tag = lease.lifecycle_tag.clone();
+        let terminal_for_write = terminal.clone();
+        let result = registry::mutate_metadata_under_lock_with_wait(
+            &self.name,
+            move |metadata| {
+                if metadata.tags.as_ref().and_then(|tags| tags.get(&tag))
+                    == Some(&terminal_for_write)
+                {
+                    return false;
+                }
+                metadata
+                    .tags
+                    .get_or_insert_with(TagMap::new)
+                    .insert(tag, terminal_for_write);
+                true
+            },
+            &MutateOptions {
+                expected_generation: Some(self.generation.clone()),
+                expected_metadata: None,
+            },
+            |_| {},
+            Duration::from_millis(100),
+        );
+        match result {
+            MutateStatus::Changed(_) | MutateStatus::Unchanged(_) => {
+                self.startup_lease_disarmed = true;
+                self.startup_lease_timer = None;
+                self.startup_lease_terminal_value = Some(terminal.clone());
+                Some(terminal)
+            }
+            MutateStatus::GenerationMismatch => {
+                self.startup_lease_disarmed = true;
+                self.startup_lease_timer = None;
+                None
+            }
+            MutateStatus::Busy | MutateStatus::Stale | MutateStatus::Missing => None,
+        }
+    }
+
     fn service_timers(&mut self, now: Instant) {
         self.service_cuts(now);
         if let Some(at) = self.activity_persist_at
@@ -731,6 +989,42 @@ impl Daemon {
                 _ => self.exit_meta_retry = None,
             }
         }
+        if let Some(at) = self.startup_lease_timer
+            && at <= now
+        {
+            if self.startup_deadline_pending_shutdown {
+                self.startup_deadline_pending_shutdown = false;
+                self.startup_lease_timer = None;
+                self.external_kill = true;
+                if self.shutdown_code.is_none() {
+                    self.shutdown_code = Some(124);
+                }
+            } else if self.startup_lease_disarmed {
+                self.startup_lease_timer = None;
+            } else if let Some(deadline) = self
+                .startup_lease
+                .as_ref()
+                .and_then(|lease| lease.deadline_monotonic_ns)
+            {
+                let remaining = remaining_lease_delay(deadline);
+                if remaining.is_zero() {
+                    if self
+                        .settle_startup_lifecycle(StartupLeaseTerminalCause::Deadline, false)
+                        .is_some()
+                    {
+                        self.external_kill = true;
+                        self.shutdown_code = Some(124);
+                    } else {
+                        self.startup_lease_timer =
+                            Some(now + Duration::from_millis(10));
+                    }
+                } else {
+                    self.startup_lease_timer = Some(now + remaining);
+                }
+            } else {
+                self.startup_lease_timer = None;
+            }
+        }
         if let Some(at) = self.exit_shutdown_at
             && at <= now
         {
@@ -749,6 +1043,7 @@ impl Daemon {
         let status = self.child_status.unwrap_or(ExitStatus { code: None, signal: None });
         let signal = status.signal;
         let code = signal.map_or(status.code.unwrap_or(-1), |signal| 128 + signal);
+        self.settle_startup_lifecycle(StartupLeaseTerminalCause::Exit, true);
         self.exited = true;
         self.exit_code = code;
         self.exit_drain_deadline = None;
@@ -815,6 +1110,30 @@ impl Daemon {
                 MutateStatus::Busy | MutateStatus::Stale => {}
             }
             if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn settle_startup_lifecycle_before_close(&mut self) {
+        if self.startup_lease.is_none() || self.startup_lease_terminal_value.is_some() {
+            return;
+        }
+        let deadline = Instant::now() + EXIT_METADATA_SETTLE;
+        loop {
+            if self
+                .settle_startup_lifecycle(StartupLeaseTerminalCause::Exit, true)
+                .is_some()
+            {
+                return;
+            }
+            let Some(metadata) = registry::read_metadata(&self.name) else {
+                return;
+            };
+            if metadata.generation.as_deref() != Some(self.generation.as_str())
+                || Instant::now() >= deadline
+            {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -896,6 +1215,7 @@ impl Daemon {
     ///
     /// node: src/server.ts:1340-1408, 1559-1568
     fn close(mut self, code: i32) -> i32 {
+        self.settle_startup_lifecycle_before_close();
         let descendants = Arc::new(Mutex::new(Vec::new()));
         if self.external_kill
             && let Ok(mut d) = descendants.lock()

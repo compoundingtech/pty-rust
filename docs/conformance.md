@@ -32,7 +32,7 @@ Run: `PTY_TEST_BIN=$(which pty) cargo test -p pty-conformance` (Node) and `cargo
 | buffer-wide-char-diff.test.ts | not-portable | — | 0 | TUI widget / framework test against the Node in-process renderer |
 | code-block.test.ts | not-portable | — | 0 | TUI widget / framework test against the Node in-process renderer |
 | codex-integration.test.ts | not-portable | — | 0 | drives the Node codex integration in-process |
-| completions.test.ts | cli | completions.rs | 9 | 81, 91, 169, 196, 205, 213, 221, 229, 237 — shell-syntax cases run where the shell exists; the evidence completions (:103, :129, :150) and the in-process spec cases (:54, :64) are left out (evidence deferred) |
+| completions.test.ts | cli | completions.rs | 9 | 81, 91, 169, 196, 205, 213, 221, 229, 237 — shell-syntax cases run where the shell exists; evidence completions and in-process spec cases are covered outside this conformance count |
 | connection.test.ts | protocol | connection.rs | 15 | 102, 118, 135, 155, 175, 188, 214, 224, 257, 270, 285, 298, 318, 330, 343 — SessionConnection semantics as raw-socket sequences; paste brackets via pty send --paste |
 | disk-layout-docs.test.ts | not-portable | — | 0 | lint of the Node docs against the Node source |
 | display-name.test.ts | cli | display_name.rs | 31 | 67, 84, 99, 111, 122, 134, 142, 153, 168, 176, 186, 203, 215, 227, 238, 247, 258, 265, 276, 287, 297, 310, 322, 334, 377, 387, 395, 402, 411, 418, 433 |
@@ -43,7 +43,7 @@ Run: `PTY_TEST_BIN=$(which pty) cargo test -p pty-conformance` (Node) and `cargo
 | events-emit.test.ts | cli | events_emit.rs | 8 | 83, 126, 139, 149, 158, 172, 185, 198 — CLI half; emitUserEvent / retention / EventFollower are library-only |
 | exec.test.ts | cli | exec.rs | 10 | 112, 133, 148, 166, 183, 197, 208, 229, 244, 277 |
 | exit-event-race.test.ts | protocol | exit_event_race.rs | 3 | 82, 105, 124 |
-| exit-reap.test.ts | cli | exit_reap.rs | 18 | 669, 678, 690, 702, 719, 731, 743, 757, 769, 786, 797, 809, 826, 841, 855, 871, 893, 915 — reap-policy half; the exact-generation evidence half (pty evidence) is deferred |
+| exit-reap.test.ts | cli | exit_reap.rs | 18 | 669, 678, 690, 702, 719, 731, 743, 757, 769, 786, 797, 809, 826, 841, 855, 871, 893, 915 — reap-policy half; exact-generation evidence is covered by `registry_evidence` and `cli_dispatch` |
 | exit-signal.test.ts | cli | exit_signal.rs | 2 | 49, 74 — sessions tagged keep=true so the exit record outlives the default reap |
 | filter.test.ts | not-portable | — | 0 | TUI widget / framework test against the Node in-process renderer |
 | focus.test.ts | not-portable | — | 0 | TUI widget / framework test against the Node in-process renderer |
@@ -166,4 +166,4 @@ Run: `PTY_TEST_BIN=$(which pty) cargo test -p pty-conformance` (Node) and `cargo
 
 ## Still to do
 
-- Halves left out of otherwise-ported suites: the `pty evidence` half of exit-reap.test.ts and the evidence completions (deferred in docs/parity.md §12); the remote-serve --socket cases of remote-fabric.test.ts and wrapper-signal-forwarding.test.ts (dropped in docs/parity.md §12); the retention cap, readRecentEvents and EventFollower halves of events.test.ts, events-emit.test.ts and metadata-events.test.ts, the atomicWriteFileSync loops of atomic-writes.test.ts, the reapSkipped case of gc-parent-child.test.ts and the spawn-strategy cases of spawn-bundle-fallback.test.ts (library-only); the pure-function halves of terminal-queries.test.ts, process-tree.test.ts and parity-node-reference.test.ts (unit); the emulator-behaviour half of sanitize.test.ts; the attach-stream reconnect cases (:495, :563) that need attach --remote.
+- Halves left out of otherwise-ported suites: the remote-serve --socket cases of remote-fabric.test.ts and wrapper-signal-forwarding.test.ts (dropped in docs/parity.md §12); the retention cap, readRecentEvents and EventFollower halves of events.test.ts, events-emit.test.ts and metadata-events.test.ts, the atomicWriteFileSync loops of atomic-writes.test.ts, the reapSkipped case of gc-parent-child.test.ts and the spawn-strategy cases of spawn-bundle-fallback.test.ts (library-only); the pure-function halves of terminal-queries.test.ts, process-tree.test.ts and parity-node-reference.test.ts (unit); the emulator-behaviour half of sanitize.test.ts; the attachment-stream transport half of tty-transport.test.ts; and framework/UI suites marked not-portable above.

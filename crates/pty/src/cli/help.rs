@@ -1,14 +1,14 @@
 //! Help text for the `pty` binary.
 //!
-//! Every text here is vendored verbatim from the Node `pty` at `500eab2`. The
+//! Every text here is vendored verbatim from the Node `pty` at `e6c1cd4`. The
 //! fixtures under `crates/pty/tests/fixtures/help/` are the bytes that binary
 //! printed (`pty help`, `pty <cmd> --help`, ...), captured by running it under a
 //! scratch `PTY_ROOT`, trailing newline included. Nothing is generated or
 //! reformatted here; a text changes only when its fixture is re-captured.
 //!
-//! The three deferred commands (`recover`, `evidence`, `test`) keep the Node
-//! help so the binary stays a drop-in; the commands themselves report that
-//! they are not available in this build (see README.md and docs/parity.md §12).
+//! The two deferred commands (`recover`, `test`) keep the Node help so the
+//! binary stays a drop-in; the commands themselves report that they are not
+//! available in this build (see README.md and docs/parity.md §12).
 //!
 //! node: src/cli.ts:109-451 (`COMMAND_HELP`), src/cli.ts:470-478
 //! (`printCommandHelp`), src/cli.ts:480-603 (`usage`),
@@ -59,6 +59,7 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
         "emit" => fixture!("emit"),
         "rename" => fixture!("rename"),
         "metadata" => fixture!("metadata"),
+        "readiness" => fixture!("readiness"),
         "evidence" => fixture!("evidence"),
         "up" => fixture!("up"),
         "down" => fixture!("down"),
@@ -86,6 +87,14 @@ pub fn evidence_leaf_help(leaf: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+/// Leaf help for the two readiness operations.
+pub fn readiness_leaf_help(leaf: &str) -> Option<&'static str> {
+    match leaf {
+        "ownership" => Some(fixture!("readiness-ownership")),
+        "cas" => Some(fixture!("readiness-cas")),
+        _ => None,
+    }
+}
 
 /// Write [`usage`] to stdout. A closed pipe is not an error worth reporting
 /// for help output, so write failures are ignored.
@@ -100,7 +109,7 @@ mod tests {
     use super::*;
 
     /// node: tests/help.test.ts:13-18 (`COMMANDS`).
-    const COMMANDS: [&str; 23] = [
+    const COMMANDS: [&str; 24] = [
         "run",
         "attach",
         "exec",
@@ -119,6 +128,7 @@ mod tests {
         "emit",
         "rename",
         "metadata",
+        "readiness",
         "up",
         "down",
         "test",
@@ -195,6 +205,14 @@ mod tests {
         assert!(remove.starts_with("Usage: pty evidence remove "));
         assert!(remove.contains("--expected-generation <opaque>"));
         assert!(evidence_leaf_help("evidence").is_none());
+    }
+    #[test]
+    fn readiness_leaves() {
+        let ownership = readiness_leaf_help("ownership").unwrap();
+        assert!(ownership.starts_with("Usage: pty readiness ownership "));
+        let cas = readiness_leaf_help("cas").unwrap();
+        assert!(cas.starts_with("Usage: pty readiness cas "));
+        assert!(readiness_leaf_help("readiness").is_none());
     }
 
     /// node: src/cli.ts:3489-3511 — the parser's own text differs from the
