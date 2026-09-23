@@ -126,7 +126,7 @@ _pty() {
       fi
       ;;
     metadata)
-      COMPREPLY=($(compgen -W "--id" -- "${cur}"))
+      COMPREPLY=($(compgen -W "patch cas --id" -- "${cur}"))
       ;;
     readiness)
       if [[ ${COMP_CWORD} -eq 2 ]]; then

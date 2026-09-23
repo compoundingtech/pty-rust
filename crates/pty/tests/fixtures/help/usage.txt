@@ -63,6 +63,7 @@ Observe:
 
 Modify:
   pty metadata patch --id <id>            Atomically merge displayName/tags from JSON stdin
+  pty metadata cas --id <id>              Filesystem tag CAS fenced by exact generation
   pty evidence snapshot --id <id>         Read exact-generation retained exit evidence as JSON
   pty readiness ownership --id <id>        Prove exact held TCP connection ownership
   pty readiness cas --id <id>              Generation-fenced lifecycle tag CAS
