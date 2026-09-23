@@ -277,23 +277,39 @@ fn same_identities(a: &[ProcessIdentity], b: &[ProcessIdentity]) -> bool {
             .all(|(a, b)| a.pid == b.pid && a.identity == b.identity)
 }
 
-/// How many times a complete tree is re-read before it is declared unable to
-/// hold still.
-const FREEZE_ATTEMPTS: usize = 8;
+/// How many times the tree is re-read, after the stop is sent, before it is
+/// declared unable to hold still.
+const FREEZE_ATTEMPTS: usize = 16;
+
+/// Is the root, and every identity in `identities`, stopped in `table`?
+fn all_stopped(root_pid: i32, identities: &[ProcessIdentity], table: &ProcTable) -> bool {
+    std::iter::once(root_pid)
+        .chain(identities.iter().map(|identity| identity.pid))
+        .all(|pid| table.row(pid).known().is_some_and(|row| row.is_stopped()))
+}
 
 /// Stop the whole tree, then prove the snapshot complete.
 ///
 /// A snapshot of a running tree is out of date as soon as it is taken: any
 /// member can fork before it is signalled, and the new process was never
 /// seen. So this stops the root and its group (`stop_root`, which is `false`
-/// if the root could not be stopped), stops every descendant it observed, and
-/// re-reads until two complete reads agree. Once it returns `Complete`, no
-/// member of that tree can fork before the caller signals it.
+/// if the root could not be stopped) and every descendant it observes, then
+/// re-reads the table.
+///
+/// **A sent SIGSTOP is not a stopped process.** `kill` returns once the stop
+/// is queued; a target running on another CPU keeps running, and can fork,
+/// until it takes it. So a read counts only when it shows the root and every
+/// member in a stopped state, and the tree is `Complete` only when two such
+/// reads in a row agree. The second read starts after every member was seen
+/// stopped, so any child forked before the stop took effect is already in
+/// it. Until then the members are stopped again (a new one may have joined)
+/// and the table re-read, a little later each time.
 ///
 /// An incomplete first read is never upgraded: the tree is still stopped, but
 /// the answer stays `Unavailable`, with every identity observed on any read.
 ///
-/// node: src/process-tree.ts `freezeDescendantProcesses` (PR #182)
+/// node: src/process-tree.ts `freezeDescendantProcesses` (PR #182), which
+/// trusts the sent signal; this does not.
 pub fn freeze_descendants(
     root_pid: i32,
     stop_root: impl FnOnce() -> bool,
@@ -302,39 +318,58 @@ pub fn freeze_descendants(
 ) -> TreeSnapshot {
     let first = complete_snapshot_from_table(root_pid, &read());
     let mut observed = first.identities().to_vec();
-    let (mut previous, attempts, give_up) = match &first {
-        TreeSnapshot::Complete(identities) => (
-            Some(identities.clone()),
-            FREEZE_ATTEMPTS,
-            "process-tree-did-not-quiesce".to_string(),
-        ),
-        TreeSnapshot::Unavailable { reason, .. } => (None, 1, reason.clone()),
+    let first_unavailable = match &first {
+        TreeSnapshot::Complete(_) => None,
+        TreeSnapshot::Unavailable { reason, .. } => Some(reason.clone()),
     };
     if !stop_root() {
         return TreeSnapshot::unavailable("root-freeze-failed", observed);
     }
-    for _ in 0..attempts {
+    let attempts = if first_unavailable.is_some() {
+        1
+    } else {
+        FREEZE_ATTEMPTS
+    };
+    let mut previous: Option<Vec<ProcessIdentity>> = None;
+    let mut seen_running = false;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(attempt.min(10) as u64));
+        }
         if stop(&observed).len() != observed.len() {
             return TreeSnapshot::unavailable("descendant-freeze-unverified", observed);
         }
-        let next = complete_snapshot_from_table(root_pid, &read());
+        let table = read();
+        let next = complete_snapshot_from_table(root_pid, &table);
         merge_identities(&mut observed, next.identities());
         match next {
-            TreeSnapshot::Complete(identities) => {
+            TreeSnapshot::Complete(identities) if all_stopped(root_pid, &identities, &table) => {
                 if previous
                     .as_deref()
                     .is_some_and(|previous| same_identities(previous, &identities))
                 {
-                    return TreeSnapshot::Complete(identities);
+                    return match first_unavailable {
+                        Some(reason) => TreeSnapshot::unavailable(reason, observed),
+                        None => TreeSnapshot::Complete(identities),
+                    };
                 }
                 previous = Some(identities);
+            }
+            TreeSnapshot::Complete(_) => {
+                seen_running = true;
+                previous = None;
             }
             TreeSnapshot::Unavailable { reason, .. } => {
                 return TreeSnapshot::unavailable(reason, observed);
             }
         }
     }
-    TreeSnapshot::unavailable(give_up, observed)
+    let reason = match first_unavailable {
+        Some(reason) => reason,
+        None if seen_running => "process-tree-not-stopped".to_string(),
+        None => "process-tree-did-not-quiesce".to_string(),
+    };
+    TreeSnapshot::unavailable(reason, observed)
 }
 
 /// Does any process still belong to group `pgid`? A permission error still
@@ -966,40 +1001,115 @@ mod containment_tests {
         (snapshot, stopped.into_inner(), read_count.into_inner())
     }
 
+    /// `TREE` with the child and every descendant stopped; 999, outside the
+    /// tree, still runs.
+    const STOPPED: &str = "100 1 100 T\n200 100 100 T\n300 200 100 T\n400 100 400 T\n999 1 999\n";
+
+    fn stopped() -> ProcTable {
+        table_from_shape(STOPPED)
+    }
+
     #[test]
-    fn a_tree_that_holds_still_is_frozen_complete() {
-        let (snapshot, stopped, reads) = freeze(
+    fn a_tree_seen_stopped_twice_is_frozen_complete() {
+        let (snapshot, stopped_sets, reads) = freeze(
             true,
-            vec![table_from_shape(TREE), table_from_shape(TREE)],
+            vec![table_from_shape(TREE), stopped(), stopped()],
             true,
         );
         assert!(snapshot.is_complete());
         assert_eq!(pids(&snapshot), vec![300, 400, 200]);
-        assert_eq!(stopped, vec![vec![300, 400, 200]]);
-        assert_eq!(reads, 2);
+        assert_eq!(stopped_sets, vec![vec![300, 400, 200]; 2]);
+        assert_eq!(reads, 3);
     }
 
+    /// PR #39 review: `kill(SIGSTOP)` returns once the stop is sent, not once
+    /// the target has stopped, and a target still running can fork. A tree
+    /// whose members all accepted the signal but still read as runnable is
+    /// never called complete.
     #[test]
-    fn a_fork_before_the_freeze_is_caught_and_stopped_too() {
-        let grown = format!("{TREE}500 300 100\n");
-        let (snapshot, stopped, _) = freeze(
+    fn a_sent_stop_that_has_not_taken_effect_is_not_containment() {
+        let reads = (0..=FREEZE_ATTEMPTS)
+            .map(|_| table_from_shape(TREE))
+            .collect();
+        let (snapshot, stopped_sets, _) = freeze(true, reads, true);
+        assert_eq!(reason(&snapshot), "process-tree-not-stopped");
+        assert_eq!(
+            pids(&snapshot),
+            vec![300, 400, 200],
+            "observed identities were dropped"
+        );
+        assert!(
+            stopped_sets.iter().all(|set| set == &vec![300, 400, 200]),
+            "every attempt re-sends the stop"
+        );
+
+        // One runnable member is enough, and so is a runnable root.
+        for runnable in ["300 200 100 R", "100 1 100 R"] {
+            let pid = &runnable[..3];
+            let shape = STOPPED
+                .lines()
+                .map(|line| {
+                    if line.starts_with(pid) {
+                        runnable
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let reads = (0..=FREEZE_ATTEMPTS)
+                .map(|_| table_from_shape(&shape))
+                .collect();
+            let (snapshot, _, _) = freeze(true, reads, true);
+            assert_eq!(
+                reason(&snapshot),
+                "process-tree-not-stopped",
+                "{runnable} still runs"
+            );
+        }
+    }
+
+    /// A member that takes the stop late is waited for, not given up on.
+    #[test]
+    fn a_stop_that_takes_effect_late_is_waited_for() {
+        let late = "100 1 100 T\n200 100 100 T\n300 200 100 R\n400 100 400 T\n999 1 999\n";
+        let (snapshot, _, reads) = freeze(
             true,
             vec![
                 table_from_shape(TREE),
-                table_from_shape(&grown),
-                table_from_shape(&grown),
+                table_from_shape(late),
+                stopped(),
+                stopped(),
+            ],
+            true,
+        );
+        assert!(snapshot.is_complete(), "{snapshot:?}");
+        assert_eq!(reads, 4);
+    }
+
+    #[test]
+    fn a_fork_before_the_stop_took_effect_is_caught_and_stopped_too() {
+        let grown_running = format!("{STOPPED}500 300 100 R\n");
+        let grown_stopped = format!("{STOPPED}500 300 100 T\n");
+        let (snapshot, stopped_sets, _) = freeze(
+            true,
+            vec![
+                table_from_shape(TREE),
+                table_from_shape(&grown_running),
+                table_from_shape(&grown_stopped),
+                table_from_shape(&grown_stopped),
             ],
             true,
         );
         assert!(snapshot.is_complete());
         assert_eq!(pids(&snapshot), vec![500, 300, 400, 200]);
-        assert_eq!(stopped.last().unwrap(), &vec![500, 300, 400, 200]);
+        assert_eq!(stopped_sets.last().unwrap(), &vec![500, 300, 400, 200]);
     }
 
     #[test]
     fn a_tree_that_never_holds_still_is_not_complete() {
         let reads = (0..=FREEZE_ATTEMPTS)
-            .map(|n| table_from_shape(&format!("{TREE}{} 100 100\n", 1000 + n)))
+            .map(|n| table_from_shape(&format!("{STOPPED}{} 100 100 T\n", 1000 + n)))
             .collect();
         let (snapshot, _, _) = freeze(true, reads, true);
         assert_eq!(reason(&snapshot), "process-tree-did-not-quiesce");
@@ -1007,18 +1117,19 @@ mod containment_tests {
 
     #[test]
     fn an_incomplete_first_read_is_never_upgraded_to_complete() {
-        let (snapshot, stopped, _) = freeze(
+        let (snapshot, stopped_sets, _) = freeze(
             true,
             vec![
                 table_from_shape(TREE).marked_incomplete(),
-                table_from_shape(TREE),
+                stopped(),
+                stopped(),
             ],
             true,
         );
         assert_eq!(reason(&snapshot), "process-table-incomplete");
         assert_eq!(pids(&snapshot), vec![300, 400, 200]);
         assert_eq!(
-            stopped,
+            stopped_sets,
             vec![vec![300, 400, 200]],
             "what was observed must still be stopped"
         );
@@ -1084,6 +1195,58 @@ mod containment_tests {
             |_| true,
             |_, _| {}
         ));
+    }
+
+    /// PR #39 review, on real processes that are busy on a CPU when the stop
+    /// is sent: when the freeze says `Complete`, every member really is
+    /// stopped.
+    #[test]
+    fn a_real_busy_tree_is_complete_only_once_it_is_really_stopped() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "(while :; do :; done) & (while :; do :; done) & while :; do :; done",
+            ])
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let root = leader.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while observed_identities(root, &ProcTable::read()).len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let snapshot = freeze_descendants(
+            root,
+            || {
+                signal_group(root, libc::SIGSTOP);
+                unsafe { libc::kill(root, libc::SIGSTOP) == 0 }
+            },
+            ProcTable::read,
+            |identities| signal_process_identities(identities, libc::SIGSTOP),
+        );
+        let after = ProcTable::read();
+        let members: Vec<i32> = std::iter::once(root)
+            .chain(snapshot.identities().iter().map(|id| id.pid))
+            .collect();
+        let states: Vec<String> = members
+            .iter()
+            .map(|pid| {
+                after
+                    .row(*pid)
+                    .known()
+                    .map(|row| row.state.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        signal_group(root, libc::SIGKILL);
+        let _ = leader.wait();
+        assert!(snapshot.is_complete(), "{snapshot:?}");
+        assert_eq!(snapshot.identities().len(), 2);
+        assert!(
+            states.iter().all(|state| state.starts_with('T')),
+            "not every member was stopped: {states:?}"
+        );
     }
 
     /// A real group: a member that ignores TERM is KILLed and verified gone.

@@ -186,6 +186,12 @@ impl Row {
     pub fn is_zombie(&self) -> bool {
         self.state.starts_with('Z')
     }
+
+    /// Stopped by a signal (`T`) or by a tracer (`t`). A stopped process runs
+    /// no code, so it cannot fork until it is continued.
+    pub fn is_stopped(&self) -> bool {
+        self.state.starts_with('T') || self.state.starts_with('t')
+    }
 }
 
 /// A snapshot of the process table.
@@ -262,6 +268,52 @@ impl ProcTable {
             }
         }
         if !rows.iter().any(|r| r.pid == std::process::id() as i32) {
+            return Self::unreadable();
+        }
+        let table = Self::from_rows(rows);
+        if complete {
+            table
+        } else {
+            table.marked_incomplete()
+        }
+    }
+
+    /// The Linux reader over its inputs: the `/proc` listing and a way to
+    /// read one `stat`. Every entry the listing could not produce, and every
+    /// row that was refused or would not parse, makes the table incomplete:
+    /// that process may be the one linking a descendant into a tree.
+    ///
+    /// A process that exits between the listing and the read is simply gone;
+    /// skipping it is correct and is not the silence this module guards
+    /// against.
+    #[cfg(any(target_os = "linux", test))]
+    fn from_proc_listing(
+        entries: impl Iterator<Item = std::io::Result<std::ffi::OsString>>,
+        read_stat: impl Fn(i32) -> std::io::Result<String>,
+        own_pid: i32,
+    ) -> Self {
+        let mut rows = Vec::new();
+        let mut complete = true;
+        for entry in entries {
+            let Ok(name) = entry else {
+                complete = false;
+                continue;
+            };
+            let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+                continue;
+            };
+            match read_stat(pid) {
+                Ok(stat) => match parse_proc_stat(pid, &stat) {
+                    Some(row) => rows.push(row),
+                    None => complete = false,
+                },
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || e.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(_) => complete = false,
+            }
+        }
+        if !rows.iter().any(|r| r.pid == own_pid) {
             return Self::unreadable();
         }
         let table = Self::from_rows(rows);
@@ -389,37 +441,11 @@ impl ProcTable {
         let Ok(dir) = std::fs::read_dir("/proc") else {
             return Self::unreadable();
         };
-        let mut rows = Vec::new();
-        let mut complete = true;
-        for entry in dir.flatten() {
-            let name = entry.file_name();
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
-                continue;
-            };
-            // A process that exits between the readdir and the read is simply
-            // gone; skipping it is correct and is not the silence this module
-            // guards against. A row that was refused or would not parse is
-            // different: the process is there and the table cannot say so.
-            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                Ok(stat) => match parse_proc_stat(pid, &stat) {
-                    Some(row) => rows.push(row),
-                    None => complete = false,
-                },
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::NotFound
-                        || e.raw_os_error() == Some(libc::ESRCH) => {}
-                Err(_) => complete = false,
-            }
-        }
-        if !rows.iter().any(|r| r.pid == std::process::id() as i32) {
-            return Self::unreadable();
-        }
-        let table = Self::from_rows(rows);
-        if complete {
-            table
-        } else {
-            table.marked_incomplete()
-        }
+        Self::from_proc_listing(
+            dir.map(|entry| entry.map(|entry| entry.file_name())),
+            |pid| std::fs::read_to_string(format!("/proc/{pid}/stat")),
+            std::process::id() as i32,
+        )
     }
 }
 
@@ -588,6 +614,8 @@ mod kinfo {
     pub const E_PGID: usize = 564;
     /// `SZOMB` from `<sys/proc.h>`.
     pub const SZOMB: u8 = 5;
+    /// `SSTOP` from `<sys/proc.h>`.
+    pub const SSTOP: u8 = 4;
 }
 
 #[cfg(target_os = "macos")]
@@ -636,7 +664,11 @@ fn sysctl_proc(pid: i32) -> Answer<Row> {
         pid,
         ppid: read_i32(&buf, kinfo::E_PPID),
         pgid: read_i32(&buf, kinfo::E_PGID),
-        state: if buf[kinfo::P_STAT] == kinfo::SZOMB { "Z".into() } else { "S".into() },
+        state: match buf[kinfo::P_STAT] {
+            kinfo::SZOMB => "Z".into(),
+            kinfo::SSTOP => "T".into(),
+            _ => "S".into(),
+        },
         rss_kb: None,
         cpu_percent: None,
         identity: Some(LiveIdentity::new(format!("darwin:{sec}.{usec:06}"))),
@@ -667,6 +699,8 @@ const P_PID_OFFSET: usize = 40;
 fn read_bsdinfo(pid: i32) -> Option<Row> {
     // <sys/proc.h>: SZOMB. A zombie is a corpse that still has a row.
     const SZOMB: u32 = 5;
+    // <sys/proc.h>: SSTOP. Stopped by a signal; it cannot fork until continued.
+    const SSTOP: u32 = 4;
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let want = size_of::<libc::proc_bsdinfo>() as i32;
     // SAFETY: `info` is the struct `PROC_PIDTBSDINFO` fills.
@@ -686,7 +720,11 @@ fn read_bsdinfo(pid: i32) -> Option<Row> {
         pid,
         ppid: info.pbi_ppid as i32,
         pgid: info.pbi_pgid as i32,
-        state: if info.pbi_status == SZOMB { "Z".into() } else { "S".into() },
+        state: match info.pbi_status {
+            SZOMB => "Z".into(),
+            SSTOP => "T".into(),
+            _ => "S".into(),
+        },
         rss_kb: None,
         cpu_percent: None,
         // Microsecond start time, a STRONGER identity than the
@@ -838,6 +876,82 @@ mod tests {
         assert_eq!(partial.is_running(me()), whole.is_running(me()));
         assert_eq!(partial.identity(me()), whole.identity(me()));
         assert_eq!(partial.rows().count(), whole.rows().count());
+    }
+
+    /// A `/proc/<pid>/stat` line for `pid`, child of `ppid`, in `state`.
+    fn stat(pid: i32, ppid: i32, state: &str) -> String {
+        format!(
+            "{pid} (cat) {state} {ppid} {pid} {ppid} 0 -1 4194304 503 0 1 0 0 0 0 0 20 0 1 0 666751667 16637952 1837"
+        )
+    }
+
+    fn listing(names: &[std::io::Result<&str>]) -> Vec<std::io::Result<std::ffi::OsString>> {
+        names
+            .iter()
+            .map(|name| match name {
+                Ok(name) => Ok(std::ffi::OsString::from(name)),
+                Err(error) => Err(std::io::Error::from(error.kind())),
+            })
+            .collect()
+    }
+
+    /// PR #39 review: a `/proc` entry that could not be listed may be the
+    /// process that links a descendant into the tree. The table keeps every
+    /// row it read but no longer claims to be whole.
+    #[test]
+    fn a_listing_error_makes_the_linux_table_incomplete() {
+        let read = |pid: i32| Ok(stat(pid, 1, "S"));
+        let whole = ProcTable::from_proc_listing(listing(&[Ok("7"), Ok("8")]).into_iter(), read, 7);
+        assert!(whole.is_complete());
+
+        let entries = listing(&[Ok("7"), Err(std::io::Error::other("readdir")), Ok("8")]);
+        let partial = ProcTable::from_proc_listing(entries.into_iter(), read, 7);
+        assert!(
+            partial.is_readable(),
+            "a listing error is not an unreadable table"
+        );
+        assert!(!partial.is_complete(), "a listing error was hidden");
+        assert_eq!(partial.rows().count(), 2);
+    }
+
+    #[test]
+    fn a_refused_or_garbled_row_makes_the_linux_table_incomplete_but_an_exit_does_not() {
+        let entries = || listing(&[Ok("7"), Ok("8"), Ok("self")]).into_iter();
+        let with = |eight: fn() -> std::io::Result<String>| {
+            ProcTable::from_proc_listing(
+                entries(),
+                move |pid| {
+                    if pid == 8 {
+                        eight()
+                    } else {
+                        Ok(stat(pid, 1, "S"))
+                    }
+                },
+                7,
+            )
+        };
+        assert!(
+            !with(|| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))).is_complete()
+        );
+        assert!(!with(|| Ok("8 (cat)".to_string())).is_complete());
+        // Gone between the listing and the read: really absent, not a gap.
+        assert!(with(|| Err(std::io::Error::from(std::io::ErrorKind::NotFound))).is_complete());
+        assert!(with(|| Err(std::io::Error::from_raw_os_error(libc::ESRCH))).is_complete());
+    }
+
+    #[test]
+    fn a_stopped_row_reads_as_stopped() {
+        for (state, stopped) in [
+            ("T", true),
+            ("t", true),
+            ("S", false),
+            ("R", false),
+            ("Z", false),
+            ("D", false),
+        ] {
+            let row = parse_proc_stat(9, &stat(9, 1, state)).unwrap();
+            assert_eq!(row.is_stopped(), stopped, "state {state}");
+        }
     }
 
     #[test]
