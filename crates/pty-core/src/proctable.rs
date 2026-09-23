@@ -193,6 +193,10 @@ impl Row {
 pub struct ProcTable {
     rows: HashMap<i32, Row>,
     readable: bool,
+    /// `false` when the reader skipped a process it could see but not read.
+    /// Every row present is still true; what is missing is proof that the
+    /// rows are all there is. See [`ProcTable::is_complete`].
+    complete: bool,
 }
 
 impl ProcTable {
@@ -240,6 +244,7 @@ impl ProcTable {
 
         let _ = SZOMB;
         let mut rows = Vec::with_capacity(pids.len());
+        let mut complete = true;
         for pid in pids.into_iter().filter(|&p| p > 0) {
             if let Some(row) = read_bsdinfo(pid) {
                 rows.push(row);
@@ -250,14 +255,21 @@ impl ProcTable {
             // here would make the table disagree with Linux, where the corpse
             // keeps its row. A process that genuinely exited between the two
             // calls comes back `NotPresent` and is skipped.
-            if let Answer::Known(row) = sysctl_proc(pid) {
-                rows.push(row);
+            match sysctl_proc(pid) {
+                Answer::Known(row) => rows.push(row),
+                Answer::NotPresent => {}
+                Answer::Unknown(_) => complete = false,
             }
         }
         if !rows.iter().any(|r| r.pid == std::process::id() as i32) {
             return Self::unreadable();
         }
-        Self::from_rows(rows)
+        let table = Self::from_rows(rows);
+        if complete {
+            table
+        } else {
+            table.marked_incomplete()
+        }
     }
 
     /// A table that could not be read. Every query returns
@@ -266,6 +278,7 @@ impl ProcTable {
         ProcTable {
             rows: HashMap::new(),
             readable: false,
+            complete: false,
         }
     }
 
@@ -275,7 +288,15 @@ impl ProcTable {
         ProcTable {
             rows: rows.into_iter().map(|r| (r.pid, r)).collect(),
             readable: true,
+            complete: true,
         }
+    }
+
+    /// The same rows, no longer claiming to be every process. Used by the
+    /// readers when they skip a process they could not read, and by tests.
+    pub fn marked_incomplete(mut self) -> Self {
+        self.complete = false;
+        self
     }
 
     /// Parse `ps -axo pid=,ppid=,pgid=,state=,rss=,pcpu=,lstart=`.
@@ -304,6 +325,18 @@ impl ProcTable {
 
     pub fn is_readable(&self) -> bool {
         self.readable
+    }
+
+    /// Readable, and no process was skipped for being unreadable.
+    ///
+    /// **A readable table is not necessarily a whole one.** A process that
+    /// exits between the listing and the read is really gone and costs
+    /// nothing; one whose row was refused or would not parse is still there,
+    /// unseen. Per-row lookups do not care, but a caller that must prove it
+    /// saw *every* descendant does: without this, a skipped row reads as a
+    /// tree that has no such process.
+    pub fn is_complete(&self) -> bool {
+        self.readable && self.complete
     }
 
     pub fn rows(&self) -> impl Iterator<Item = &Row> {
@@ -357,6 +390,7 @@ impl ProcTable {
             return Self::unreadable();
         };
         let mut rows = Vec::new();
+        let mut complete = true;
         for entry in dir.flatten() {
             let name = entry.file_name();
             let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
@@ -364,17 +398,28 @@ impl ProcTable {
             };
             // A process that exits between the readdir and the read is simply
             // gone; skipping it is correct and is not the silence this module
-            // guards against.
-            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                && let Some(row) = parse_proc_stat(pid, &stat)
-            {
-                rows.push(row);
+            // guards against. A row that was refused or would not parse is
+            // different: the process is there and the table cannot say so.
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => match parse_proc_stat(pid, &stat) {
+                    Some(row) => rows.push(row),
+                    None => complete = false,
+                },
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || e.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(_) => complete = false,
             }
         }
         if !rows.iter().any(|r| r.pid == std::process::id() as i32) {
             return Self::unreadable();
         }
-        Self::from_rows(rows)
+        let table = Self::from_rows(rows);
+        if complete {
+            table
+        } else {
+            table.marked_incomplete()
+        }
     }
 }
 
@@ -774,6 +819,41 @@ mod tests {
         assert_eq!(
             t.identity(me()),
             Answer::Known(LiveIdentity::new("darwin:Wed Sep  3 11:00:00 2026"))
+        );
+    }
+
+    // ---- a readable table is not necessarily a whole one ----------------
+
+    /// PR #34: a caller that must prove it saw every descendant needs to
+    /// know when the reader skipped a row it could not read.
+    #[test]
+    fn a_table_that_skipped_rows_is_readable_but_not_complete() {
+        let listing = format!("{} 1 {} S 100 0.5 Wed Sep  3 11:00:00 2026\n", me(), me());
+        let whole = ProcTable::from_ps_listing(&listing);
+        assert!(whole.is_complete());
+        let partial = whole.clone().marked_incomplete();
+        assert!(partial.is_readable());
+        assert!(!partial.is_complete());
+        // Every row it does have still answers exactly as before.
+        assert_eq!(partial.is_running(me()), whole.is_running(me()));
+        assert_eq!(partial.identity(me()), whole.identity(me()));
+        assert_eq!(partial.rows().count(), whole.rows().count());
+    }
+
+    #[test]
+    fn an_unreadable_table_is_not_complete() {
+        assert!(!ProcTable::unreadable().is_complete());
+    }
+
+    /// The real reader, on a machine where every row is readable, says so.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_real_read_of_this_machine_is_complete() {
+        let table = ProcTable::read();
+        assert!(table.is_readable());
+        assert!(
+            table.is_complete(),
+            "a normal read skipped a row it could not read"
         );
     }
 

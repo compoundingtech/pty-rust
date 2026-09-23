@@ -862,3 +862,267 @@ fn timed_startup_lifecycle_publishes_deadline_then_expires_terminally() {
     assert_eq!(terminal["generation"], metadata["generation"]);
     assert_eq!(terminal["cause"], "deadline");
 }
+
+// --- PR #34 review findings: startup-lease retention and deadline containment.
+
+fn lifecycle_value(daemon: &Daemon) -> serde_json::Value {
+    let metadata = daemon
+        .meta()
+        .expect("the session's metadata was not retained");
+    serde_json::from_str(
+        metadata["tags"]["run.lifecycle"]
+            .as_str()
+            .expect("no lifecycle tag"),
+    )
+    .unwrap()
+}
+
+/// `pty evidence snapshot --id <name>` against the daemon's registry.
+fn evidence_snapshot(root: &std::path::Path, name: &str) -> serde_json::Value {
+    let output = std::process::Command::new(pty_bin())
+        .args(["evidence", "snapshot", "--id", name])
+        .env("PTY_ROOT", root)
+        .env_remove("PTY_SESSION")
+        .output()
+        .expect("run pty evidence snapshot");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "evidence snapshot printed {:?} / {:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+/// PR #34: a naturally exiting startup-lease child under the default reap
+/// policy (`PTY_REAP_ON_EXIT` unset) deleted the metadata and events that
+/// carry its terminal lifecycle and exit evidence. Both must survive the
+/// daemon, ephemeral or not, until the generation-fenced removal.
+#[test]
+fn a_natural_exit_keeps_the_startup_lease_lifecycle_and_evidence() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    for ephemeral in [false, true] {
+        let root = short_root();
+        let name = unique_name("retain");
+        let mut cfg = config(&name, "/bin/sh", &["-c", "exit 7"]);
+        cfg["startupLease"] = json!({"lifecycleTag": "run.lifecycle"});
+        cfg["ephemeral"] = json!(ephemeral);
+        let mut daemon = Daemon::spawn(&root, cfg, &[]);
+        assert_eq!(daemon.wait_exit(T), Some(7), "ephemeral={ephemeral}");
+
+        let metadata = daemon
+            .meta()
+            .unwrap_or_else(|| panic!("ephemeral={ephemeral}: the session was reaped"));
+        assert_eq!(metadata["exitCode"], 7);
+        let terminal = lifecycle_value(&daemon);
+        assert_eq!(terminal["_tag"], "terminal");
+        assert_eq!(terminal["cause"], "exit");
+        assert_eq!(terminal["generation"], metadata["generation"]);
+        assert!(root.join(format!("{name}.events.jsonl")).exists());
+
+        let evidence = evidence_snapshot(&root, &name);
+        assert_eq!(
+            evidence["_tag"], "snapshot",
+            "ephemeral={ephemeral}: {evidence}"
+        );
+        assert_eq!(evidence["snapshot"]["exitCode"], 7);
+        assert_eq!(evidence["snapshot"]["generation"], metadata["generation"]);
+    }
+}
+
+/// The same retention on the exit a signal causes, and the unchanged default
+/// for a session without a lease.
+#[test]
+fn only_startup_lease_generations_skip_exit_reaping() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let root = short_root();
+    let mut daemon = Daemon::spawn(
+        &root,
+        config(&unique_name("plain"), "/bin/sh", &["-c", "exit 7"]),
+        &[],
+    );
+    assert_eq!(daemon.wait_exit(T), Some(7));
+    assert!(
+        daemon.meta().is_none(),
+        "a session without a lease is still reaped by default"
+    );
+}
+
+/// A child that forks one descendant into its own process group, which
+/// ignores the hangup the kernel sends it when the child dies, and one into a
+/// new session, outside the child's group. Returns the script and where each
+/// writes its pid.
+fn tree_script(
+    dir: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let in_group = dir.join("in-group.pid");
+    let other_session = dir.join("other-session.pid");
+    let body = format!(
+        "#!/bin/sh\ntrap '' HUP\nsleep 300 &\necho $! > {}\nsetsid sleep 300 &\necho $! > {}\nwait\n",
+        in_group.display(),
+        other_session.display()
+    );
+    (script(dir, "tree.sh", &body), in_group, other_session)
+}
+
+fn read_pid(path: &std::path::Path) -> i32 {
+    assert!(wait_until(T, || std::fs::read_to_string(path)
+        .is_ok_and(|s| s.trim().parse::<i32>().is_ok())));
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn kill_if_alive(pid: i32) {
+    if pid_alive(pid) {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+/// Start a timed startup lease over the descendant tree and return the
+/// daemon and both descendants' pids once they exist.
+fn timed_tree(timeout_ms: u64, env: &[(&str, &str)]) -> (Daemon, i32, i32, i32) {
+    let root = short_root();
+    let pids = short_root();
+    let (tree, in_group, other_session) = tree_script(&pids);
+    let mut cfg = config(&unique_name("deadline"), tree.to_str().unwrap(), &[]);
+    cfg["startupLease"] = json!({"timeoutMs": timeout_ms, "lifecycleTag": "run.lifecycle"});
+    let daemon = Daemon::start_env(&root, cfg, env);
+    let child = daemon.child_pid();
+    (daemon, child, read_pid(&in_group), read_pid(&other_session))
+}
+
+/// PR #34: with the whole tree observed, the deadline is `deadline`, and the
+/// teardown reaches every descendant, including one outside the group.
+#[test]
+fn a_complete_observation_records_deadline_and_reaches_the_whole_tree() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let (mut daemon, child, in_group, other_session) = timed_tree(1_500, &[]);
+    assert_eq!(daemon.wait_exit(T), Some(124));
+    assert_eq!(lifecycle_value(&daemon)["cause"], "deadline");
+    for (pid, what) in [
+        (child, "child"),
+        (in_group, "in-group descendant"),
+        (other_session, "out-of-group descendant"),
+    ] {
+        assert!(
+            wait_dead(pid, Duration::from_secs(3)),
+            "the {what} survived the deadline"
+        );
+    }
+}
+
+/// PR #34: an unreadable process table proves nothing, so the terminal cause
+/// is `teardown-unavailable`, never `deadline`, and the process-group
+/// fallback still reaches the child's group.
+#[test]
+fn an_unreadable_process_table_records_teardown_unavailable() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let (mut daemon, child, in_group, other_session) =
+        timed_tree(1_500, &[("PTY_TEST_PROCESS_TABLE", "unreadable")]);
+    assert_eq!(daemon.wait_exit(T), Some(124));
+    let terminal = lifecycle_value(&daemon);
+    kill_if_alive(other_session);
+    assert_eq!(terminal["cause"], "teardown-unavailable");
+    assert!(
+        wait_dead(child, Duration::from_secs(3)),
+        "the child survived"
+    );
+    assert!(
+        wait_dead(in_group, Duration::from_secs(3)),
+        "the group fallback missed the child's group"
+    );
+    assert!(daemon.meta().is_some(), "the evidence was not retained");
+}
+
+/// PR #34: a table that skipped rows is not complete either, and every
+/// descendant it did observe is still signalled by its exact identity: the
+/// one in another session is out of the group fallback's reach.
+#[test]
+fn an_incomplete_process_table_records_teardown_unavailable_and_signals_what_it_saw() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    let (mut daemon, child, in_group, other_session) =
+        timed_tree(1_500, &[("PTY_TEST_PROCESS_TABLE", "incomplete")]);
+    assert_eq!(daemon.wait_exit(T), Some(124));
+    let terminal = lifecycle_value(&daemon);
+    let survived = !wait_dead(other_session, Duration::from_secs(3));
+    kill_if_alive(other_session);
+    assert_eq!(terminal["cause"], "teardown-unavailable");
+    assert!(
+        !survived,
+        "an observed descendant outside the group was never signalled"
+    );
+    assert!(
+        wait_dead(child, Duration::from_secs(3)),
+        "the child survived"
+    );
+    assert!(
+        wait_dead(in_group, Duration::from_secs(3)),
+        "the in-group descendant survived"
+    );
+}
+
+/// The lifecycle CAS that finds the deadline expired settles it the same way
+/// as the timer: `deadline` only on a complete observation.
+#[test]
+fn a_lifecycle_cas_after_the_deadline_chooses_its_cause_from_the_observation() {
+    skip_without_a_real_machine!();
+    let _s = serial();
+    for (table, cause) in [
+        (None, "deadline"),
+        (Some("unreadable"), "teardown-unavailable"),
+    ] {
+        let mut env = vec![("PTY_TEST_NO_STARTUP_TIMER", "1")];
+        if let Some(table) = table {
+            env.push(("PTY_TEST_PROCESS_TABLE", table));
+        }
+        let (mut daemon, child, in_group, other_session) = timed_tree(200, &env);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            daemon.alive(),
+            "the startup timer ran although the test disabled it"
+        );
+        let metadata = daemon.meta().unwrap();
+        let generation = metadata["generation"].as_str().unwrap().to_string();
+        let starting = metadata["tags"]["run.lifecycle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut client = daemon.connect();
+        client.send(&encode_lifecycle_compare_and_set_request(
+            &LifecycleCompareAndSetRequest {
+                expected_generation: generation,
+                tag: "run.lifecycle".to_string(),
+                expected_value: starting,
+                value: "ready".to_string(),
+            },
+        ));
+        assert!(client.wait_type(LifecycleCas, T));
+        let result: LifecycleCompareAndSetResult = serde_json::from_slice(
+            &client
+                .packets
+                .iter()
+                .find(|packet| packet.type_ == LifecycleCas)
+                .unwrap()
+                .payload,
+        )
+        .unwrap();
+        let LifecycleCompareAndSetResult::DeadlineExpired { value } = result else {
+            panic!("expected DeadlineExpired, got {result:?}");
+        };
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(value["cause"], cause, "table={table:?}");
+        assert_eq!(daemon.wait_exit(T), Some(124));
+        assert_eq!(lifecycle_value(&daemon)["cause"], cause);
+        kill_if_alive(other_session);
+        assert!(wait_dead(child, Duration::from_secs(3)));
+        assert!(wait_dead(in_group, Duration::from_secs(3)));
+    }
+}

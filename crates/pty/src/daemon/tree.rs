@@ -162,9 +162,225 @@ pub fn snapshot_from_table(root_pid: i32, table: &ProcTable) -> Vec<ProcessIdent
     out
 }
 
-/// The live descendant snapshot of `root_pid`. One table read.
-pub fn snapshot_descendant_processes(root_pid: i32) -> Vec<ProcessIdentity> {
-    snapshot_from_table(root_pid, &ProcTable::read())
+/// A descendant snapshot that knows whether it saw the whole tree.
+///
+/// [`snapshot_from_table`] quietly leaves out a descendant it cannot name, and
+/// an unreadable table gives it an empty tree. Either one looks exactly like a
+/// tree with nothing left in it, so a teardown built on it claims a
+/// containment it never observed. This type makes the difference a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeSnapshot {
+    /// Every live descendant, each pinned to its identity.
+    Complete(Vec<ProcessIdentity>),
+    /// Completeness could not be proved. `identities` is every exact
+    /// descendant that was still observed: safe to signal, but not all.
+    Unavailable {
+        reason: String,
+        identities: Vec<ProcessIdentity>,
+    },
+}
+
+impl TreeSnapshot {
+    pub fn is_complete(&self) -> bool {
+        matches!(self, TreeSnapshot::Complete(_))
+    }
+
+    pub fn identities(&self) -> &[ProcessIdentity] {
+        match self {
+            TreeSnapshot::Complete(identities) | TreeSnapshot::Unavailable { identities, .. } => {
+                identities
+            }
+        }
+    }
+
+    fn unavailable(reason: impl Into<String>, identities: Vec<ProcessIdentity>) -> Self {
+        TreeSnapshot::Unavailable {
+            reason: reason.into(),
+            identities,
+        }
+    }
+}
+
+/// Every exact, live descendant visible in `table`, deepest first. Zombies are
+/// skipped (they are dead) but their children are still walked.
+fn observed_identities(root_pid: i32, table: &ProcTable) -> Vec<ProcessIdentity> {
+    let mut out: Vec<ProcessIdentity> = walk(root_pid, table)
+        .into_iter()
+        .filter_map(|(pid, depth)| {
+            let row = table.row(pid).known()?;
+            if row.is_zombie() {
+                return None;
+            }
+            let identity = row.identity.clone()?;
+            Some(ProcessIdentity {
+                pid,
+                identity,
+                depth,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.depth.cmp(&a.depth).then(b.pid.cmp(&a.pid)));
+    out
+}
+
+/// Snapshot `root_pid`'s descendants from `table`, or say why the snapshot
+/// cannot be called complete.
+///
+/// Complete means: the table is whole, the root is live and named, and every
+/// live descendant is named. Anything less is `Unavailable`, carrying the
+/// identities that were observed.
+///
+/// node: src/process-tree.ts `snapshotDescendantProcessesComplete` (PR #182)
+pub fn complete_snapshot_from_table(root_pid: i32, table: &ProcTable) -> TreeSnapshot {
+    if !table.is_readable() {
+        return TreeSnapshot::unavailable("process-table-unreadable", Vec::new());
+    }
+    let observed = observed_identities(root_pid, table);
+    if !table.is_complete() {
+        return TreeSnapshot::unavailable("process-table-incomplete", observed);
+    }
+    match table.row(root_pid).known() {
+        Some(root) if !root.is_zombie() && root.identity.is_some() => {}
+        _ => return TreeSnapshot::unavailable("root-identity-unavailable", observed),
+    }
+    for (pid, _) in walk(root_pid, table) {
+        if let Some(row) = table.row(pid).known()
+            && !row.is_zombie()
+            && row.identity.is_none()
+        {
+            return TreeSnapshot::unavailable(
+                format!("process-identity-unavailable:{pid}"),
+                observed,
+            );
+        }
+    }
+    TreeSnapshot::Complete(observed)
+}
+
+/// Add every identity in `more` that `into` does not already hold.
+fn merge_identities(into: &mut Vec<ProcessIdentity>, more: &[ProcessIdentity]) {
+    for candidate in more {
+        if !into
+            .iter()
+            .any(|known| known.pid == candidate.pid && known.identity == candidate.identity)
+        {
+            into.push(candidate.clone());
+        }
+    }
+    into.sort_by(|a, b| b.depth.cmp(&a.depth).then(b.pid.cmp(&a.pid)));
+}
+
+fn same_identities(a: &[ProcessIdentity], b: &[ProcessIdentity]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(a, b)| a.pid == b.pid && a.identity == b.identity)
+}
+
+/// How many times a complete tree is re-read before it is declared unable to
+/// hold still.
+const FREEZE_ATTEMPTS: usize = 8;
+
+/// Stop the whole tree, then prove the snapshot complete.
+///
+/// A snapshot of a running tree is out of date as soon as it is taken: any
+/// member can fork before it is signalled, and the new process was never
+/// seen. So this stops the root and its group (`stop_root`, which is `false`
+/// if the root could not be stopped), stops every descendant it observed, and
+/// re-reads until two complete reads agree. Once it returns `Complete`, no
+/// member of that tree can fork before the caller signals it.
+///
+/// An incomplete first read is never upgraded: the tree is still stopped, but
+/// the answer stays `Unavailable`, with every identity observed on any read.
+///
+/// node: src/process-tree.ts `freezeDescendantProcesses` (PR #182)
+pub fn freeze_descendants(
+    root_pid: i32,
+    stop_root: impl FnOnce() -> bool,
+    mut read: impl FnMut() -> ProcTable,
+    mut stop: impl FnMut(&[ProcessIdentity]) -> Vec<i32>,
+) -> TreeSnapshot {
+    let first = complete_snapshot_from_table(root_pid, &read());
+    let mut observed = first.identities().to_vec();
+    let (mut previous, attempts, give_up) = match &first {
+        TreeSnapshot::Complete(identities) => (
+            Some(identities.clone()),
+            FREEZE_ATTEMPTS,
+            "process-tree-did-not-quiesce".to_string(),
+        ),
+        TreeSnapshot::Unavailable { reason, .. } => (None, 1, reason.clone()),
+    };
+    if !stop_root() {
+        return TreeSnapshot::unavailable("root-freeze-failed", observed);
+    }
+    for _ in 0..attempts {
+        if stop(&observed).len() != observed.len() {
+            return TreeSnapshot::unavailable("descendant-freeze-unverified", observed);
+        }
+        let next = complete_snapshot_from_table(root_pid, &read());
+        merge_identities(&mut observed, next.identities());
+        match next {
+            TreeSnapshot::Complete(identities) => {
+                if previous
+                    .as_deref()
+                    .is_some_and(|previous| same_identities(previous, &identities))
+                {
+                    return TreeSnapshot::Complete(identities);
+                }
+                previous = Some(identities);
+            }
+            TreeSnapshot::Unavailable { reason, .. } => {
+                return TreeSnapshot::unavailable(reason, observed);
+            }
+        }
+    }
+    TreeSnapshot::unavailable(give_up, observed)
+}
+
+/// Does any process still belong to group `pgid`? A permission error still
+/// means yes.
+pub fn group_exists(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    // SAFETY: signal 0 to a process group only asks whether it has members.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The fallback when a complete descendant snapshot is unavailable: TERM the
+/// group the PTY child leads, wait for it to empty, KILL what is left.
+/// `true` when the group is gone.
+///
+/// Each signal is sent only while the group still has a member. A group id
+/// cannot be handed out again while any process belongs to the group, so this
+/// reaches the tree and nothing that later reused the number.
+///
+/// node: src/process-tree.ts `terminateProcessGroup` (PR #182)
+pub fn terminate_process_group(pgid: i32, term_wait: Duration, kill_wait: Duration) -> bool {
+    terminate_process_group_with(pgid, term_wait, kill_wait, group_exists, signal_group)
+}
+
+fn terminate_process_group_with(
+    pgid: i32,
+    term_wait: Duration,
+    kill_wait: Duration,
+    mut exists: impl FnMut(i32) -> bool,
+    mut signal: impl FnMut(i32, i32),
+) -> bool {
+    for (sig, wait) in [(libc::SIGTERM, term_wait), (libc::SIGKILL, kill_wait)] {
+        if !exists(pgid) {
+            return true;
+        }
+        signal(pgid, sig);
+        let deadline = Instant::now() + wait;
+        while exists(pgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    !exists(pgid)
 }
 
 /// Is this still the same process, and still running?
@@ -625,5 +841,272 @@ mod unreadable_token_tests {
         let ids = super::snapshot_from_table(100, &table);
         let pids: Vec<i32> = ids.iter().map(|i| i.pid).collect();
         assert_eq!(pids, vec![400, 200]);
+    }
+}
+
+/// PR #34: the deadline teardown recorded `deadline` from a snapshot that
+/// could not tell a whole tree from an unreadable or partial one. These pin
+/// the observation that now decides it.
+#[cfg(test)]
+mod containment_tests {
+    use super::*;
+    use pty_core::proctable::table_from_shape;
+    use std::cell::RefCell;
+
+    /// daemon child 100 -> 200 -> 300, and 400 in a group of its own.
+    const TREE: &str = "100 1 100\n200 100 100\n300 200 100\n400 100 400\n999 1 999\n";
+
+    fn pids(snapshot: &TreeSnapshot) -> Vec<i32> {
+        snapshot
+            .identities()
+            .iter()
+            .map(|identity| identity.pid)
+            .collect()
+    }
+
+    fn reason(snapshot: &TreeSnapshot) -> &str {
+        match snapshot {
+            TreeSnapshot::Unavailable { reason, .. } => reason,
+            TreeSnapshot::Complete(_) => {
+                panic!("expected an unavailable snapshot, got {snapshot:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_readable_tree_is_complete() {
+        let snapshot = complete_snapshot_from_table(100, &table_from_shape(TREE));
+        assert!(snapshot.is_complete());
+        assert_eq!(pids(&snapshot), vec![300, 400, 200]);
+    }
+
+    #[test]
+    fn an_unreadable_table_is_never_an_empty_complete_tree() {
+        let snapshot = complete_snapshot_from_table(100, &ProcTable::unreadable());
+        assert_eq!(reason(&snapshot), "process-table-unreadable");
+        assert!(snapshot.identities().is_empty());
+    }
+
+    #[test]
+    fn a_table_that_skipped_rows_is_incomplete_but_keeps_what_it_saw() {
+        let snapshot =
+            complete_snapshot_from_table(100, &table_from_shape(TREE).marked_incomplete());
+        assert_eq!(reason(&snapshot), "process-table-incomplete");
+        assert_eq!(
+            pids(&snapshot),
+            vec![300, 400, 200],
+            "observed identities were dropped"
+        );
+    }
+
+    #[test]
+    fn a_descendant_without_an_identity_makes_the_tree_incomplete() {
+        let table = table_from_shape("100 1 100\n200 100 100 S -\n300 200 100\n400 100 400\n");
+        let snapshot = complete_snapshot_from_table(100, &table);
+        assert_eq!(reason(&snapshot), "process-identity-unavailable:200");
+        // Its named child, and the out-of-group sibling, are still signalled.
+        assert_eq!(pids(&snapshot), vec![300, 400]);
+    }
+
+    #[test]
+    fn a_root_that_is_gone_or_dead_or_unnamed_proves_nothing() {
+        for (shape, what) in [
+            ("200 100 100\n", "gone: its children were reparented"),
+            ("100 1 100 Z\n200 100 100\n", "a zombie"),
+            ("100 1 100 S -\n200 100 100\n", "unnamed"),
+        ] {
+            let snapshot = complete_snapshot_from_table(100, &table_from_shape(shape));
+            assert_eq!(
+                reason(&snapshot),
+                "root-identity-unavailable",
+                "root {what}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zombie_descendant_is_skipped_but_its_children_are_walked() {
+        let snapshot = complete_snapshot_from_table(
+            100,
+            &table_from_shape("100 1 100\n200 100 100 Z\n300 200 100\n"),
+        );
+        assert!(snapshot.is_complete());
+        assert_eq!(pids(&snapshot), vec![300]);
+    }
+
+    /// A freeze over `reads`, recording what was stopped.
+    fn freeze(
+        stop_root: bool,
+        reads: Vec<ProcTable>,
+        stop_all: bool,
+    ) -> (TreeSnapshot, Vec<Vec<i32>>, usize) {
+        let reads = RefCell::new(reads.into_iter());
+        let stopped = RefCell::new(Vec::new());
+        let read_count = RefCell::new(0);
+        let snapshot = freeze_descendants(
+            100,
+            || stop_root,
+            || {
+                *read_count.borrow_mut() += 1;
+                reads
+                    .borrow_mut()
+                    .next()
+                    .expect("read more often than scripted")
+            },
+            |identities| {
+                let pids: Vec<i32> = identities.iter().map(|identity| identity.pid).collect();
+                stopped.borrow_mut().push(pids.clone());
+                if stop_all {
+                    pids
+                } else {
+                    pids.into_iter().skip(1).collect()
+                }
+            },
+        );
+        (snapshot, stopped.into_inner(), read_count.into_inner())
+    }
+
+    #[test]
+    fn a_tree_that_holds_still_is_frozen_complete() {
+        let (snapshot, stopped, reads) = freeze(
+            true,
+            vec![table_from_shape(TREE), table_from_shape(TREE)],
+            true,
+        );
+        assert!(snapshot.is_complete());
+        assert_eq!(pids(&snapshot), vec![300, 400, 200]);
+        assert_eq!(stopped, vec![vec![300, 400, 200]]);
+        assert_eq!(reads, 2);
+    }
+
+    #[test]
+    fn a_fork_before_the_freeze_is_caught_and_stopped_too() {
+        let grown = format!("{TREE}500 300 100\n");
+        let (snapshot, stopped, _) = freeze(
+            true,
+            vec![
+                table_from_shape(TREE),
+                table_from_shape(&grown),
+                table_from_shape(&grown),
+            ],
+            true,
+        );
+        assert!(snapshot.is_complete());
+        assert_eq!(pids(&snapshot), vec![500, 300, 400, 200]);
+        assert_eq!(stopped.last().unwrap(), &vec![500, 300, 400, 200]);
+    }
+
+    #[test]
+    fn a_tree_that_never_holds_still_is_not_complete() {
+        let reads = (0..=FREEZE_ATTEMPTS)
+            .map(|n| table_from_shape(&format!("{TREE}{} 100 100\n", 1000 + n)))
+            .collect();
+        let (snapshot, _, _) = freeze(true, reads, true);
+        assert_eq!(reason(&snapshot), "process-tree-did-not-quiesce");
+    }
+
+    #[test]
+    fn an_incomplete_first_read_is_never_upgraded_to_complete() {
+        let (snapshot, stopped, _) = freeze(
+            true,
+            vec![
+                table_from_shape(TREE).marked_incomplete(),
+                table_from_shape(TREE),
+            ],
+            true,
+        );
+        assert_eq!(reason(&snapshot), "process-table-incomplete");
+        assert_eq!(pids(&snapshot), vec![300, 400, 200]);
+        assert_eq!(
+            stopped,
+            vec![vec![300, 400, 200]],
+            "what was observed must still be stopped"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_rescan_is_unavailable_with_every_identity_seen() {
+        let (snapshot, _, _) = freeze(
+            true,
+            vec![table_from_shape(TREE), ProcTable::unreadable()],
+            true,
+        );
+        assert_eq!(reason(&snapshot), "process-table-unreadable");
+        assert_eq!(pids(&snapshot), vec![300, 400, 200]);
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_stopped_is_unavailable() {
+        let (snapshot, stopped, _) = freeze(false, vec![table_from_shape(TREE)], true);
+        assert_eq!(reason(&snapshot), "root-freeze-failed");
+        assert!(stopped.is_empty());
+    }
+
+    #[test]
+    fn a_descendant_that_could_not_be_stopped_is_unavailable() {
+        let (snapshot, _, _) = freeze(true, vec![table_from_shape(TREE)], false);
+        assert_eq!(reason(&snapshot), "descendant-freeze-unverified");
+    }
+
+    #[test]
+    fn the_group_fallback_terms_then_kills_only_while_the_group_exists() {
+        let sent = RefCell::new(Vec::new());
+        // Ignores TERM, dies on KILL.
+        let gone = terminate_process_group_with(
+            4242,
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+            |_| !sent.borrow().contains(&libc::SIGKILL),
+            |pgid, signal| {
+                assert_eq!(pgid, 4242);
+                sent.borrow_mut().push(signal);
+            },
+        );
+        assert!(gone);
+        assert_eq!(sent.into_inner(), vec![libc::SIGTERM, libc::SIGKILL]);
+
+        // An empty group is never signalled at all.
+        let sent = RefCell::new(Vec::new());
+        assert!(terminate_process_group_with(
+            4242,
+            Duration::ZERO,
+            Duration::ZERO,
+            |_| false,
+            |_, signal| { sent.borrow_mut().push(signal) }
+        ));
+        assert!(sent.into_inner().is_empty());
+
+        // A group that outlives KILL is reported, not swallowed.
+        assert!(!terminate_process_group_with(
+            4242,
+            Duration::ZERO,
+            Duration::ZERO,
+            |_| true,
+            |_, _| {}
+        ));
+    }
+
+    /// A real group: a member that ignores TERM is KILLed and verified gone.
+    #[test]
+    fn a_real_group_is_emptied_by_the_fallback() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pgid = leader.id() as i32;
+        // An unreaped member still counts as one; reap the leader as the
+        // daemon's substrate would.
+        let reaper = std::thread::spawn(move || leader.wait());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(group_exists(pgid));
+        assert!(terminate_process_group(
+            pgid,
+            Duration::from_millis(200),
+            Duration::from_secs(2)
+        ));
+        assert!(!group_exists(pgid));
+        let _ = reaper.join();
     }
 }
