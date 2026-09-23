@@ -1863,6 +1863,8 @@ mod tests {
     /// is in flight to it. Holding the signal lock, the exited child stays an
     /// unreaped zombie; once collected, no signal is sent to its pid again.
     #[test]
+    // The child is reaped by `collect_fenced`, which is what this tests.
+    #[allow(clippy::zombie_processes)]
     fn a_signal_cannot_race_the_reaper_onto_a_recycled_pid() {
         let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
@@ -1902,6 +1904,8 @@ mod tests {
 
     /// Until the child is reaped, signals reach it and its process group.
     #[test]
+    // The child is reaped by `collect_fenced`, which is what this tests.
+    #[allow(clippy::zombie_processes)]
     fn signals_reach_the_child_until_it_is_reaped() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
