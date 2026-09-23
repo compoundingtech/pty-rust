@@ -65,8 +65,10 @@ pub fn shell_exec(command: &str, args: &[String]) -> CommandBuilder {
 pub mod substrate;
 
 pub use substrate::{
-    AttachStream, ExitStatus, Lifecycle, SessionClient, SessionError, SessionEvent, SessionOwner,
-    SessionRef, external_owned, external_owned_pair, external_owned_pair_attached,
+    AttachStream, DEFAULT_ATTACHMENT_CAPACITY, EXIT_OUTPUT_DRAIN, ExitStatus, Lifecycle,
+    MIN_ATTACHMENT_CAPACITY, SessionClient, SessionError, SessionEvent, SessionOwner, SessionRef,
+    external_owned, external_owned_pair, external_owned_pair_attached,
+    external_owned_pair_attached_with_capacity,
 };
 
 #[cfg(test)]
