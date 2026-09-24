@@ -9,6 +9,9 @@
 //! 1808-1853 (`handleDeadSession`)
 
 use pty_core::client;
+use pty_core::client::summary::{
+    SessionSummary, attach_banner, fixed_summary_provider, local_summary_provider,
+};
 use pty_core::registry::{self, SessionMetadata, SessionStatus};
 
 use super::{
@@ -213,18 +216,20 @@ fn handle_dead_session(
 ///
 /// node: src/cli.ts:1046-1048, `cmdAttachRemote`
 fn attach_remote(peer: &str, name: &str, stream_fd: Option<std::os::fd::RawFd>) -> CliResult {
-    let socket = match client::remote::dial_and_route(peer, name) {
-        Ok(s) => s,
+    let (socket, row) = match client::remote::dial_route_and_describe(peer, name) {
+        Ok(routed) => routed,
         Err(e) => {
             eprintln!("pty attach --remote {peer}: {e}");
             return Ok(1);
         }
     };
+    let summary = row.as_ref().map(SessionSummary::from_remote_row);
     let peer = peer.to_string();
     let target = name.to_string();
     let mut params = client::AttachParams::new(name, socket);
     params.remote = true;
     params.stream_fd = stream_fd;
+    params.peer = Some(peer.clone());
     params.reconnect = Some(Box::new(move || {
         match client::remote::dial_and_route(&peer, &target) {
             Ok(s) => Ok(Some(s)),
@@ -234,8 +239,9 @@ fn attach_remote(peer: &str, name: &str, stream_fd: Option<std::os::fd::RawFd>) 
         }
     }));
     if stream_fd.is_none() {
-        eprintln!("[attached to {name} — press Ctrl+\\ to detach]");
+        eprint!("{}", attach_banner(name, summary.as_ref()));
     }
+    params.summary = Some(fixed_summary_provider(summary));
     Ok(client::attach(params, &client::ClientIo::default()).exit_code())
 }
 
@@ -251,8 +257,10 @@ pub fn do_attach(name: &str, stream_fd: Option<std::os::fd::RawFd>) -> i32 {
     };
     let mut params = client::AttachParams::new(name, socket);
     params.stream_fd = stream_fd;
+    let mut summary = local_summary_provider(name);
     if stream_fd.is_none() {
-        eprintln!("[attached to {name} — press Ctrl+\\ to detach]");
+        eprint!("{}", attach_banner(name, summary().as_ref()));
     }
+    params.summary = Some(summary);
     client::attach(params, &client::ClientIo::default()).exit_code()
 }

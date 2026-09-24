@@ -645,7 +645,7 @@ fn attach_double_tap_ctrl_backslash_sends_literal_not_detach() {
         ss.text
     );
     assert!(
-        !ss.text.contains("[detached]"),
+        !ss.text.contains("[detached from"),
         "double-tap must NOT detach:\n{}",
         ss.text
     );
@@ -731,7 +731,7 @@ fn attach_is_interactive_and_detaches() {
     s.type_str("\x1c");
     // Wait past the double-tap window so the detach fires, then verify the
     // detach confirmation was rendered.
-    s.wait_for_text("[detached]", 5000).expect("detach confirmation");
+    s.wait_for_text(&format!("[detached from {name}]"), 5000).expect("detach confirmation");
     s.close();
 
     // The session must still be alive after detach.

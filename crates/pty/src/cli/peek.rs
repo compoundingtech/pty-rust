@@ -3,6 +3,7 @@
 //! 1941-1990) replaces this module.
 
 use pty_core::client;
+use pty_core::client::summary;
 use pty_core::registry;
 
 use super::{CliResult, resolve_ref};
@@ -69,8 +70,14 @@ pub fn run(args: &[String]) -> CliResult {
             return Ok(1);
         }
         // The reference belongs to the peer, so it stays unresolved here.
-        let socket = match client::remote::dial_and_route(&peer, &reference) {
-            Ok(s) => s,
+        // Only `-f` prints a trailer, so only `-f` asks the peer for the row.
+        let routed = if follow {
+            client::remote::dial_route_and_describe(&peer, &reference)
+        } else {
+            client::remote::dial_and_route(&peer, &reference).map(|s| (s, None))
+        };
+        let (socket, row) = match routed {
+            Ok(routed) => routed,
             Err(e) => {
                 eprintln!("pty peek --remote {peer}: {e}");
                 return Ok(1);
@@ -81,6 +88,10 @@ pub fn run(args: &[String]) -> CliResult {
             plain,
             full,
             socket: Some(socket),
+            summary: Some(summary::fixed_summary_provider(
+                row.as_ref().map(summary::SessionSummary::from_remote_row),
+            )),
+            peer: Some(peer.clone()),
         };
         let io = client::ClientIo::default();
         let outcome = if follow {
@@ -100,7 +111,10 @@ pub fn run(args: &[String]) -> CliResult {
 
     let name = resolve_ref(&reference)?;
     if follow {
-        let params = client::PeekParams { name: &name, plain, full, socket: None };
+        let mut params = client::PeekParams::new(&name);
+        params.plain = plain;
+        params.full = full;
+        params.summary = Some(summary::local_summary_provider(&name));
         return match client::follow(params, &client::ClientIo::default()) {
             Ok(client::PeekOutcome::Exited(code)) => Ok(code.max(0)),
             Ok(_) => Ok(0),
@@ -122,7 +136,9 @@ pub fn run(args: &[String]) -> CliResult {
             }
         };
     }
-    let params = client::PeekParams { name: &name, plain, full, socket: None };
+    let mut params = client::PeekParams::new(&name);
+    params.plain = plain;
+    params.full = full;
     match client::peek(params, &client::ClientIo::default()) {
         Ok(client::PeekOutcome::Exited(code)) => Ok(code.max(0)),
         Ok(_) => Ok(0),

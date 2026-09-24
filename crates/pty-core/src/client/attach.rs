@@ -20,10 +20,12 @@ use crate::protocol::{
     MessageType, Packet, PacketReader, decode_exit, encode_attach, encode_data, encode_detach,
     encode_resize,
 };
+use crate::registry::now_epoch_ms;
 
 use super::remote::RouteRefusedError;
 use super::sanitize::{CLEAR_SCREEN_HOME, CURSOR_TO_BOTTOM, TERMINAL_SANITIZE};
 use super::stream::{Accepted, MachineStream, truncated_line};
+use super::summary::{SessionEnd, SummaryProvider, TrailerTarget, render_trailer, trailer_header};
 use super::tty::{
     DETACH_KEY, DOUBLE_TAP_MS, FdWriter, RawMode, SigwinchPipe, is_tty, normalize_detach_key, poll,
     read_fd, size_or_default, window_size,
@@ -79,6 +81,10 @@ pub struct AttachParams<'a> {
     pub stream_fd: Option<RawFd>,
     /// Bound on consecutive failed reconnect attempts; `None` = unlimited.
     pub max_reconnect_attempts: Option<usize>,
+    /// The fabric peer of a `--remote` session, for the printed hints.
+    pub peer: Option<String>,
+    /// The session info the end-of-attach trailer shows.
+    pub summary: Option<SummaryProvider>,
 }
 
 impl<'a> AttachParams<'a> {
@@ -91,6 +97,8 @@ impl<'a> AttachParams<'a> {
             reconnect: None,
             stream_fd: None,
             max_reconnect_attempts: reconnect_max_attempts_from_env(),
+            peer: None,
+            summary: None,
         }
     }
 }
@@ -130,8 +138,13 @@ struct Attach<'a> {
     raw: Option<RawMode>,
     reconnect: Option<Reconnect>,
     max_attempts: Option<usize>,
+    peer: Option<String>,
+    summary: Option<SummaryProvider>,
     exit_code: i32,
     session_exited: bool,
+    /// This client dropped the connection (a malformed frame); the session
+    /// itself did not end.
+    dropped: bool,
     detach_armed: Option<Instant>,
     phase: Phase,
     stdin_open: bool,
@@ -150,6 +163,8 @@ pub fn attach(params: AttachParams, io: &ClientIo) -> AttachOutcome {
         reconnect,
         stream_fd,
         max_reconnect_attempts,
+        peer,
+        summary,
     } = params;
     let mut a = Attach {
         name,
@@ -161,8 +176,11 @@ pub fn attach(params: AttachParams, io: &ClientIo) -> AttachOutcome {
         raw: None,
         reconnect,
         max_attempts: max_reconnect_attempts,
+        peer,
+        summary,
         exit_code: 0,
         session_exited: false,
+        dropped: false,
         detach_armed: None,
         phase: Phase::Live,
         stdin_open: true,
@@ -183,12 +201,23 @@ impl Attach<'_> {
         let _ = FdWriter(self.io.stderr).write_all(bytes);
     }
 
-    /// Where reconnect status lines go: stderr in machine mode, else stdout.
-    fn status(&self, plain: &str) {
+    /// Say why the session is no longer shown: the header alone on stderr in
+    /// machine mode, else the full trailer after the terminal reset. The tty
+    /// is restored first, so the trailer never lands on a raw-mode terminal.
+    fn trailer(&mut self, end: SessionEnd) {
+        self.clean_exit();
+        let summary = self.summary.as_mut().and_then(|provide| provide());
+        let target = TrailerTarget {
+            id: self.name,
+            peer: self.peer.as_deref(),
+            summary: summary.as_ref(),
+        };
+        let now = now_epoch_ms();
         if self.machine.is_some() {
-            self.stderr(format!("{plain}\n").as_bytes());
+            self.stderr(format!("{}\n", trailer_header(end, &target, now)).as_bytes());
         } else {
-            self.stdout(format!("{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n{plain}\r\n").as_bytes());
+            let text = render_trailer(end, &target, now);
+            self.stdout(format!("{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}{text}").as_bytes());
         }
     }
 
@@ -237,7 +266,7 @@ impl Attach<'_> {
         }
         self.socket_write(&encode_detach());
         self.clean_exit();
-        self.stdout(format!("{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[detached]\r\n").as_bytes());
+        self.trailer(SessionEnd::Detached);
         AttachOutcome::Detached
     }
 
@@ -275,13 +304,7 @@ impl Attach<'_> {
                     self.exit_code = decode_exit(&p.payload);
                     self.session_exited = true;
                     let code = self.exit_code;
-                    self.stdout(
-                        format!(
-                            "{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[{} exited with code {code}]\r\n",
-                            self.name
-                        )
-                        .as_bytes(),
-                    );
+                    self.trailer(SessionEnd::Exited(code));
                     return Some(self.finish(code));
                 }
                 _ => {}
@@ -300,6 +323,7 @@ impl Attach<'_> {
                 Err(e) => {
                     self.stderr(dropping_connection_line(&e).as_bytes());
                     self.socket = None;
+                    self.dropped = true;
                     self.on_disconnect(None)
                 }
             },
@@ -345,6 +369,12 @@ impl Attach<'_> {
                     self.stderr(truncated_line("connection closed").as_bytes());
                     Some(self.finish(1))
                 } else {
+                    // The daemon went away without an EXIT (`pty kill`, a
+                    // crash): say so instead of dropping back to the shell
+                    // silently.
+                    if !self.session_exited && !self.dropped && self.machine.is_none() {
+                        self.trailer(SessionEnd::Ended);
+                    }
                     let code = self.exit_code;
                     Some(self.finish(code))
                 }
@@ -377,13 +407,14 @@ impl Attach<'_> {
             Err(_refused) => {
                 // Reachable host that says the session is gone: clean give-up.
                 self.phase = Phase::Live;
-                self.status(&format!("[{} session ended]", self.name));
+                self.trailer(SessionEnd::Ended);
                 let code = if self.machine.is_some() { 1 } else { 0 };
                 Some(self.finish(code))
             }
             Ok(Some(fresh)) => {
                 self.socket = Some(fresh);
                 self.reader = PacketReader::new();
+                self.dropped = false;
                 if let Some(m) = self.machine.as_mut() {
                     m.reset();
                 }
@@ -395,10 +426,7 @@ impl Attach<'_> {
                 let next = attempt + 1;
                 if self.max_attempts.is_some_and(|max| next >= max) {
                     self.phase = Phase::Live;
-                    self.status(&format!(
-                        "[{}: connection lost — re-run `pty attach --remote` to reconnect]",
-                        self.name
-                    ));
+                    self.trailer(SessionEnd::ConnectionLost);
                     return Some(self.finish(1));
                 }
                 self.phase = Phase::Reconnecting {

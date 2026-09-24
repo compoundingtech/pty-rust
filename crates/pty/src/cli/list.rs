@@ -8,10 +8,11 @@
 use std::collections::HashSet;
 
 use pty_core::client;
+use pty_core::client::summary::{LineStyle, SessionSummary};
 use pty_core::duration::{format_duration, parse_duration};
 use pty_core::registry::{
-    self, SessionInfo, SessionStatus, TagMap, extract_filter_tags, is_reserved_tag_key,
-    matches_all_tags, now_epoch_ms, parse_iso8601_ms, short_path, time_ago,
+    self, SessionInfo, SessionStatus, TagMap, extract_filter_tags, matches_all_tags, now_epoch_ms,
+    parse_iso8601_ms, time_ago,
 };
 use serde_json::{Map, Value};
 
@@ -457,51 +458,6 @@ fn remote_host_json(h: &RemoteHost) -> Value {
     Value::Object(m)
 }
 
-/// Tags as hashtags; reserved keys hidden unless `show_all`.
-///
-/// node: src/cli.ts:2340-2344
-fn render_tags(tags: Option<&TagMap>, show_all: bool) -> String {
-    let Some(tags) = tags else {
-        return String::new();
-    };
-    let entries: Vec<String> = tags
-        .iter()
-        .filter(|(k, _)| show_all || !is_reserved_tag_key(k))
-        .map(|(k, v)| format!("#{k}={v}"))
-        .collect();
-    if entries.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", entries.join(" "))
-    }
-}
-
-/// ` [flapping]` (red) beats ` [permanent]` (yellow).
-///
-/// node: src/cli.ts:4102-4112
-fn strategy_marker(tags: Option<&TagMap>) -> &'static str {
-    let Some(tags) = tags else {
-        return "";
-    };
-    if tags.get("strategy.status").map(String::as_str) == Some("flapping") {
-        return " \x1b[31m[flapping]\x1b[0m";
-    }
-    if tags.get("strategy").map(String::as_str) == Some("permanent") {
-        return " \x1b[33m[permanent]\x1b[0m";
-    }
-    ""
-}
-
-/// `<bold>dn</bold> <dim>(name)</dim>` or `<bold>name</bold>`.
-///
-/// node: src/cli.ts:2349-2355
-fn render_label(dn: Option<&str>, name: &str, bold: &str) -> String {
-    match dn {
-        Some(dn) => format!("{bold}{dn}\x1b[0m \x1b[2m({name})\x1b[0m"),
-        None => format!("{bold}{name}\x1b[0m"),
-    }
-}
-
 /// `cmdList`.
 ///
 /// node: src/cli.ts:2165-2446
@@ -607,33 +563,19 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
         .filter(|s| s.status == SessionStatus::Vanished)
         .collect();
 
-    let cwd_of = |s: &SessionInfo| -> String {
-        s.metadata
-            .as_ref()
-            .map(|m| m.cwd.as_str())
-            .filter(|c| !c.is_empty())
-            .map(short_path)
-            .unwrap_or_default()
-    };
-
     if !running.is_empty() {
         println!("Active sessions:");
         for s in &running {
-            let cmd = s
-                .metadata
-                .as_ref()
-                .map(|m| m.display_command.as_str())
-                .unwrap_or("unknown");
+            let mut summary = SessionSummary::from_info(s);
+            summary.command.get_or_insert_with(|| "unknown".to_string());
             let pid = s
                 .pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "null".to_string());
+            let status = format!(" (pid: {pid})");
             println!(
-                "  {}{}{} (pid: {pid}) — {} — \x1b[2m{cmd}\x1b[0m",
-                render_label(display_name(s), &s.name, "\x1b[1;36m"),
-                strategy_marker(tags_of(s)),
-                render_tags(tags_of(s), opts.show_tags),
-                cwd_of(s)
+                "{}",
+                summary.line(&line_style(opts, "  ", "\x1b[1;36m", &status))
             );
         }
     }
@@ -653,13 +595,10 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
                 .and_then(|m| m.exited_at.as_deref())
                 .map(time_ago)
                 .unwrap_or_else(|| "unknown".to_string());
-            let cmd = meta.map(|m| m.display_command.as_str()).unwrap_or("");
+            let status = format!(" (exited with code {code}, {ago})");
             println!(
-                "  {}{}{} (exited with code {code}, {ago}) — {} — \x1b[2m{cmd}\x1b[0m",
-                render_label(display_name(s), &s.name, "\x1b[1m"),
-                strategy_marker(tags_of(s)),
-                render_tags(tags_of(s), opts.show_tags),
-                cwd_of(s)
+                "{}",
+                SessionSummary::from_info(s).line(&line_style(opts, "  ", "\x1b[1m", &status))
             );
         }
     }
@@ -670,17 +609,18 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
         }
         println!("\x1b[33mVanished sessions (no exit record — killed or crashed):\x1b[0m");
         for s in &vanished {
-            let meta = s.metadata.as_ref();
             let ago = created_at(s)
                 .map(time_ago)
                 .unwrap_or_else(|| "unknown".to_string());
-            let cmd = meta.map(|m| m.display_command.as_str()).unwrap_or("");
+            let status = format!(" (vanished, started {ago})");
             println!(
-                "  \u{26a0} {}{}{} (vanished, started {ago}) — {} — \x1b[2m{cmd}\x1b[0m",
-                render_label(display_name(s), &s.name, "\x1b[1;33m"),
-                strategy_marker(tags_of(s)),
-                render_tags(tags_of(s), opts.show_tags),
-                cwd_of(s)
+                "{}",
+                SessionSummary::from_info(s).line(&line_style(
+                    opts,
+                    "  \u{26a0} ",
+                    "\x1b[1;33m",
+                    &status
+                ))
             );
         }
     }
@@ -699,19 +639,40 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
             ka.cmp(kb)
         });
         for s in sorted {
-            let icon = if s.status == "running" { "\u{25cf}" } else { "\u{25cb}" };
-            let cwd = s.cwd.as_deref().map(short_path).unwrap_or_default();
-            let cmd = s.command.as_deref().unwrap_or("");
-            let dn = s.display_name.as_deref().filter(|d| !d.is_empty());
+            let icon = if s.status == "running" {
+                "  \u{25cf} "
+            } else {
+                "  \u{25cb} "
+            };
+            let summary = SessionSummary {
+                id: s.name.clone(),
+                display_name: s.display_name.clone().filter(|d| !d.is_empty()),
+                cwd: s.cwd.clone().unwrap_or_default(),
+                command: s.command.clone(),
+                tags: s.tags.clone(),
+                ..Default::default()
+            };
             println!(
-                "  {icon} {}{}{} — {cwd} — \x1b[2m{cmd}\x1b[0m",
-                render_label(dn, &s.name, "\x1b[1;36m"),
-                strategy_marker(s.tags.as_ref()),
-                render_tags(s.tags.as_ref(), opts.show_tags)
+                "{}",
+                summary.line(&line_style(opts, icon, "\x1b[1;36m", ""))
             );
         }
     }
     Ok(0)
+}
+
+fn line_style<'a>(
+    opts: &ListOptions,
+    prefix: &'a str,
+    bold: &'a str,
+    status: &'a str,
+) -> LineStyle<'a> {
+    LineStyle {
+        prefix,
+        bold,
+        status,
+        show_all_tags: opts.show_tags,
+    }
 }
 
 fn tags_of(s: &SessionInfo) -> Option<&TagMap> {

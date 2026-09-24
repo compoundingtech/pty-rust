@@ -61,11 +61,12 @@ fn attach_emits_sanitize_then_exit_trailer() {
     expect_contains(&out, TERMINAL_SANITIZE);
     let tail = after_sanitize(&out);
     assert!(tail.starts_with(CURSOR_TO_BOTTOM), "cursor-to-bottom must follow sanitize: {tail:?}");
-    expect_contains(tail, "[sx exited with code 3]");
+    expect_contains(tail, "[sx exited with code 3 after ");
+    expect_contains(tail, "  restart: pty attach sx");
     assert_eq!(out.matches(TERMINAL_SANITIZE).count(), 1, "sanitize emitted once: {out:?}");
 }
 
-/// The same reset string and a `[detached]` trailer on a local detach.
+/// The same reset string and a `[detached from <id>]` trailer on a local detach.
 /// node: tests/sanitize.test.ts:28
 #[test]
 fn detach_emits_sanitize_then_detached_trailer() {
@@ -75,7 +76,8 @@ fn detach_emits_sanitize_then_detached_trailer() {
     expect_contains(&out, TERMINAL_SANITIZE);
     let tail = after_sanitize(&out);
     assert!(tail.starts_with(CURSOR_TO_BOTTOM), "cursor-to-bottom must follow sanitize: {tail:?}");
-    expect_contains(tail, "[detached]");
+    expect_contains(tail, "[detached from sd]");
+    expect_contains(tail, "  reattach: pty attach sd");
     expect_not_contains(&out, "exited with code");
 }
 

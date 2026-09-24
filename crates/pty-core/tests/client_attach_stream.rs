@@ -69,6 +69,8 @@ fn start(
             reconnect,
             stream_fd,
             max_reconnect_attempts: max_attempts,
+            peer: None,
+            summary: None,
         };
         attach(params, &io)
     });
@@ -539,7 +541,7 @@ fn reconnect_gives_up_after_the_attempt_cap() {
     assert_eq!(done.outcome, AttachOutcome::Exited(1));
     assert_eq!(
         stderr_text(&done),
-        "\r\n[reconnecting… — Ctrl-\\ or Ctrl-C to stop]\r\n[fixture: connection lost — re-run `pty attach --remote` to reconnect]\n"
+        "\r\n[reconnecting… — Ctrl-\\ or Ctrl-C to stop]\r\n[connection lost to fixture]\n"
     );
     h.join().unwrap();
 }
