@@ -145,6 +145,7 @@ const SUITES: &[(&str, Kind, &str)] = &[
     ("screen-replay-altscreen", Kind::Protocol, ""),
     ("screenshot", Kind::NotPortable, "in-process xterm screenshot of the Node testing library"),
     ("scrollback-fidelity", Kind::Protocol, "buffer text observed through SCREEN/DATA, peek --plain and the STATUS cursor"),
+    ("session-trailers", Kind::Unit, "trailer rendering unit tests; the Rust counterpart is the pty-core client::summary unit tests, and sanitize.rs covers the trailers end to end"),
     ("security-fixes", Kind::Cli, "name validation and lock steal through pty run -d --id; releaseLock idempotence (:73) has no CLI counterpart"),
     ("select", Kind::NotPortable, TUI),
     ("send-paste", Kind::Cli, ""),
