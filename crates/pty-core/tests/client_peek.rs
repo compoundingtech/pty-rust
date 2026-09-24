@@ -156,13 +156,17 @@ fn follow_detaches_on_ctrl_backslash() {
         let _ = read_packets_until_eof(&mut s, T);
     });
     let name = d.name.clone();
+    let d_name = d.name.clone();
     let (r, out, _) = with_io(Some(b"ignored\x1c".to_vec()), move |io| {
         follow(PeekParams::new(&name), io)
     });
     assert_eq!(r.unwrap(), PeekOutcome::Detached);
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        format!("live{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[detached]\r\n")
+        format!(
+            "live{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[detached from {0}]\r\n  reattach: pty peek -f {0}\r\n",
+            d_name
+        )
     );
     h.join().unwrap();
 }

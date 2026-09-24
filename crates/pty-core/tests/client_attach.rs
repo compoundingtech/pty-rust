@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use common::*;
 use pty_core::client::attach::{AttachOutcome, AttachParams, Reconnect, attach};
+use pty_core::client::summary::SessionSummary;
 use pty_core::client::{
     CURSOR_TO_BOTTOM, ClientError, ClientIo, RouteRefusedError, TERMINAL_SANITIZE, connect_session,
 };
@@ -28,6 +29,13 @@ struct Run {
 }
 
 fn start(socket: UnixStream, reconnect: Option<Reconnect>) -> Run {
+    start_with(socket, move |params| params.reconnect = reconnect)
+}
+
+fn start_with(
+    socket: UnixStream,
+    configure: impl FnOnce(&mut AttachParams) + Send + 'static,
+) -> Run {
     let stdin = pipe();
     let stdout = pipe();
     let stderr = pipe();
@@ -40,8 +48,8 @@ fn start(socket: UnixStream, reconnect: Option<Reconnect>) -> Run {
     let handle = std::thread::spawn(move || {
         let _keep = keep;
         let mut params = AttachParams::new("demo", socket);
-        params.reconnect = reconnect;
         params.max_reconnect_attempts = None;
+        configure(&mut params);
         attach(params, &io)
     });
     Run {
@@ -107,7 +115,7 @@ fn screen_data_and_exit_texts() {
 }
 
 /// node: client.ts:503-523, :540-569 — a single Ctrl+\ detaches after the
-/// 300 ms window: DETACH to the daemon, then the detached line.
+/// 300 ms window: DETACH to the daemon, then the detach trailer.
 #[test]
 fn single_detach_key_detaches_and_prints_the_detached_line() {
     let (d, h) = daemon(|mut s| {
@@ -128,9 +136,47 @@ fn single_detach_key_detaches_and_prints_the_detached_line() {
     assert_eq!(outcome, AttachOutcome::Detached);
     assert_eq!(
         out,
-        format!("\x1b[2J\x1b[Hready{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[detached]\r\n")
+        format!(
+            "\x1b[2J\x1b[Hready{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[detached from demo]\r\n  reattach: pty attach demo\r\n"
+        )
     );
     assert!(err.is_empty());
+    h.join().unwrap();
+}
+
+/// The detach trailer shows what the provider knows when the detach fires,
+/// and a remote session's hint names its peer.
+#[test]
+fn detach_trailer_shows_the_session_summary_at_detach_time() {
+    let (d, h) = daemon(|mut s| {
+        use std::io::Write;
+        s.write_all(&concat(&[encode_geometry(24, 80), encode_screen(b"ready")]))
+            .unwrap();
+        read_packets_until_eof(&mut s, T);
+    });
+    let run = start_with(d.connect(), |params| {
+        params.peer = Some("box".into());
+        let mut calls = 0;
+        params.summary = Some(Box::new(move || {
+            calls += 1;
+            Some(SessionSummary {
+                id: "demo".into(),
+                display_name: Some(format!("Demo {calls}")),
+                command: Some("cat".into()),
+                ..Default::default()
+            })
+        }));
+    });
+    run.stdout.wait_for(T, |b| b.ends_with(b"ready"));
+    run.type_stdin(b"\x1c");
+    let (outcome, out, _) = run.finish();
+    assert_eq!(outcome, AttachOutcome::Detached);
+    assert_eq!(
+        out,
+        format!(
+            "\x1b[2J\x1b[Hready{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[detached from demo]\r\n  \x1b[1mDemo 1\x1b[0m \x1b[2m(demo)\x1b[0m —  — \x1b[2mcat\x1b[0m\r\n  reattach: pty attach --remote box demo\r\n"
+        )
+    );
     h.join().unwrap();
 }
 
@@ -157,9 +203,9 @@ fn double_tap_forwards_ctrl_backslash_and_kitty_encoding_is_normalized() {
 }
 
 /// node: client.ts:686-690 — a close without error and without EXIT ends
-/// silently with the last known code (0).
+/// with the last known code (0), after saying the session ended.
 #[test]
-fn close_without_exit_finishes_silently_with_code_0() {
+fn close_without_exit_says_the_session_ended_and_exits_0() {
     let (d, h) = daemon(|mut s| {
         use std::io::Write;
         s.write_all(&concat(&[encode_geometry(24, 80), encode_screen(b"x")]))
@@ -167,7 +213,10 @@ fn close_without_exit_finishes_silently_with_code_0() {
     });
     let (outcome, out, err) = start(d.connect(), None).finish();
     assert_eq!(outcome, AttachOutcome::Exited(0));
-    assert_eq!(out, "\x1b[2J\x1b[Hx");
+    assert_eq!(
+        out,
+        format!("\x1b[2J\x1b[Hx{TERMINAL_SANITIZE}{CURSOR_TO_BOTTOM}\r\n[demo session ended]\r\n")
+    );
     assert!(err.is_empty());
     h.join().unwrap();
 }

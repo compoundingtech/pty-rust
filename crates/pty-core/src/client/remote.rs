@@ -226,6 +226,30 @@ impl RemoteDialer {
         self.route(&path, name)
     }
 
+    /// [`Self::dial_and_route`], plus the session's row from the same host's
+    /// `list` for the lines a client prints. The row is best effort: `None`
+    /// when the list fails or does not carry the session.
+    pub fn dial_route_and_describe(
+        &self,
+        peer: &str,
+        name: &str,
+    ) -> Result<(UnixStream, Option<RemoteSessionRow>), RemoteError> {
+        let path = self.dial(peer)?;
+        if path.is_empty() {
+            return Err(RemoteError::NoSocket {
+                peer: peer.to_string(),
+            });
+        }
+        // The list goes first so nothing waits on a second request while the
+        // routed session socket is already live.
+        let row = self
+            .fetch_remote_list(&path)
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|r| r.name == name));
+        let socket = self.route(&path, name)?;
+        Ok((socket, row))
+    }
+
     /// The route handshake over the control socket at `path`.
     pub fn route(&self, path: &str, name: &str) -> Result<UnixStream, RemoteError> {
         let deadline = Instant::now() + self.timeout;
@@ -342,6 +366,14 @@ fn read_line(sock: &mut UnixStream, deadline: Instant) -> Result<Option<Vec<u8>>
 /// 10 s).
 pub fn dial_and_route(peer: &str, name: &str) -> Result<UnixStream, RemoteError> {
     RemoteDialer::default().dial_and_route(peer, name)
+}
+
+/// [`RemoteDialer::dial_route_and_describe`] with the default dialer.
+pub fn dial_route_and_describe(
+    peer: &str,
+    name: &str,
+) -> Result<(UnixStream, Option<RemoteSessionRow>), RemoteError> {
+    RemoteDialer::default().dial_route_and_describe(peer, name)
 }
 
 /// Fetch the session list from a control socket path with the default dialer.

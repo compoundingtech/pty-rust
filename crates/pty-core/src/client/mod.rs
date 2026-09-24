@@ -23,6 +23,7 @@ pub mod sanitize;
 pub mod send;
 pub mod stats;
 pub mod stream;
+pub mod summary;
 pub mod tty;
 
 use std::fmt;

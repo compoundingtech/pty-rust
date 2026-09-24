@@ -11,6 +11,7 @@ use crate::registry;
 
 use super::connection::{PeekScreenOptions, peek_screen};
 use super::sanitize::{CURSOR_TO_BOTTOM, TERMINAL_SANITIZE};
+use super::summary::{SessionEnd, SummaryProvider, TrailerTarget, render_trailer_now};
 use super::tty::{DETACH_KEY, FdWriter, RawMode, normalize_detach_key, poll, read_fd};
 use super::{
     ClientError, ClientIo, GoneSet, connect_session, dropping_connection_line, map_io_error,
@@ -26,6 +27,10 @@ pub struct PeekParams<'a> {
     /// Speak the protocol over this already-connected socket (a `--remote`
     /// route) instead of dialing `<name>.sock`; `name` is then display only.
     pub socket: Option<UnixStream>,
+    /// The fabric peer of a `--remote` peek, for the printed hints.
+    pub peer: Option<String>,
+    /// The session info the `-f` trailer shows.
+    pub summary: Option<SummaryProvider>,
 }
 
 impl<'a> PeekParams<'a> {
@@ -36,6 +41,8 @@ impl<'a> PeekParams<'a> {
             plain: false,
             full: false,
             socket: None,
+            peer: None,
+            summary: None,
         }
     }
 }
@@ -122,7 +129,7 @@ pub fn peek(mut params: PeekParams, io: &ClientIo) -> Result<PeekOutcome, Client
 
 /// `peek -f`: stream the session read-only. Raw mode on a tty stdin; Ctrl+\
 /// (single tap) detaches; DATA goes to stdout (ANSI-stripped when plain);
-/// EXIT prints `\r\n[<name> exited with code N]\r\n`.
+/// detach and EXIT print the session trailer ([`super::summary::render_trailer`]).
 ///
 /// node: client.ts:88-103, :139-157
 pub fn follow(mut params: PeekParams, io: &ClientIo) -> Result<PeekOutcome, ClientError> {
@@ -163,7 +170,8 @@ pub fn follow(mut params: PeekParams, io: &ClientIo) -> Result<PeekOutcome, Clie
                         drop(socket);
                         let _ = out.write_all(TERMINAL_SANITIZE.as_bytes());
                         let _ = out.write_all(CURSOR_TO_BOTTOM.as_bytes());
-                        let _ = out.write_all(b"\r\n[detached]\r\n");
+                        let _ = out
+                            .write_all(trailer(&mut params, SessionEnd::PeekDetached).as_bytes());
                         return Ok(PeekOutcome::Detached);
                     }
                     // All other input is silently ignored (read-only).
@@ -183,9 +191,14 @@ pub fn follow(mut params: PeekParams, io: &ClientIo) -> Result<PeekOutcome, Clie
             }
         };
         if n == 0 {
-            // Follow mode: a plain close just ends (Node exits via the event
-            // loop draining, code 0).
+            // The daemon went away without an EXIT (`pty kill`, a crash):
+            // say so, then end with code 0.
             drop(raw);
+            if !params.plain {
+                let _ = out.write_all(TERMINAL_SANITIZE.as_bytes());
+                let _ = out.write_all(CURSOR_TO_BOTTOM.as_bytes());
+            }
+            let _ = out.write_all(trailer(&mut params, SessionEnd::Ended).as_bytes());
             return Ok(PeekOutcome::Exited(0));
         }
         let packets = match reader.feed(&buf[..n]) {
@@ -217,13 +230,29 @@ pub fn follow(mut params: PeekParams, io: &ClientIo) -> Result<PeekOutcome, Clie
                         let _ = out.write_all(TERMINAL_SANITIZE.as_bytes());
                         let _ = out.write_all(CURSOR_TO_BOTTOM.as_bytes());
                     }
-                    let _ = out
-                        .write_all(format!("\r\n[{name} exited with code {code}]\r\n").as_bytes());
+                    let _ =
+                        out.write_all(trailer(&mut params, SessionEnd::Exited(code)).as_bytes());
                     return Ok(PeekOutcome::Exited(code));
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// The `-f` trailer for `end`, ANSI-stripped when plain.
+fn trailer(params: &mut PeekParams, end: SessionEnd) -> String {
+    let summary = params.summary.as_mut().and_then(|provide| provide());
+    let target = TrailerTarget {
+        id: params.name,
+        peer: params.peer.as_deref(),
+        summary: summary.as_ref(),
+    };
+    let text = render_trailer_now(end, &target);
+    if params.plain {
+        strip_ansi(&text)
+    } else {
+        text
     }
 }
 
