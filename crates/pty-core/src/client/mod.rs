@@ -16,6 +16,7 @@
 
 pub mod attach;
 pub mod connection;
+pub mod list;
 pub mod peek;
 pub mod readiness;
 pub mod remote;

@@ -73,6 +73,23 @@ pub fn cloexec_pipe(nonblocking: bool) -> io::Result<[RawFd; 2]> {
 pub fn is_tty(fd: RawFd) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
+/// The controlling terminal path for the input descriptor, when available.
+pub fn tty_name(fd: RawFd) -> Option<String> {
+    if !is_tty(fd) {
+        return None;
+    }
+    let mut buf: [libc::c_char; 256] = [0; 256];
+    // SAFETY: ttyname_r writes at most buf.len() bytes, including the NUL.
+    if unsafe { libc::ttyname_r(fd, buf.as_mut_ptr(), buf.len()) } != 0 {
+        return None;
+    }
+    // SAFETY: successful ttyname_r NUL-terminates the buffer.
+    unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
+}
+
 
 /// The window size `(rows, cols)` of a tty fd, or `None` when it is not a
 /// terminal (or the ioctl fails).

@@ -314,6 +314,82 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn list_json_tracks_multiple_attached_clients_until_detach_or_disconnect() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use pty_core::protocol::{encode_attach, encode_attach_with_identity, encode_detach};
+
+    let _serial = serial();
+    let root = unique_root();
+    let (_, err, code) = run_pty(&root, &["run", "-d", "--id", "clients", "--", "cat"]);
+    assert_eq!(code, 0, "{err}");
+    let socket = root.join("clients.sock");
+    let mut first = UnixStream::connect(&socket).unwrap();
+    let mut second = UnixStream::connect(&socket).unwrap();
+    first.write_all(&encode_attach_with_identity(24, 80, 1234, Some("/dev/pts/7"))).unwrap();
+    second.write_all(&encode_attach(24, 80)).unwrap();
+
+    let start = Instant::now();
+    loop {
+        let list: serde_json::Value =
+            serde_json::from_str(&ok_pty(&root, &["list", "--json", "--clients"])).unwrap();
+        let clients = list[0]["clients"].as_array().cloned().unwrap_or_default();
+        if clients.len() == 2 {
+            assert!(clients.iter().any(|c| c["pid"] == 1234
+                && c["tty"] == "/dev/pts/7" && c["attachedAt"].is_string()));
+            assert!(clients.iter().any(|c| c["pid"].is_null()
+                && c["tty"].is_null() && c["attachedAt"].is_string()));
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "clients did not attach: {list}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    first.write_all(&encode_detach()).unwrap();
+    drop(second);
+    let start = Instant::now();
+    loop {
+        let list: serde_json::Value =
+            serde_json::from_str(&ok_pty(&root, &["list", "--json", "--clients"])).unwrap();
+        if list[0]["clients"] == serde_json::json!([]) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "clients not removed: {list}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = run_pty(&root, &["kill", "clients"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The default listing never contacts a daemon; `--clients` does, and a
+/// daemon that never answers is reported as unknown within the budget.
+#[test]
+fn list_contacts_daemons_for_clients_only_when_asked() {
+    use std::os::unix::net::UnixListener;
+
+    let _serial = serial();
+    let root = unique_root();
+    // A live pid makes the fixture a running session without a real daemon.
+    std::fs::write(root.join("fixture.pid"), std::process::id().to_string()).unwrap();
+    let listener = UnixListener::bind(root.join("fixture.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    for args in [&["list", "--json"][..], &["list", "--clients"][..]] {
+        let out = ok_pty(&root, args);
+        assert!(!out.contains("\"clients\""), "{args:?}: {out}");
+        assert!(listener.accept().is_err(), "{args:?} contacted the daemon");
+    }
+
+    // Accepted by the kernel backlog, never answered: a stalled daemon.
+    let start = Instant::now();
+    let list: serde_json::Value =
+        serde_json::from_str(&ok_pty(&root, &["list", "--json", "--clients"])).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    assert_eq!(list[0]["name"], "fixture");
+    assert!(list[0]["clients"].is_null(), "{list}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn stats_json_matches_node_contract() {
     // Parity B: stats --json shape. EXACT for stable fields (geometry,
     // scrollbackCapacity=rows+10000, alive, status, modes, client counts,

@@ -2,12 +2,12 @@
 
 use pty_core::protocol::{
     AcceptedSocketOwnershipRequest, LifecycleCompareAndSetRequest, MAX_PACKET_LENGTH, MessageType,
-    PacketReader, TcpConnectionTuple, decode_accepted_socket_ownership_request, decode_cell,
-    decode_exit, decode_geometry, decode_lifecycle_compare_and_set_request, decode_size,
-    encode_accepted_socket_ownership_request, encode_attach, encode_attach_with_cell, encode_data,
-    encode_detach, encode_exit, encode_geometry, encode_lifecycle_compare_and_set_request,
-    encode_packet, encode_resize, encode_resize_with_cell, encode_screen, encode_status,
-    encode_status_response,
+    PacketReader, TcpConnectionTuple, decode_accepted_socket_ownership_request,
+    decode_attach_identity, decode_cell, decode_exit, decode_geometry,
+    decode_lifecycle_compare_and_set_request, decode_size, encode_accepted_socket_ownership_request,
+    encode_attach, encode_attach_with_cell, encode_attach_with_identity, encode_data, encode_detach,
+    encode_exit, encode_geometry, encode_lifecycle_compare_and_set_request, encode_packet,
+    encode_resize, encode_resize_with_cell, encode_screen, encode_status, encode_status_response,
 };
 use pty_core::stats::{ClientStats, ConnectionStats, Constrains, StatsResult};
 
@@ -60,6 +60,21 @@ fn attach_can_declare_a_cell_size_without_changing_the_size_it_carries() {
         "the size is where it always was"
     );
     assert_eq!(decode_cell(&packets[0].payload), Some((9, 18)));
+}
+
+#[test]
+fn attach_identity_preserves_legacy_size_and_accepts_missing_tty() {
+    let mut reader = PacketReader::new();
+    let packets = reader
+        .feed(&encode_attach_with_identity(30, 90, 1234, Some("/dev/pts/7")))
+        .unwrap();
+    let payload = &packets[0].payload;
+    assert_eq!(decode_size(payload), (30, 90));
+    assert_eq!(decode_cell(payload), None);
+    assert_eq!(decode_attach_identity(payload), (Some(1234), Some("/dev/pts/7".into())));
+    assert_eq!(decode_attach_identity(&encode_attach(30, 90)[5..]), (None, None));
+    let no_tty = reader.feed(&encode_attach_with_identity(30, 90, 5678, None)).unwrap();
+    assert_eq!(decode_attach_identity(&no_tty[0].payload), (Some(5678), None));
 }
 
 #[test]

@@ -214,8 +214,54 @@ Sessions live under `$PTY_ROOT` (default `~/.local/state/pty`): one unix socket,
 pid file, and metadata file per session. Set `PTY_ROOT` to isolate a registry,
 for example in tests.
 
+`pty list --json --clients` adds `clients` to each running session: an array
+of `{ "pid": 1234, "tty": "/dev/pts/3", "attachedAt": "2026-09-25T12:00:00.000Z" }`.
+It is opt-in because it asks every running daemon (up to 16 at a time, with
+one 500 ms budget for the whole listing); plain `pty list --json` contacts no
+daemon and has no `clients` key. `--clients` is ignored without `--json`, like
+the other view flags. The array is empty when no client is attached, `null`
+when the daemon did not answer in time or predates the query, and the key is
+absent on exited or vanished sessions. A client without a terminal reports
+`tty: null`; older clients also report `pid: null` because they do not send
+their identity.
+
 `pty version` prints `0.13.<n>-rust+<short-sha>`: one minor above the Node line,
 a `rust` pre-release tag, and the commit it was built from.
+
+### Library API
+
+`pty-core` exposes the same listing to Rust consumers through
+`pty_core::client::list`. `pty list --json --clients` uses this
+implementation too. The module is unstable: it will move to
+`SessionRef`/`PtyRoot` (#1, #3), and `SessionInfo` currently exposes the
+on-disk session metadata as-is.
+
+```rust
+use pty_core::client::list::{ClientQuery, ClientSet, ListOptions, list};
+use pty_core::registry::session_dir;
+
+let sessions = list(
+    &session_dir(),
+    &ListOptions {
+        clients: Some(ClientQuery::default()), // 500 ms total, 16 at a time
+        ..Default::default()
+    },
+);
+for s in &sessions {
+    match &s.clients {
+        Some(ClientSet::Known(clients)) => {
+            for c in clients {
+                println!("{} <- pid {:?} on {:?}", s.info.name, c.pid, c.tty);
+            }
+        }
+        Some(ClientSet::Unknown) => println!("{}: clients unknown", s.info.name),
+        None => {} // not running, or clients not requested
+    }
+}
+```
+
+`attached_clients(&sessions, &ClientQuery)` queries an already-filtered
+`&[SessionInfo]` and returns one `ClientSet` per session, in the same order.
 
 ### If you are already inside a session
 

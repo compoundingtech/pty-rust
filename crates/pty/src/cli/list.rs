@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use pty_core::client;
+use pty_core::client::list::{ClientQuery, ClientSet, attached_clients};
 use pty_core::client::summary::{LineStyle, SessionSummary};
 use pty_core::duration::{format_duration, parse_duration};
 use pty_core::registry::{
@@ -132,6 +133,9 @@ pub struct ListOptions {
     pub older_than_ms: Option<i64>,
     pub newer_than_ms: Option<i64>,
     pub summary: bool,
+    /// `--clients`: query each running daemon for its attached clients.
+    /// JSON list only; the text and summary views ignore it.
+    pub clients: bool,
 }
 
 /// Parse `args` (the full argv from the command word on, as Node's
@@ -209,6 +213,7 @@ pub fn run(args: &[String]) -> CliResult {
     opts.json = remaining.contains(&"--json");
     opts.show_tags = remaining.contains(&"--tags");
     opts.summary = remaining.contains(&"--summary");
+    opts.clients = remaining.contains(&"--clients");
     cmd_list(&opts)
 }
 
@@ -367,10 +372,11 @@ fn build_summary(sessions: &[SessionInfo]) -> Summary {
     }
 }
 
-/// One `list --json` element, keys in Node's order.
+/// One `list --json` element, keys in Node's order. `clients` is `None`
+/// unless `--clients` asked for it; an unknown set renders as `null`.
 ///
 /// node: src/cli.ts:2292-2306
-fn session_json(s: &SessionInfo) -> Value {
+fn session_json(s: &SessionInfo, clients: Option<&ClientSet>) -> Value {
     let meta = s.metadata.as_ref();
     let mut m = Map::new();
     m.insert("name".into(), Value::from(s.name.as_str()));
@@ -402,6 +408,14 @@ fn session_json(s: &SessionInfo) -> Value {
             .map(Value::from)
             .unwrap_or(Value::Null),
     );
+    if let Some(clients) = clients
+        && s.is_running()
+    {
+        m.insert(
+            "clients".into(),
+            serde_json::to_value(clients).expect("a client set is serializable"),
+        );
+    }
     if let Some(tags) = meta.and_then(|m| m.tags.as_ref()) {
         m.insert("tags".into(), tag_map_json(tags));
     }
@@ -490,7 +504,18 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
             println!("{}", Value::Object(m));
             return Ok(0);
         }
-        let local = Value::Array(sessions.iter().map(session_json).collect());
+        let clients = if opts.clients {
+            attached_clients(&sessions, &ClientQuery::default())
+        } else {
+            Vec::new()
+        };
+        let local = Value::Array(
+            sessions
+                .iter()
+                .enumerate()
+                .map(|(i, s)| session_json(s, clients.get(i)))
+                .collect(),
+        );
         if opts.remote && !remote_hosts.is_empty() {
             let mut m = Map::new();
             m.insert("local".into(), local);
@@ -677,4 +702,47 @@ fn line_style<'a>(
 
 fn tags_of(s: &SessionInfo) -> Option<&TagMap> {
     s.metadata.as_ref().and_then(|m| m.tags.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pty_core::protocol::AttachedClient;
+
+    fn session(status: SessionStatus) -> SessionInfo {
+        SessionInfo {
+            name: "test".into(),
+            socket_path: "/nonexistent/test.sock".into(),
+            pid: Some(42),
+            status,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn json_clients_shape() {
+        let known = ClientSet::Known(vec![AttachedClient {
+            pid: Some(123),
+            tty: Some("/dev/pts/3".into()),
+            attached_at: "2026-09-25T12:00:00.000Z".into(),
+        }]);
+        let running = session(SessionStatus::Running);
+
+        let json = session_json(&running, Some(&known));
+        assert_eq!(
+            json["clients"],
+            serde_json::json!([{"pid": 123, "tty": "/dev/pts/3", "attachedAt": "2026-09-25T12:00:00.000Z"}])
+        );
+        assert_eq!(
+            session_json(&running, Some(&ClientSet::Known(Vec::new())))["clients"],
+            serde_json::json!([])
+        );
+        let unknown = session_json(&running, Some(&ClientSet::Unknown));
+        assert!(unknown.get("clients").is_some_and(Value::is_null), "{unknown}");
+        // Not requested: no key, exactly as without --clients.
+        assert!(session_json(&running, None).get("clients").is_none());
+        for status in [SessionStatus::Exited, SessionStatus::Vanished] {
+            assert!(session_json(&session(status), Some(&known)).get("clients").is_none());
+        }
+    }
 }
