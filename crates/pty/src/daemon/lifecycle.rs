@@ -34,15 +34,16 @@ use pty_terminal::{TerminalActor, serialize};
 
 use pty_lifecycle::{
     ArmedStartupLease, StartupLeaseTerminalCause, arm_startup_lease, monotonic_now_ns,
-    remaining_lease_delay, terminal_startup_lease_value,
+    remaining_lease_delay, startup_lease_deadline_cause, terminal_startup_lease_value,
 };
 use super::DaemonConfig;
 use super::clients::{Client, Out, REDRAW_SETTLE};
 use super::daemon_warn;
 use super::env::{build_child_env, describe_invalid_cwd, invalid_cwd_error};
 use super::tree::{
-    KILL_WAIT, ProcessIdentity, TERM_WAIT, signal_process_identities,
-    snapshot_descendant_processes, terminate_process_identities,
+    KILL_WAIT, ProcTable, ProcessIdentity, TERM_WAIT, TreeSnapshot, complete_snapshot_from_table,
+    freeze_descendants, signal_process_identities, terminate_process_group,
+    terminate_process_identities,
 };
 
 /// What the helper threads tell the actor.
@@ -124,6 +125,14 @@ pub(crate) struct Daemon {
     startup_lease_disarmed: bool,
     startup_deadline_pending_shutdown: bool,
     startup_lease_terminal_value: Option<String>,
+    /// The child's tree as the teardown will see it: frozen and observed at
+    /// the startup deadline, before the terminal cause is chosen, or taken at
+    /// `close` for any other external kill.
+    teardown_tree: Option<TreeSnapshot>,
+    /// The tree was stopped with SIGSTOP by the deadline freeze. A stopped
+    /// process acts on nothing but SIGKILL, so the teardown skips the
+    /// graceful signals.
+    teardown_frozen: bool,
 }
 
 /// How long the activity write waits after the first chunk of a burst.
@@ -180,21 +189,31 @@ pub fn decode_wait_status(status: Option<i32>) -> (i32, Option<i32>) {
 }
 
 /// Node's exit-time reap decision, re-reading the on-disk tags: refuse when
-/// the on-disk generation is someone else's; never on an external kill
-/// unless ephemeral; else the tag/ephemeral/config precedence.
+/// the on-disk generation is someone else's; never for a startup-lease
+/// generation; never on an external kill unless ephemeral; else the
+/// tag/ephemeral/config precedence.
 ///
-/// node: src/server.ts:1481-1524
+/// A startup-lease generation's terminal lifecycle value and exit evidence
+/// are the handoff its launcher reads after the child is gone, so they
+/// outlive the daemon until the generation-fenced `evidence remove`. That
+/// holds for `ephemeral` too: the lease is the stronger, later request.
+///
+/// node: src/server.ts:1481-1524; startup leases: PR #182
 pub fn reap_at_exit(
     name: &str,
     generation: &str,
     external_kill: bool,
     ephemeral: bool,
+    startup_lease: bool,
     config_tags: Option<&TagMap>,
 ) -> bool {
     let metadata = registry::read_metadata(name);
     if let Some(g) = metadata.as_ref().and_then(|m| m.generation.as_deref())
         && g != generation
     {
+        return false;
+    }
+    if startup_lease {
         return false;
     }
     if external_kill && !ephemeral {
@@ -211,13 +230,27 @@ fn pid_alive(pid: i32) -> bool {
     registry::pid_alive(pid)
 }
 
-fn kill(pid: i32, signal: i32) {
-    if pid > 0 {
-        // SAFETY: kill(2) on the child we spawned.
-        unsafe {
-            libc::kill(pid, signal);
-        }
+/// Debug builds honor `PTY_TEST_NO_STARTUP_TIMER`, so a test can reach an
+/// expired startup deadline through a lifecycle CAS instead of racing the
+/// deadline timer to it. Release builds never read it.
+fn startup_timer_disabled_for_test() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("PTY_TEST_NO_STARTUP_TIMER").is_some()
+}
+
+/// The process table the teardown observes.
+///
+/// Debug builds honor `PTY_TEST_PROCESS_TABLE` so the integration tests can
+/// drive the incomplete-observation path end to end: `unreadable` gives a
+/// table that could not be read at all, `incomplete` the real rows without
+/// the claim that they are every process. Release builds never read it.
+fn teardown_process_table() -> ProcTable {
+    #[cfg(debug_assertions)]
+    match std::env::var("PTY_TEST_PROCESS_TABLE").as_deref() {
+        Ok("unreadable") => return ProcTable::unreadable(),
+        Ok("incomplete") => return ProcTable::read().marked_incomplete(),
+        _ => {}
     }
+    ProcTable::read()
 }
 
 /// Run the daemon for `cfg` to completion; the return value is the process
@@ -395,11 +428,14 @@ pub(crate) fn run(
         startup_lease_timer: startup_lease
             .as_ref()
             .and_then(|lease| lease.deadline_monotonic_ns)
+            .filter(|_| !startup_timer_disabled_for_test())
             .map(|deadline| Instant::now() + remaining_lease_delay(deadline)),
         startup_lease,
         startup_lease_disarmed: false,
         startup_deadline_pending_shutdown: false,
         startup_lease_terminal_value: None,
+        teardown_tree: None,
+        teardown_frozen: false,
     };
 
     readiness.notify();
@@ -840,10 +876,7 @@ impl Daemon {
                 })
         });
         if expired {
-            if self
-                .settle_startup_lifecycle(StartupLeaseTerminalCause::Deadline, false)
-                .is_none()
-            {
+            if self.settle_startup_deadline().is_none() {
                 return LifecycleCompareAndSetResult::Busy;
             }
             self.startup_deadline_pending_shutdown = true;
@@ -964,6 +997,69 @@ impl Daemon {
         }
     }
 
+    /// The startup deadline has passed: freeze and observe the child's tree
+    /// first, then record `deadline` only if that observation was complete.
+    /// An unreadable or partial one records `teardown-unavailable`, and the
+    /// teardown adds the process-group fallback to the exact identities it
+    /// did observe.
+    ///
+    /// The tree is frozen once. If the terminal value is then refused for
+    /// good (a newer generation owns the name), the tree is resumed: the
+    /// deadline no longer belongs to this daemon.
+    ///
+    /// node: src/server.ts `settleStartupLeaseDeadline` (PR #182)
+    fn settle_startup_deadline(&mut self) -> Option<String> {
+        if self.teardown_tree.is_none() {
+            let tree = self.freeze_child_tree();
+            if let TreeSnapshot::Unavailable { reason, identities } = &tree {
+                daemon_warn!(
+                    "pty daemon \"{}\": complete child containment unavailable: {reason}; publishing teardown-unavailable and exact-signalling {} observed descendant(s) plus process-group fallback",
+                    self.name,
+                    identities.len()
+                );
+            }
+            self.teardown_tree = Some(tree);
+            self.teardown_frozen = true;
+        }
+        let complete = self
+            .teardown_tree
+            .as_ref()
+            .is_some_and(TreeSnapshot::is_complete);
+        let settled = self.settle_startup_lifecycle(startup_lease_deadline_cause(complete), false);
+        if settled.is_none() && self.startup_lease_disarmed {
+            self.resume_frozen_tree();
+        }
+        settled
+    }
+
+    /// Stop the child, its process group and every descendant, and observe
+    /// the tree. Every signal to the child goes through the substrate, which
+    /// refuses once the child is reaped; a child that cannot be stopped makes
+    /// the observation incomplete.
+    fn freeze_child_tree(&self) -> TreeSnapshot {
+        let session = self.session.clone();
+        freeze_descendants(
+            self.child_pid,
+            move || {
+                let _ = session.signal_process_group(libc::SIGSTOP);
+                session.signal(libc::SIGSTOP).is_ok()
+            },
+            teardown_process_table,
+            |identities| signal_process_identities(identities, libc::SIGSTOP),
+        )
+    }
+
+    fn resume_frozen_tree(&mut self) {
+        if !std::mem::take(&mut self.teardown_frozen) {
+            return;
+        }
+        let _ = self.session.signal_process_group(libc::SIGCONT);
+        let _ = self.session.signal(libc::SIGCONT);
+        if let Some(tree) = self.teardown_tree.take() {
+            signal_process_identities(tree.identities(), libc::SIGCONT);
+        }
+    }
+
     fn service_timers(&mut self, now: Instant) {
         self.service_cuts(now);
         if let Some(at) = self.activity_persist_at
@@ -1008,10 +1104,7 @@ impl Daemon {
             {
                 let remaining = remaining_lease_delay(deadline);
                 if remaining.is_zero() {
-                    if self
-                        .settle_startup_lifecycle(StartupLeaseTerminalCause::Deadline, false)
-                        .is_some()
-                    {
+                    if self.settle_startup_deadline().is_some() {
                         self.external_kill = true;
                         self.shutdown_code = Some(124);
                     } else {
@@ -1146,6 +1239,7 @@ impl Daemon {
             &self.generation,
             self.external_kill,
             self.cfg.ephemeral,
+            self.startup_lease.is_some(),
             self.cfg.tags(),
         )
     }
@@ -1153,13 +1247,19 @@ impl Daemon {
     /// The hard deadline behind a graceful shutdown.
     ///
     /// node: src/server.ts:1545-1558
-    fn start_backstop(&self, code: i32, descendants: Arc<Mutex<Vec<ProcessIdentity>>>) {
+    fn start_backstop(
+        &self,
+        code: i32,
+        descendants: Arc<Mutex<Vec<ProcessIdentity>>>,
+        group_fallback: bool,
+    ) {
         let deadline = shutdown_deadline();
         let name = self.name.clone();
         let generation = self.generation.clone();
         let (external, ephemeral) = (self.external_kill, self.cfg.ephemeral);
+        let startup_lease = self.startup_lease.is_some();
         let tags = self.cfg.tags().cloned();
-        let child_pid = self.child_pid;
+        let session = self.session.clone();
         let owner = self.owner();
         std::thread::spawn(move || {
             std::thread::sleep(deadline);
@@ -1167,10 +1267,23 @@ impl Daemon {
                 "pty daemon \"{name}\": graceful shutdown exceeded {}ms — forcing exit (child reaped)",
                 deadline.as_millis()
             );
-            kill(child_pid, libc::SIGKILL);
+            // Through the substrate, which refuses once the child is reaped:
+            // its pid, and the group id equal to it, may belong to someone
+            // else by then.
+            if group_fallback {
+                let _ = session.signal_process_group(libc::SIGKILL);
+            }
+            let _ = session.kill();
             let descendants = descendants.lock().map(|d| d.clone()).unwrap_or_default();
             signal_process_identities(&descendants, libc::SIGKILL);
-            if reap_at_exit(&name, &generation, external, ephemeral, tags.as_ref()) {
+            if reap_at_exit(
+                &name,
+                &generation,
+                external,
+                ephemeral,
+                startup_lease,
+                tags.as_ref(),
+            ) {
                 registry::cleanup_owned_all(&name, &owner);
             } else {
                 registry::cleanup_owned_socket(&name, &owner);
@@ -1216,13 +1329,29 @@ impl Daemon {
     /// node: src/server.ts:1340-1408, 1559-1568
     fn close(mut self, code: i32) -> i32 {
         self.settle_startup_lifecycle_before_close();
-        let descendants = Arc::new(Mutex::new(Vec::new()));
-        if self.external_kill
-            && let Ok(mut d) = descendants.lock()
-        {
-            *d = snapshot_descendant_processes(self.child_pid);
-        }
-        self.start_backstop(code, descendants.clone());
+        let tree = self.external_kill.then(|| {
+            self.teardown_tree.take().unwrap_or_else(|| {
+                let tree = complete_snapshot_from_table(self.child_pid, &teardown_process_table());
+                if let TreeSnapshot::Unavailable { reason, identities } = &tree {
+                    daemon_warn!(
+                        "pty daemon \"{}\": complete child snapshot unavailable: {reason}; exact-signalling {} observed descendant(s) plus process-group fallback",
+                        self.name,
+                        identities.len()
+                    );
+                }
+                tree
+            })
+        });
+        // An incomplete snapshot may have missed members of the child's
+        // group; the group itself still reaches them.
+        let group_fallback = tree.as_ref().is_some_and(|tree| !tree.is_complete());
+        let frozen = self.teardown_frozen;
+        let descendants = Arc::new(Mutex::new(
+            tree.as_ref()
+                .map(|tree| tree.identities().to_vec())
+                .unwrap_or_default(),
+        ));
+        self.start_backstop(code, descendants.clone(), group_fallback);
         if self.exited {
             self.save_exit_metadata();
         }
@@ -1235,19 +1364,42 @@ impl Daemon {
         }
         registry::cleanup_owned_socket(&self.name, &self.owner());
         if self.child_status.is_none() {
-            let _ = self.session.hangup();
+            if frozen {
+                // Stopped by the deadline freeze: only SIGKILL acts on it.
+                // Sent through the substrate while the child is unreaped, the
+                // group id cannot name anyone else.
+                if group_fallback {
+                    let _ = self.session.signal_process_group(libc::SIGKILL);
+                }
+                let _ = self.session.kill();
+            } else {
+                let _ = self.session.hangup();
+            }
         }
         let descendant_wait = self.external_kill.then(|| {
             let ids = descendants.lock().map(|d| d.clone()).unwrap_or_default();
-            std::thread::spawn(move || terminate_process_identities(&ids, TERM_WAIT, KILL_WAIT))
+            let term_wait = if frozen { Duration::ZERO } else { TERM_WAIT };
+            let group = group_fallback.then_some(self.child_pid);
+            std::thread::spawn(move || {
+                let survivors = terminate_process_identities(&ids, term_wait, KILL_WAIT);
+                let group_gone =
+                    group.is_none_or(|pgid| terminate_process_group(pgid, term_wait, KILL_WAIT));
+                (survivors, group_gone)
+            })
         });
         if !self.wait_child_exit(CHILD_HUP_WAIT) {
-            kill(self.child_pid, libc::SIGKILL);
+            let _ = self.session.kill();
             self.wait_child_exit(CHILD_KILL_WAIT);
         }
-        let survivors = descendant_wait
+        let (survivors, group_gone) = descendant_wait
             .and_then(|t| t.join().ok())
-            .unwrap_or_default();
+            .unwrap_or((Vec::new(), true));
+        if !group_gone {
+            crate::daemon::daemon_warn!(
+                "pty daemon \"{}\": process-group fallback could not verify teardown after an incomplete snapshot",
+                self.name
+            );
+        }
         if !survivors.is_empty() {
             let pids: Vec<i32> = survivors.iter().map(|s| s.pid).collect();
             crate::daemon::daemon_warn!(
