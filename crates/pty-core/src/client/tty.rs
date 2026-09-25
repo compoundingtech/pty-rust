@@ -78,7 +78,7 @@ pub fn tty_name(fd: RawFd) -> Option<String> {
     if !is_tty(fd) {
         return None;
     }
-    let mut buf = [0i8; 256];
+    let mut buf: [libc::c_char; 256] = [0; 256];
     // SAFETY: ttyname_r writes at most buf.len() bytes, including the NUL.
     if unsafe { libc::ttyname_r(fd, buf.as_mut_ptr(), buf.len()) } != 0 {
         return None;
