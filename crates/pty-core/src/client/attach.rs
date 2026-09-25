@@ -17,8 +17,8 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    MessageType, Packet, PacketReader, decode_exit, encode_attach, encode_data, encode_detach,
-    encode_resize,
+    MessageType, Packet, PacketReader, decode_exit, encode_attach_with_identity, encode_data,
+    encode_detach, encode_resize,
 };
 use crate::registry::now_epoch_ms;
 
@@ -28,7 +28,7 @@ use super::stream::{Accepted, MachineStream, truncated_line};
 use super::summary::{SessionEnd, SummaryProvider, TrailerTarget, render_trailer, trailer_header};
 use super::tty::{
     DETACH_KEY, DOUBLE_TAP_MS, FdWriter, RawMode, SigwinchPipe, is_tty, normalize_detach_key, poll,
-    read_fd, size_or_default, window_size,
+    read_fd, size_or_default, tty_name, window_size,
 };
 use super::{
     ClientError, ClientIo, GoneSet, dropping_connection_line, is_gone, node_error_message,
@@ -235,7 +235,12 @@ impl Attach<'_> {
             self.raw = RawMode::enable_if_tty(self.io.stdin);
         }
         let (rows, cols) = size_or_default(self.io.stdout);
-        self.socket_write(&encode_attach(rows, cols));
+        self.socket_write(&encode_attach_with_identity(
+            rows,
+            cols,
+            std::process::id(),
+            tty_name(self.io.stdin).as_deref(),
+        ));
         if self.sigwinch.is_none() && is_tty(self.io.stdout) {
             self.sigwinch = SigwinchPipe::install().ok();
         }

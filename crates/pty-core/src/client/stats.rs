@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::protocol::{MessageType, PacketReader, encode_status};
+use crate::protocol::{AttachedClient, MessageType, PacketReader, encode_status, encode_status_clients};
 use crate::registry;
 use crate::stats::StatsResult;
 
@@ -56,10 +56,28 @@ pub fn query_status_json(name: &str, timeout: Duration) -> Result<String, Client
 }
 
 fn query_status_json_at(path: &Path, name: &str, timeout: Duration) -> Result<String, ClientError> {
+    query_status_at(path, name, timeout, &encode_status())
+}
+
+/// List attached clients without changing the existing stats response.
+/// A legacy daemon returns stats instead of an array; its clients are unknown.
+pub fn query_attached_clients(path: &Path, name: &str) -> Vec<AttachedClient> {
+    query_status_at(path, name, Duration::from_millis(500), &encode_status_clients())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+fn query_status_at(
+    path: &Path,
+    name: &str,
+    timeout: Duration,
+    request: &[u8],
+) -> Result<String, ClientError> {
     let deadline = Instant::now() + timeout;
     let mut socket = connect_session_at(path, name, GoneSet::Strict)?;
     socket
-        .write_all(&encode_status())
+        .write_all(request)
         .map_err(|e| map_io_error(name, false, GoneSet::Strict, "write", Some(path), &e))?;
     let mut reader = PacketReader::new();
     let mut buf = [0u8; 8192];

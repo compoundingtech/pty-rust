@@ -11,12 +11,13 @@
 //!
 //! node: src/server.ts:75-90, 904-1063, 1213-1267
 
+use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use pty_core::protocol::{
-    MessageType, Packet, decode_cell, decode_peek, decode_size, encode_exit, encode_geometry,
-    encode_screen, encode_status_response,
+    AttachedClient, MessageType, Packet, decode_attach_identity, decode_cell, decode_peek,
+    decode_size, encode_exit, encode_geometry, encode_screen, encode_status_response,
 };
 use pty_core::registry::{self, MutateOptions};
 use pty_terminal::{Range, SerializeOpts};
@@ -71,6 +72,7 @@ pub struct Client {
     /// pending cut is superseded.
     pub generation: u64,
     pub phase: Phase,
+    pub attached: Option<AttachedClient>,
 }
 
 impl Client {
@@ -83,6 +85,7 @@ impl Client {
             attach_seq: 0,
             generation: 0,
             phase: Phase::Live,
+            attached: None,
         }
     }
 
@@ -105,6 +108,10 @@ impl Client {
     }
 }
 
+fn attached_clients(clients: &BTreeMap<u64, Client>) -> Vec<&AttachedClient> {
+    clients.values().filter_map(|client| client.attached.as_ref()).collect()
+}
+
 impl Daemon {
     /// A packet from client `id`.
     pub(crate) fn on_packet(&mut self, id: u64, packet: Packet) {
@@ -114,7 +121,7 @@ impl Daemon {
             MessageType::Data => self.on_data(id, &packet.payload),
             MessageType::Resize => self.on_resize(id, &packet.payload),
             MessageType::Detach => self.on_detach(id),
-            MessageType::Status => self.on_status(id),
+            MessageType::Status => self.on_status(id, &packet.payload),
             MessageType::AcceptedSocketOwnership => {
                 self.on_accepted_socket_ownership(id, &packet.payload);
             }
@@ -144,6 +151,12 @@ impl Daemon {
             c.cols = cols;
             c.attach_seq = self.attach_counter;
             c.generation += 1;
+            let (pid, tty) = decode_attach_identity(payload);
+            c.attached = Some(AttachedClient {
+                pid,
+                tty,
+                attached_at: registry::now_iso8601(),
+            });
             c.generation
         };
         let resized = self.negotiate_size();
@@ -284,8 +297,12 @@ impl Daemon {
     }
 
     /// node: src/server.ts:1045-1049
-    fn on_status(&mut self, id: u64) {
-        let json = serde_json::to_string(&self.collect_stats()).unwrap_or_else(|_| "{}".into());
+    fn on_status(&mut self, id: u64, payload: &[u8]) {
+        let json = if payload == b"clients" {
+            serde_json::to_string(&attached_clients(&self.clients)).unwrap_or_else(|_| "[]".into())
+        } else {
+            serde_json::to_string(&self.collect_stats()).unwrap_or_else(|_| "{}".into())
+        };
         if let Some(c) = self.clients.get(&id) {
             c.send(encode_status_response(&json));
         }

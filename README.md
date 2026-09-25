@@ -214,6 +214,12 @@ Sessions live under `$PTY_ROOT` (default `~/.local/state/pty`): one unix socket,
 pid file, and metadata file per session. Set `PTY_ROOT` to isolate a registry,
 for example in tests.
 
+`pty list --json` includes `clients` on each running session: an array of
+`{ "pid": 1234, "tty": "/dev/pts/3", "attachedAt": "2026-09-25T12:00:00.000Z" }`.
+It is empty when no client is attached and absent on exited or vanished
+sessions. A client without a terminal reports `tty: null`; older clients can
+also report `pid: null` because they do not send their identity.
+
 `pty version` prints `0.13.<n>-rust+<short-sha>`: one minor above the Node line,
 a `rust` pre-release tag, and the commit it was built from.
 

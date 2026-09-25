@@ -314,6 +314,53 @@ fn peek_follow_streams_live_output() {
 }
 
 #[test]
+fn list_json_tracks_multiple_attached_clients_until_detach_or_disconnect() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use pty_core::protocol::{encode_attach, encode_attach_with_identity, encode_detach};
+
+    let _serial = serial();
+    let root = unique_root();
+    let (_, err, code) = run_pty(&root, &["run", "-d", "--id", "clients", "--", "cat"]);
+    assert_eq!(code, 0, "{err}");
+    let socket = root.join("clients.sock");
+    let mut first = UnixStream::connect(&socket).unwrap();
+    let mut second = UnixStream::connect(&socket).unwrap();
+    first.write_all(&encode_attach_with_identity(24, 80, 1234, Some("/dev/pts/7"))).unwrap();
+    second.write_all(&encode_attach(24, 80)).unwrap();
+
+    let start = Instant::now();
+    loop {
+        let list: serde_json::Value =
+            serde_json::from_str(&ok_pty(&root, &["list", "--json"])).unwrap();
+        let clients = list[0]["clients"].as_array().unwrap();
+        if clients.len() == 2 {
+            assert!(clients.iter().any(|c| c["pid"] == 1234
+                && c["tty"] == "/dev/pts/7" && c["attachedAt"].is_string()));
+            assert!(clients.iter().any(|c| c["pid"].is_null()
+                && c["tty"].is_null() && c["attachedAt"].is_string()));
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "clients did not attach: {list}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    first.write_all(&encode_detach()).unwrap();
+    drop(second);
+    let start = Instant::now();
+    loop {
+        let list: serde_json::Value =
+            serde_json::from_str(&ok_pty(&root, &["list", "--json"])).unwrap();
+        if list[0]["clients"] == serde_json::json!([]) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "clients not removed: {list}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = run_pty(&root, &["kill", "clients"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn stats_json_matches_node_contract() {
     // Parity B: stats --json shape. EXACT for stable fields (geometry,
     // scrollbackCapacity=rows+10000, alive, status, modes, client counts,

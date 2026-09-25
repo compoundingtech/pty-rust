@@ -402,6 +402,13 @@ fn session_json(s: &SessionInfo) -> Value {
             .map(Value::from)
             .unwrap_or(Value::Null),
     );
+    if s.is_running() {
+        let clients = client::stats::query_attached_clients(&s.socket_path, &s.name);
+        m.insert(
+            "clients".into(),
+            serde_json::to_value(clients).expect("attached clients are serializable"),
+        );
+    }
     if let Some(tags) = meta.and_then(|m| m.tags.as_ref()) {
         m.insert("tags".into(), tag_map_json(tags));
     }
@@ -677,4 +684,55 @@ fn line_style<'a>(
 
 fn tags_of(s: &SessionInfo) -> Option<&TagMap> {
     s.metadata.as_ref().and_then(|m| m.tags.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn json_clients_only_on_running_sessions() {
+        let path = std::env::temp_dir().join(format!("pty-clients-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 12];
+            socket.read_exact(&mut request).unwrap();
+            assert_eq!(request.to_vec(), pty_core::protocol::encode_status_clients());
+            socket.write_all(&pty_core::protocol::encode_status_response(
+                r#"[{"pid":123,"tty":"/dev/pts/3","attachedAt":"2026-09-25T12:00:00.000Z"}]"#,
+            )).unwrap();
+        });
+        let mut session = SessionInfo {
+            name: "test".into(),
+            socket_path: path.clone(),
+            pid: Some(42),
+            status: SessionStatus::Running,
+            metadata: None,
+        };
+        let json = session_json(&session);
+        assert_eq!(json["clients"][0]["pid"], 123);
+        assert_eq!(json["clients"][0]["tty"], "/dev/pts/3");
+        assert_eq!(json["clients"][0]["attachedAt"], "2026-09-25T12:00:00.000Z");
+        server.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        session.status = SessionStatus::Exited;
+        assert!(session_json(&session).get("clients").is_none());
+        session.status = SessionStatus::Vanished;
+        assert!(session_json(&session).get("clients").is_none());
+        session.status = SessionStatus::Running;
+        let listener = UnixListener::bind(&path).unwrap();
+        let legacy = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 12];
+            socket.read_exact(&mut request).unwrap();
+            socket.write_all(&pty_core::protocol::encode_status_response("{}")).unwrap();
+        });
+        assert_eq!(session_json(&session)["clients"], serde_json::json!([]));
+        legacy.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 }

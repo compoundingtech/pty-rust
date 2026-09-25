@@ -228,6 +228,45 @@ pub fn encode_attach_with_cell(rows: u16, cols: u16, cell_width: u16, cell_heigh
     )
 }
 
+/// An attached client's identity. Older ATTACH packets do not contain either
+/// identity field, so both can be unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedClient {
+    pub pid: Option<u32>,
+    pub tty: Option<String>,
+    pub attached_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AttachIdentity {
+    pid: u32,
+    tty: Option<String>,
+}
+
+/// The legacy 8-byte size/cell prefix remains intact; older daemons ignore
+/// the JSON suffix, and newer daemons accept the older 4/8-byte packets.
+pub fn encode_attach_with_identity(rows: u16, cols: u16, pid: u32, tty: Option<&str>) -> Vec<u8> {
+    let mut payload = size_cell_payload(rows, cols, 0, 0).to_vec();
+    payload.extend(
+        serde_json::to_vec(&AttachIdentity {
+            pid,
+            tty: tty.map(str::to_owned),
+        })
+        .expect("attach identity is serializable"),
+    );
+    encode_packet(MessageType::Attach, &payload)
+}
+
+pub fn decode_attach_identity(payload: &[u8]) -> (Option<u32>, Option<String>) {
+    let Some(suffix) = payload.get(8..) else {
+        return (None, None);
+    };
+    serde_json::from_slice::<AttachIdentity>(suffix)
+        .map(|identity| (Some(identity.pid), identity.tty))
+        .unwrap_or((None, None))
+}
+
 /// Encode a DETACH.
 pub fn encode_detach() -> Vec<u8> {
     encode_packet(MessageType::Detach, &[])
@@ -277,6 +316,12 @@ pub fn encode_screen(data: &[u8]) -> Vec<u8> {
 /// Encode a STATUS request.
 pub fn encode_status() -> Vec<u8> {
     encode_packet(MessageType::Status, &[])
+}
+
+/// A STATUS request with a distinct payload; legacy daemons respond with
+/// ordinary stats, which the listing caller treats as an empty client set.
+pub fn encode_status_clients() -> Vec<u8> {
+    encode_packet(MessageType::Status, b"clients")
 }
 
 /// Encode a STATUS JSON response.
