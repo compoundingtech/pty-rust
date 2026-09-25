@@ -60,12 +60,16 @@ fn query_status_json_at(path: &Path, name: &str, timeout: Duration) -> Result<St
 }
 
 /// List attached clients without changing the existing stats response.
-/// A legacy daemon returns stats instead of an array; its clients are unknown.
-pub fn query_attached_clients(path: &Path, name: &str) -> Vec<AttachedClient> {
-    query_status_at(path, name, Duration::from_millis(500), &encode_status_clients())
+/// `None` means the daemon did not respond within the budget, or is too old
+/// to support this request. It must not be mistaken for an empty client set.
+pub fn query_attached_clients(
+    path: &Path,
+    name: &str,
+    timeout: Duration,
+) -> Option<Vec<AttachedClient>> {
+    query_status_at(path, name, timeout, &encode_status_clients())
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
 }
 
 fn query_status_at(

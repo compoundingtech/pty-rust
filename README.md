@@ -216,7 +216,8 @@ for example in tests.
 
 `pty list --json` includes `clients` on each running session: an array of
 `{ "pid": 1234, "tty": "/dev/pts/3", "attachedAt": "2026-09-25T12:00:00.000Z" }`.
-It is empty when no client is attached and absent on exited or vanished
+It is empty when no client is attached, `null` if the live daemon cannot
+answer within 500 ms or predates this query, and absent on exited or vanished
 sessions. A client without a terminal reports `tty: null`; older clients can
 also report `pid: null` because they do not send their identity.
 

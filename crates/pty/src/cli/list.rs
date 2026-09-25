@@ -6,10 +6,13 @@
 //! 4102-4130 (`strategyMarker`, `shortPath`, `timeAgo`)
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use pty_core::client;
 use pty_core::client::summary::{LineStyle, SessionSummary};
 use pty_core::duration::{format_duration, parse_duration};
+use pty_core::protocol::AttachedClient;
 use pty_core::registry::{
     self, SessionInfo, SessionStatus, TagMap, extract_filter_tags, matches_all_tags, now_epoch_ms,
     parse_iso8601_ms, time_ago,
@@ -367,10 +370,58 @@ fn build_summary(sessions: &[SessionInfo]) -> Summary {
     }
 }
 
+/// Probe only the running sessions, with a single 500 ms budget for the
+/// listing. At most 16 sockets are queried concurrently; a stalled daemon
+/// cannot serially delay every other row. `None` means unknown, not empty.
+fn attached_client_sets(sessions: &[SessionInfo]) -> Vec<Option<Vec<AttachedClient>>> {
+    let next = AtomicUsize::new(0);
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let workers = sessions.iter().filter(|s| s.is_running()).count().min(16);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(|| {
+                let mut found = Vec::new();
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(session) = sessions.get(index) else {
+                        break;
+                    };
+                    if !session.is_running() {
+                        continue;
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    found.push((
+                        index,
+                        client::stats::query_attached_clients(
+                            &session.socket_path,
+                            &session.name,
+                            remaining,
+                        ),
+                    ));
+                }
+                found
+            }));
+        }
+        let mut results = std::iter::repeat_with(|| None)
+            .take(sessions.len())
+            .collect::<Vec<_>>();
+        for handle in handles {
+            for (index, clients) in handle.join().expect("client query worker") {
+                results[index] = clients;
+            }
+        }
+        results
+    })
+}
+
 /// One `list --json` element, keys in Node's order.
 ///
 /// node: src/cli.ts:2292-2306
-fn session_json(s: &SessionInfo) -> Value {
+fn session_json(s: &SessionInfo, clients: Option<&[AttachedClient]>) -> Value {
     let meta = s.metadata.as_ref();
     let mut m = Map::new();
     m.insert("name".into(), Value::from(s.name.as_str()));
@@ -403,7 +454,6 @@ fn session_json(s: &SessionInfo) -> Value {
             .unwrap_or(Value::Null),
     );
     if s.is_running() {
-        let clients = client::stats::query_attached_clients(&s.socket_path, &s.name);
         m.insert(
             "clients".into(),
             serde_json::to_value(clients).expect("attached clients are serializable"),
@@ -497,7 +547,14 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
             println!("{}", Value::Object(m));
             return Ok(0);
         }
-        let local = Value::Array(sessions.iter().map(session_json).collect());
+        let clients = attached_client_sets(&sessions);
+        let local = Value::Array(
+            sessions
+                .iter()
+                .zip(&clients)
+                .map(|(s, clients)| session_json(s, clients.as_deref()))
+                .collect(),
+        );
         if opts.remote && !remote_hosts.is_empty() {
             let mut m = Map::new();
             m.insert("local".into(), local);
@@ -692,6 +749,11 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
+    fn json_with_live_clients(session: &SessionInfo) -> Value {
+        let sets = attached_client_sets(std::slice::from_ref(session));
+        session_json(session, sets[0].as_deref())
+    }
+
     #[test]
     fn json_clients_only_on_running_sessions() {
         let path = std::env::temp_dir().join(format!("pty-clients-{}.sock", std::process::id()));
@@ -712,7 +774,7 @@ mod tests {
             status: SessionStatus::Running,
             metadata: None,
         };
-        let json = session_json(&session);
+        let json = json_with_live_clients(&session);
         assert_eq!(json["clients"][0]["pid"], 123);
         assert_eq!(json["clients"][0]["tty"], "/dev/pts/3");
         assert_eq!(json["clients"][0]["attachedAt"], "2026-09-25T12:00:00.000Z");
@@ -720,9 +782,9 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         session.status = SessionStatus::Exited;
-        assert!(session_json(&session).get("clients").is_none());
+        assert!(json_with_live_clients(&session).get("clients").is_none());
         session.status = SessionStatus::Vanished;
-        assert!(session_json(&session).get("clients").is_none());
+        assert!(json_with_live_clients(&session).get("clients").is_none());
         session.status = SessionStatus::Running;
         let listener = UnixListener::bind(&path).unwrap();
         let legacy = std::thread::spawn(move || {
@@ -731,8 +793,83 @@ mod tests {
             socket.read_exact(&mut request).unwrap();
             socket.write_all(&pty_core::protocol::encode_status_response("{}")).unwrap();
         });
-        assert_eq!(session_json(&session)["clients"], serde_json::json!([]));
+        assert!(json_with_live_clients(&session)["clients"].is_null());
         legacy.join().unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn client_queries_do_not_wait_for_an_earlier_session() {
+        let root = std::env::temp_dir();
+        let first_path = root.join(format!("pty-clients-{}-first.sock", std::process::id()));
+        let second_path = root.join(format!("pty-clients-{}-second.sock", std::process::id()));
+        let first_listener = UnixListener::bind(&first_path).unwrap();
+        let second_listener = UnixListener::bind(&second_path).unwrap();
+        let (ready, started) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let (mut socket, _) = first_listener.accept().unwrap();
+            let mut request = [0; 12];
+            socket.read_exact(&mut request).unwrap();
+            if started.recv_timeout(Duration::from_secs(1)).is_ok() {
+                socket
+                    .write_all(&pty_core::protocol::encode_status_response(
+                        r#"[{"pid":1,"tty":null,"attachedAt":"2026-09-25T12:00:00Z"}]"#,
+                    ))
+                    .unwrap();
+            }
+        });
+        let second = std::thread::spawn(move || {
+            let (mut socket, _) = second_listener.accept().unwrap();
+            let mut request = [0; 12];
+            socket.read_exact(&mut request).unwrap();
+            ready.send(()).unwrap();
+            socket
+                .write_all(&pty_core::protocol::encode_status_response(
+                    r#"[{"pid":2,"tty":null,"attachedAt":"2026-09-25T12:00:00Z"}]"#,
+                ))
+                .unwrap();
+        });
+        let sessions = [first_path.clone(), second_path.clone()].map(|socket_path| SessionInfo {
+            name: "test".into(),
+            socket_path,
+            pid: Some(42),
+            status: SessionStatus::Running,
+            metadata: None,
+        });
+        let clients = attached_client_sets(&sessions);
+        assert_eq!(clients[0].as_ref().unwrap()[0].pid, Some(1));
+        assert_eq!(clients[1].as_ref().unwrap()[0].pid, Some(2));
+        first.join().unwrap();
+        second.join().unwrap();
+        std::fs::remove_file(first_path).unwrap();
+        std::fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn stalled_daemon_reports_unknown_clients_within_budget() {
+        let path = std::env::temp_dir().join(format!("pty-clients-{}-stalled.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let daemon = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 12];
+            socket.read_exact(&mut request).unwrap();
+            let _ = waiting.recv_timeout(Duration::from_secs(3));
+        });
+        let session = SessionInfo {
+            name: "stalled".into(),
+            socket_path: path.clone(),
+            pid: Some(42),
+            status: SessionStatus::Running,
+            metadata: None,
+        };
+        let start = Instant::now();
+        let json = json_with_live_clients(&session);
+        let elapsed = start.elapsed();
+        release.send(()).unwrap();
+        daemon.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(json["clients"].is_null(), "{json}");
+        assert!(elapsed < Duration::from_secs(2), "stalled listing took {elapsed:?}");
     }
 }
