@@ -5,6 +5,7 @@
 //! node: src/process-tree.ts
 
 use std::time::{Duration, Instant};
+use pty_core::proctable::Answer;
 
 pub use pty_core::proctable::{LiveIdentity, ProcTable, Row as ProcessRow};
 
@@ -277,6 +278,30 @@ fn same_identities(a: &[ProcessIdentity], b: &[ProcessIdentity]) -> bool {
             .all(|(a, b)| a.pid == b.pid && a.identity == b.identity)
 }
 
+/// Identities observed anywhere beneath the root that this table still shows
+/// as the same live processes. Reparenting does not release them from the
+/// containment proof; only confirmed exit, zombie state, or PID reuse does.
+fn still_live_identities(
+    observed: &[ProcessIdentity],
+    table: &ProcTable,
+) -> Result<Vec<ProcessIdentity>, i32> {
+    let mut live = Vec::new();
+    for identity in observed {
+        match table.row(identity.pid) {
+            Answer::Known(row) if row.is_zombie() => {}
+            Answer::Known(row) => match row.identity.as_ref() {
+                Some(current) if current == &identity.identity => live.push(identity.clone()),
+                Some(_) => {}
+                None => return Err(identity.pid),
+            },
+            Answer::NotPresent => {}
+            Answer::Unknown(_) => return Err(identity.pid),
+        }
+    }
+    live.sort_by(|a, b| b.depth.cmp(&a.depth).then(b.pid.cmp(&a.pid)));
+    Ok(live)
+}
+
 /// How many times the tree is re-read, after the stop is sent, before it is
 /// declared unable to hold still.
 const FREEZE_ATTEMPTS: usize = 16;
@@ -297,13 +322,14 @@ fn all_stopped(root_pid: i32, identities: &[ProcessIdentity], table: &ProcTable)
 /// re-reads the table.
 ///
 /// **A sent SIGSTOP is not a stopped process.** `kill` returns once the stop
-/// is queued; a target running on another CPU keeps running, and can fork,
-/// until it takes it. So a read counts only when it shows the root and every
-/// member in a stopped state, and the tree is `Complete` only when two such
-/// reads in a row agree. The second read starts after every member was seen
-/// stopped, so any child forked before the stop took effect is already in
-/// it. Until then the members are stopped again (a new one may have joined)
-/// and the table re-read, a little later each time.
+/// is queued; a target running on another CPU keeps running, and can fork or
+/// reparent until it takes it. So a read counts only when it shows the root
+/// and every still-live identity observed on any read in a stopped state, and
+/// containment is `Complete` only when two such reads in a row agree. The
+/// second read starts after every known member was seen stopped, so any child
+/// forked before the stop took effect is already in it. Until then the members
+/// are stopped again (a new one may have joined) and the table re-read, a
+/// little later each time.
 ///
 /// An incomplete first read is never upgraded: the tree is still stopped, but
 /// the answer stays `Unavailable`, with every identity observed on any read.
@@ -336,28 +362,51 @@ pub fn freeze_descendants(
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(attempt.min(10) as u64));
         }
-        if stop(&observed).len() != observed.len() {
-            return TreeSnapshot::unavailable("descendant-freeze-unverified", observed);
-        }
+        let targeted = observed.clone();
+        let signalled = stop(&targeted);
         let table = read();
         let next = complete_snapshot_from_table(root_pid, &table);
         merge_identities(&mut observed, next.identities());
         match next {
-            TreeSnapshot::Complete(identities) if all_stopped(root_pid, &identities, &table) => {
-                if previous
-                    .as_deref()
-                    .is_some_and(|previous| same_identities(previous, &identities))
-                {
-                    return match first_unavailable {
-                        Some(reason) => TreeSnapshot::unavailable(reason, observed),
-                        None => TreeSnapshot::Complete(identities),
-                    };
-                }
-                previous = Some(identities);
-            }
             TreeSnapshot::Complete(_) => {
-                seen_running = true;
-                previous = None;
+                let identities = match still_live_identities(&observed, &table) {
+                    Ok(identities) => identities,
+                    Err(pid) => {
+                        return TreeSnapshot::unavailable(
+                            format!("observed-identity-unavailable:{pid}"),
+                            observed,
+                        );
+                    }
+                };
+                let failed_to_stop = targeted.iter().any(|target| {
+                    identities.iter().any(|live| {
+                        live.pid == target.pid
+                            && live.identity == target.identity
+                            && !signalled.contains(&live.pid)
+                            && table
+                                .row(live.pid)
+                                .known()
+                                .is_none_or(|row| !row.is_stopped())
+                    })
+                });
+                if failed_to_stop {
+                    return TreeSnapshot::unavailable("descendant-freeze-unverified", observed);
+                }
+                if all_stopped(root_pid, &identities, &table) {
+                    if previous
+                        .as_deref()
+                        .is_some_and(|previous| same_identities(previous, &identities))
+                    {
+                        return match first_unavailable {
+                            Some(reason) => TreeSnapshot::unavailable(reason, observed),
+                            None => TreeSnapshot::Complete(identities),
+                        };
+                    }
+                    previous = Some(identities);
+                } else {
+                    seen_running = true;
+                    previous = None;
+                }
             }
             TreeSnapshot::Unavailable { reason, .. } => {
                 return TreeSnapshot::unavailable(reason, observed);
@@ -1087,6 +1136,29 @@ mod containment_tests {
         assert_eq!(reads, 4);
     }
 
+    /// PR #39 review: a descendant can reparent after accepting SIGSTOP but
+    /// before the confirming reads. It remains part of the containment proof
+    /// and teardown even though it is no longer beneath the root.
+    #[test]
+    fn a_reparented_observed_descendant_remains_in_complete_containment() {
+        let running = table_from_shape("100 1 100 R\n200 100 100 R\n");
+        let reparented = table_from_shape("100 1 100 T\n200 1 200 T\n");
+        let (snapshot, stopped_sets, reads) =
+            freeze(true, vec![running, reparented.clone(), reparented], true);
+
+        assert!(
+            snapshot.is_complete(),
+            "a stopped reparented descendant is still contained: {snapshot:?}"
+        );
+        assert_eq!(
+            pids(&snapshot),
+            vec![200],
+            "an observed live descendant was dropped from complete containment"
+        );
+        assert_eq!(stopped_sets, vec![vec![200], vec![200]]);
+        assert_eq!(reads, 3);
+    }
+
     #[test]
     fn a_fork_before_the_stop_took_effect_is_caught_and_stopped_too() {
         let grown_running = format!("{STOPPED}500 300 100 R\n");
@@ -1155,7 +1227,11 @@ mod containment_tests {
 
     #[test]
     fn a_descendant_that_could_not_be_stopped_is_unavailable() {
-        let (snapshot, _, _) = freeze(true, vec![table_from_shape(TREE)], false);
+        let (snapshot, _, _) = freeze(
+            true,
+            vec![table_from_shape(TREE), table_from_shape(TREE)],
+            false,
+        );
         assert_eq!(reason(&snapshot), "descendant-freeze-unverified");
     }
 
