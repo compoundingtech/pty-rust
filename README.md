@@ -228,6 +228,41 @@ their identity.
 `pty version` prints `0.13.<n>-rust+<short-sha>`: one minor above the Node line,
 a `rust` pre-release tag, and the commit it was built from.
 
+### Library API
+
+`pty-core` exposes the same listing to Rust consumers through
+`pty_core::client::list`. `pty list --json --clients` uses this
+implementation too. The module is unstable: it will move to
+`SessionRef`/`PtyRoot` (#1, #3), and `SessionInfo` currently exposes the
+on-disk session metadata as-is.
+
+```rust
+use pty_core::client::list::{ClientQuery, ClientSet, ListOptions, list};
+use pty_core::registry::session_dir;
+
+let sessions = list(
+    &session_dir(),
+    &ListOptions {
+        clients: Some(ClientQuery::default()), // 500 ms total, 16 at a time
+        ..Default::default()
+    },
+);
+for s in &sessions {
+    match &s.clients {
+        Some(ClientSet::Known(clients)) => {
+            for c in clients {
+                println!("{} <- pid {:?} on {:?}", s.info.name, c.pid, c.tty);
+            }
+        }
+        Some(ClientSet::Unknown) => println!("{}: clients unknown", s.info.name),
+        None => {} // not running, or clients not requested
+    }
+}
+```
+
+`attached_clients(&sessions, &ClientQuery)` queries an already-filtered
+`&[SessionInfo]` and returns one `ClientSet` per session, in the same order.
+
 ### If you are already inside a session
 
 **`run` and `attach` refuse to nest, and `--force` is how you say you meant

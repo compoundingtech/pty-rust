@@ -318,8 +318,9 @@ pub fn encode_status() -> Vec<u8> {
     encode_packet(MessageType::Status, &[])
 }
 
-/// A STATUS request with a distinct payload; legacy daemons respond with
-/// ordinary stats, which the listing caller treats as an empty client set.
+/// A STATUS request for the attached-client set. Legacy daemons answer with
+/// ordinary stats instead of an array, which the caller reports as unknown
+/// (`null`), never as an empty set.
 pub fn encode_status_clients() -> Vec<u8> {
     encode_packet(MessageType::Status, b"clients")
 }
