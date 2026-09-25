@@ -135,6 +135,9 @@ pub struct ListOptions {
     pub older_than_ms: Option<i64>,
     pub newer_than_ms: Option<i64>,
     pub summary: bool,
+    /// `--clients`: query each running daemon for its attached clients.
+    /// JSON list only; the text and summary views ignore it.
+    pub clients: bool,
 }
 
 /// Parse `args` (the full argv from the command word on, as Node's
@@ -212,6 +215,7 @@ pub fn run(args: &[String]) -> CliResult {
     opts.json = remaining.contains(&"--json");
     opts.show_tags = remaining.contains(&"--tags");
     opts.summary = remaining.contains(&"--summary");
+    opts.clients = remaining.contains(&"--clients");
     cmd_list(&opts)
 }
 
@@ -418,10 +422,12 @@ fn attached_client_sets(sessions: &[SessionInfo]) -> Vec<Option<Vec<AttachedClie
     })
 }
 
-/// One `list --json` element, keys in Node's order.
+/// One `list --json` element, keys in Node's order. `clients` is `None`
+/// unless `--clients` asked for it; then the inner `None` renders as
+/// `null` (unknown).
 ///
 /// node: src/cli.ts:2292-2306
-fn session_json(s: &SessionInfo, clients: Option<&[AttachedClient]>) -> Value {
+fn session_json(s: &SessionInfo, clients: Option<Option<&[AttachedClient]>>) -> Value {
     let meta = s.metadata.as_ref();
     let mut m = Map::new();
     m.insert("name".into(), Value::from(s.name.as_str()));
@@ -453,7 +459,9 @@ fn session_json(s: &SessionInfo, clients: Option<&[AttachedClient]>) -> Value {
             .map(Value::from)
             .unwrap_or(Value::Null),
     );
-    if s.is_running() {
+    if let Some(clients) = clients
+        && s.is_running()
+    {
         m.insert(
             "clients".into(),
             serde_json::to_value(clients).expect("attached clients are serializable"),
@@ -547,12 +555,16 @@ pub fn cmd_list(opts: &ListOptions) -> CliResult {
             println!("{}", Value::Object(m));
             return Ok(0);
         }
-        let clients = attached_client_sets(&sessions);
+        let clients = if opts.clients {
+            attached_client_sets(&sessions)
+        } else {
+            Vec::new()
+        };
         let local = Value::Array(
             sessions
                 .iter()
-                .zip(&clients)
-                .map(|(s, clients)| session_json(s, clients.as_deref()))
+                .enumerate()
+                .map(|(i, s)| session_json(s, clients.get(i).map(Option::as_deref)))
                 .collect(),
         );
         if opts.remote && !remote_hosts.is_empty() {
@@ -751,7 +763,7 @@ mod tests {
 
     fn json_with_live_clients(session: &SessionInfo) -> Value {
         let sets = attached_client_sets(std::slice::from_ref(session));
-        session_json(session, sets[0].as_deref())
+        session_json(session, Some(sets[0].as_deref()))
     }
 
     #[test]

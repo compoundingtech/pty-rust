@@ -214,12 +214,16 @@ Sessions live under `$PTY_ROOT` (default `~/.local/state/pty`): one unix socket,
 pid file, and metadata file per session. Set `PTY_ROOT` to isolate a registry,
 for example in tests.
 
-`pty list --json` includes `clients` on each running session: an array of
-`{ "pid": 1234, "tty": "/dev/pts/3", "attachedAt": "2026-09-25T12:00:00.000Z" }`.
-It is empty when no client is attached, `null` if the live daemon cannot
-answer within 500 ms or predates this query, and absent on exited or vanished
-sessions. A client without a terminal reports `tty: null`; older clients can
-also report `pid: null` because they do not send their identity.
+`pty list --json --clients` adds `clients` to each running session: an array
+of `{ "pid": 1234, "tty": "/dev/pts/3", "attachedAt": "2026-09-25T12:00:00.000Z" }`.
+It is opt-in because it asks every running daemon (up to 16 at a time, with
+one 500 ms budget for the whole listing); plain `pty list --json` contacts no
+daemon and has no `clients` key. `--clients` is ignored without `--json`, like
+the other view flags. The array is empty when no client is attached, `null`
+when the daemon did not answer in time or predates the query, and the key is
+absent on exited or vanished sessions. A client without a terminal reports
+`tty: null`; older clients also report `pid: null` because they do not send
+their identity.
 
 `pty version` prints `0.13.<n>-rust+<short-sha>`: one minor above the Node line,
 a `rust` pre-release tag, and the commit it was built from.

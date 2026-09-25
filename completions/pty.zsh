@@ -117,6 +117,7 @@ _pty() {
         list|ls)
           _arguments \
             '--json[Emit JSON]' \
+            '--clients[With --json, include attached clients]' \
             '--tags[Include internal bookkeeping tags]' \
             '--filter-tag[Filter to k=v (repeatable, ALL match)]' \
             '--remote[Include remote sessions via pty-relay]' \

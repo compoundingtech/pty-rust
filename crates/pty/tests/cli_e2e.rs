@@ -332,8 +332,8 @@ fn list_json_tracks_multiple_attached_clients_until_detach_or_disconnect() {
     let start = Instant::now();
     loop {
         let list: serde_json::Value =
-            serde_json::from_str(&ok_pty(&root, &["list", "--json"])).unwrap();
-        let clients = list[0]["clients"].as_array().unwrap();
+            serde_json::from_str(&ok_pty(&root, &["list", "--json", "--clients"])).unwrap();
+        let clients = list[0]["clients"].as_array().cloned().unwrap_or_default();
         if clients.len() == 2 {
             assert!(clients.iter().any(|c| c["pid"] == 1234
                 && c["tty"] == "/dev/pts/7" && c["attachedAt"].is_string()));
@@ -349,7 +349,7 @@ fn list_json_tracks_multiple_attached_clients_until_detach_or_disconnect() {
     let start = Instant::now();
     loop {
         let list: serde_json::Value =
-            serde_json::from_str(&ok_pty(&root, &["list", "--json"])).unwrap();
+            serde_json::from_str(&ok_pty(&root, &["list", "--json", "--clients"])).unwrap();
         if list[0]["clients"] == serde_json::json!([]) {
             break;
         }
@@ -357,6 +357,35 @@ fn list_json_tracks_multiple_attached_clients_until_detach_or_disconnect() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = run_pty(&root, &["kill", "clients"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The default listing never contacts a daemon; `--clients` does, and a
+/// daemon that never answers is reported as unknown within the budget.
+#[test]
+fn list_contacts_daemons_for_clients_only_when_asked() {
+    use std::os::unix::net::UnixListener;
+
+    let _serial = serial();
+    let root = unique_root();
+    // A live pid makes the fixture a running session without a real daemon.
+    std::fs::write(root.join("fixture.pid"), std::process::id().to_string()).unwrap();
+    let listener = UnixListener::bind(root.join("fixture.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    for args in [&["list", "--json"][..], &["list", "--clients"][..]] {
+        let out = ok_pty(&root, args);
+        assert!(!out.contains("\"clients\""), "{args:?}: {out}");
+        assert!(listener.accept().is_err(), "{args:?} contacted the daemon");
+    }
+
+    // Accepted by the kernel backlog, never answered: a stalled daemon.
+    let start = Instant::now();
+    let list: serde_json::Value =
+        serde_json::from_str(&ok_pty(&root, &["list", "--json", "--clients"])).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    assert_eq!(list[0]["name"], "fixture");
+    assert!(list[0]["clients"].is_null(), "{list}");
     let _ = std::fs::remove_dir_all(root);
 }
 

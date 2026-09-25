@@ -1,9 +1,11 @@
-Usage: pty list [--json] [--tags] [--filter-tag k=v] [--remote [<peer>]] [--status <s>] [--summary]
+Usage: pty list [--json [--clients]] [--tags] [--filter-tag k=v] [--remote [<peer>]] [--status <s>] [--summary]
 
 List sessions (alias: pty ls). User tags show by default.
 
 Flags:
   --json               Emit JSON
+  --clients            With --json: add each running session's attached clients
+                       (asks every daemon; ignored without --json)
   --tags               Include internal bookkeeping tags (ptyfile*, strategy.*)
   --filter-tag k=v     Only sessions with the tag (repeatable, ALL must match)
   --remote <peer>      Also list a fabric peer's sessions (over fabric; the peer
