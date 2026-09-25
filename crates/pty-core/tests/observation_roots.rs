@@ -2,11 +2,13 @@
 //! process environment.
 
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pty_core::client::{
     ClientError, PeekScreenOptions, peek_screen_bytes_in, peek_screen_in, query_stats_in,
@@ -16,7 +18,10 @@ use pty_core::events::{read_all_events_in, read_recent_events_in};
 use pty_core::protocol::{
     MessageType, Packet, PacketReader, decode_peek, encode_screen, encode_status_response,
 };
-use pty_core::registry::{ListOptions, list_sessions_in};
+use pty_core::query_stats_batch_in;
+use pty_core::registry::{
+    ListOptions, SessionStatus, list_sessions_in, probe_sockets_within_budget,
+};
 use serde_json::json;
 
 const T: Duration = Duration::from_secs(5);
@@ -402,4 +407,189 @@ fn event_readers_use_only_the_supplied_root() {
     assert_eq!(recent[0].r#type, "user.left-last");
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].r#type, "user.right");
+}
+
+/// A non-blocking connect(2), so filling an accept queue cannot hang the test.
+fn nonblocking_connect(path: &Path) -> std::io::Result<UnixStream> {
+    // SAFETY: all-zero is a valid sockaddr_un.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = path.as_os_str().as_bytes();
+    assert!(bytes.len() < addr.sun_path.len(), "socket path too long");
+    for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+        *dst = *src as libc::c_char;
+    }
+    // SAFETY: socket(2) takes no pointers.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+    // SAFETY: `fd` is a fresh descriptor nothing else owns.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    stream.set_nonblocking(true).unwrap();
+    // SAFETY: `addr` is initialised and its full size is passed.
+    let rc = unsafe {
+        libc::connect(
+            stream.as_raw_fd(),
+            (&addr as *const libc::sockaddr_un).cast(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(stream)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// `<name>.sock` listening with `listen(0)`, never accepting, its queue full:
+/// a blocking connect(2) to it waits forever on Linux and is refused on macOS.
+/// Keep both returned values alive for as long as the queue must stay full.
+fn full_backlog(root: &TestRoot, name: &str) -> (UnixListener, Vec<UnixStream>) {
+    let listener = root.listen(name);
+    // SAFETY: listen(2) on a socket the listener owns; re-listening only
+    // changes the backlog.
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+    let path = root.session_file(name, "sock");
+    let mut queued = Vec::new();
+    for _ in 0..1024 {
+        match nonblocking_connect(&path) {
+            Ok(stream) => queued.push(stream),
+            Err(e) => {
+                let full = if cfg!(target_os = "linux") {
+                    libc::EAGAIN
+                } else {
+                    libc::ECONNREFUSED
+                };
+                assert_eq!(e.raw_os_error(), Some(full), "filling the backlog: {e}");
+                return (listener, queued);
+            }
+        }
+    }
+    panic!("accept queue of {name} never filled");
+}
+
+/// One shared deadline bounds the whole batch: a daemon that answers, one that
+/// accepts and never replies, one whose accept queue is full, and a missing
+/// socket each get the result `query_stats_in` gives them, and the silent and
+/// wedged ones cost the deadline once rather than each.
+#[test]
+fn batch_stats_bound_every_session_by_one_deadline() {
+    let root = TestRoot::new();
+    let answered = serve_once(
+        root.listen("ok"),
+        encode_status_response(&stats_body("ok-body")),
+    );
+    let silent = root.listen("silent");
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    // Never joined: if the batch never connected, accept would block forever.
+    std::thread::spawn(move || {
+        let (stream, _) = silent.accept().expect("accept silent client");
+        let _ = held.recv();
+        drop(stream);
+    });
+    let (_backlog, _queued) = full_backlog(&root, "backlog");
+    let names: Vec<String> = ["ok", "silent", "backlog", "missing"]
+        .map(String::from)
+        .to_vec();
+
+    let deadline = Duration::from_millis(500);
+    let start = Instant::now();
+    let results = query_stats_batch_in(root.path(), &names, deadline);
+    let elapsed = start.elapsed();
+    drop(release);
+
+    assert!(
+        elapsed >= deadline && elapsed < deadline + Duration::from_millis(500),
+        "{elapsed:?}"
+    );
+    assert_eq!(
+        results.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        names
+    );
+    assert_eq!(results[0].1.as_ref().expect("ok answers").name, "ok-body");
+    assert_eq!(
+        results[1].1.as_ref().err(),
+        Some(&ClientError::StatsTimeout("silent".into()))
+    );
+    let backlog = if cfg!(target_os = "linux") {
+        ClientError::StatsTimeout("backlog".into())
+    } else {
+        ClientError::NotReachable {
+            name: "backlog".into(),
+            remote: false,
+        }
+    };
+    assert_eq!(results[2].1.as_ref().err(), Some(&backlog));
+    assert_eq!(
+        results[3].1.as_ref().err(),
+        Some(&ClientError::NotReachable {
+            name: "missing".into(),
+            remote: false,
+        })
+    );
+    assert_eq!(answered.join().unwrap().type_, MessageType::Status);
+}
+
+/// The multiplexed probe answers what a blocking connect answers, and leaves a
+/// listener that cannot accept unanswered (Linux) instead of waiting on it;
+/// the listing classifies each accordingly.
+#[test]
+fn socket_probe_matches_a_blocking_connect() {
+    let root = TestRoot::new();
+    let _live = root.listen("live");
+    // The socket file outlives its listener: connect is refused.
+    drop(root.listen("stale"));
+    let (_backlog, _queued) = full_backlog(&root, "backlog");
+    let answerable: Vec<PathBuf> = ["live", "stale", "missing"]
+        .iter()
+        .map(|n| root.session_file(n, "sock"))
+        .collect();
+    let backlog = root.session_file("backlog", "sock");
+    let mut paths = answerable.clone();
+    paths.push(backlog.clone());
+
+    let budget = Duration::from_millis(300);
+    let start = Instant::now();
+    let results = probe_sockets_within_budget(&paths, budget);
+    assert!(
+        start.elapsed() < budget + Duration::from_millis(500),
+        "{:?}",
+        start.elapsed()
+    );
+    for path in &answerable {
+        assert_eq!(
+            results.get(path),
+            Some(&UnixStream::connect(path).is_ok()),
+            "{}",
+            path.display()
+        );
+    }
+    let wedged = if cfg!(target_os = "linux") {
+        None
+    } else {
+        Some(&false)
+    };
+    assert_eq!(results.get(&backlog), wedged);
+
+    // A dead pid sends every listed session through the probe.
+    for name in ["live", "stale", "backlog"] {
+        std::fs::write(root.session_file(name, "json"), metadata(name)).unwrap();
+        std::fs::write(root.session_file(name, "pid"), "2147483646").unwrap();
+    }
+    let listed: Vec<(String, SessionStatus)> = list_sessions_in(
+        root.path(),
+        &ListOptions {
+            socket_probe_budget: budget,
+        },
+    )
+    .into_iter()
+    .map(|s| (s.name, s.status))
+    .collect();
+    assert_eq!(
+        listed,
+        [
+            ("backlog".to_string(), SessionStatus::Vanished),
+            ("live".to_string(), SessionStatus::Running),
+            ("stale".to_string(), SessionStatus::Vanished),
+        ]
+    );
 }

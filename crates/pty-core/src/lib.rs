@@ -31,4 +31,7 @@ pub mod queries;
 pub mod registry;
 pub mod spawn;
 pub mod stats;
+mod unix_connect;
 pub mod unix_peer;
+
+pub use client::query_stats_batch_in;

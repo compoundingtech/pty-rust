@@ -50,7 +50,7 @@ pub use remote::{
 pub use sanitize::{CLEAR_SCREEN_HOME, CURSOR_TO_BOTTOM, TERMINAL_SANITIZE};
 pub use send::{DEFAULT_SEQ_DELAY_MS, SendOptions, resolve_seq_delay_ms, send, send_over};
 pub use stats::{
-    STATS_TIMEOUT, query_stats, query_stats_in, query_stats_in_with_timeout,
+    STATS_TIMEOUT, query_stats, query_stats_batch_in, query_stats_in, query_stats_in_with_timeout,
     query_stats_with_timeout, query_status_json,
 };
 pub use stream::{parse_attach_stream_fd_token, validate_attach_stream_fd};
