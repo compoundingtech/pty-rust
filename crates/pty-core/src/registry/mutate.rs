@@ -177,7 +177,24 @@ pub fn mutate_metadata_under_lock_with_wait(
     MutateStatus::Changed(published)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Typed request for filesystem-backed, generation-fenced tag compare-and-set.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TagCompareAndSetRequest {
+    pub expected_generation: String,
+    pub tag: String,
+    pub expected_value: String,
+    pub value: String,
+}
+
+impl TagCompareAndSetRequest {
+    pub fn validate(&self) -> bool {
+        !self.expected_generation.is_empty() && !self.tag.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "_tag")]
 pub enum TagCompareAndSetResult {
     Changed { value: String },
     Unchanged { value: String },

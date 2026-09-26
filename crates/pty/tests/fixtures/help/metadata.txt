@@ -1,13 +1,21 @@
 Usage: pty metadata patch --id <stable-id>
+       pty metadata cas --id <stable-id>
 
-Atomically merge displayName and tags for one exact stable session id. Reads
-one JSON object from stdin; it never resolves display-name aliases.
+Mutate metadata for one exact stable session id without resolving display-name
+aliases. `patch` atomically merges presentation fields. `cas` reads one JSON
+request and compares one tag under the registry lock, fenced by generation.
 
 Patch fields:
   displayName   string to set, null to clear, omitted to preserve
   tags          object of string values to set and null values to remove
 
+CAS request:
+  expectedGeneration   exact opaque session generation
+  tag                  non-empty tag key
+  expectedValue        value that must still be current
+  value                replacement value
+
 Examples:
   pty metadata patch --id a1b2c3d4 < patch.json
   printf '%s' '{"displayName":"Worker","tags":{"role":"worker"}}' | pty metadata patch --id a1b2c3d4
-  printf '%s' '{"displayName":null,"tags":{"temporary":null}}' | pty metadata patch --id a1b2c3d4
+  printf '%s' '{"expectedGeneration":"7f44b35e","tag":"run.url","expectedValue":"https://old.example","value":"http://127.0.0.1:4321"}' | pty metadata cas --id a1b2c3d4

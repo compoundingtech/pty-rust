@@ -56,9 +56,10 @@ pub use metadata::{
 };
 pub use mutate::{
     MetadataChangeSnapshot, MetadataPatch, MetadataPatchEvent, MetadataPatchResult, MutateOptions,
-    MutateStatus, TagCompareAndSetResult, apply_metadata_patch_by_id, compare_and_set_tag_value,
-    metadata_matches_observation, mutate_metadata_under_lock, mutate_metadata_under_lock_with,
-    mutate_metadata_under_lock_with_wait, patch_metadata_by_id, set_display_name, update_tags,
+    MutateStatus, TagCompareAndSetRequest, TagCompareAndSetResult, apply_metadata_patch_by_id,
+    compare_and_set_tag_value, metadata_matches_observation, mutate_metadata_under_lock,
+    mutate_metadata_under_lock_with, mutate_metadata_under_lock_with_wait, patch_metadata_by_id,
+    set_display_name, update_tags,
 };
 pub use names::{
     SESSION_ID_ALPHABET, SESSION_ID_ATTEMPTS, auto_display_name, generate_id, random_session_name,

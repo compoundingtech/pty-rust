@@ -34,7 +34,7 @@ _pty() {
     'tag-multi:Bulk tag ops across sessions'
     'emit:Publish a user.* event'
     'rename:Set / show / clear displayName'
-    'metadata:Atomically patch presentation metadata by stable id'
+    'metadata:Filesystem metadata mutations by stable id'
     'readiness:Exact socket ownership and lifecycle compare-and-set'
     'evidence:Read or remove exact-generation retained exit evidence'
     'up:Start sessions from pty.toml'
@@ -189,7 +189,7 @@ _pty() {
         metadata)
           _arguments \
             '--id[Exact stable session id]' \
-            '1:mode:(patch)'
+            '1:mode:(patch cas)'
           ;;
         readiness)
           if (( CURRENT == 3 )); then
