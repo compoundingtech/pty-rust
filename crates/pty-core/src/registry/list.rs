@@ -204,17 +204,17 @@ fn read_pid_with_in(root: &Path, name: &str, metadata: Option<&SessionMetadata>)
 /// Resolve a daemon pid only when lock-held metadata binds it to the exact
 /// live OS process. Unlike [`read_pid_with`], this is suitable for destructive
 /// signals: an unbound legacy pid sidecar is never authority.
-pub fn read_signal_target_with(
-    name: &str,
-    metadata: Option<&SessionMetadata>,
-) -> Option<i32> {
-    read_signal_target_with_in(&session_dir(), name, metadata)
+pub fn read_signal_target_with(name: &str, metadata: Option<&SessionMetadata>) -> Option<i32> {
+    read_signal_target_with_in(&session_dir(), name, metadata, read_process_start_token)
 }
 
+/// [`read_signal_target_with`] over an explicit registry root and live
+/// start-token reader, so the binding rules are provable without `ps`.
 fn read_signal_target_with_in(
     root: &Path,
     name: &str,
     metadata: Option<&SessionMetadata>,
+    live_start_token: impl Fn(i32) -> Option<String>,
 ) -> Option<i32> {
     let owned;
     let retained = match metadata {
@@ -231,7 +231,7 @@ fn read_signal_target_with_in(
         return None;
     }
     let token = retained.daemon_start_token()?;
-    (read_process_start_token(daemon_pid).as_deref() == Some(token)).then_some(daemon_pid)
+    (live_start_token(daemon_pid).as_deref() == Some(token)).then_some(daemon_pid)
 }
 
 /// [`read_pid_with`] reading the metadata itself when the sidecar is absent.
@@ -653,41 +653,60 @@ pub fn session_exists(name: &str) -> bool {
 mod signal_target_tests {
     use super::*;
 
+    const PID: i32 = 4242;
+    const TOKEN: &str = "test:live-generation";
+
+    /// The daemon at [`PID`] is live with start token [`TOKEN`]; every other
+    /// pid has no readable identity. Keeps the binding rules independent of
+    /// whether the host (or build sandbox) can run `ps`.
+    fn live(pid: i32) -> Option<String> {
+        (pid == PID).then(|| TOKEN.to_string())
+    }
+
+    fn bound(token: Option<&str>) -> SessionMetadata {
+        SessionMetadata {
+            daemon_pid: Some(PID),
+            daemon_start_token: token.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn destructive_target_requires_matching_live_start_identity() {
-        let root = std::env::temp_dir().join(format!(
-            "pty-signal-target-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("pty-signal-target-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let pid = std::process::id() as i32;
-        std::fs::write(root.join("session.pid"), pid.to_string()).unwrap();
+        let target = |metadata: &SessionMetadata| {
+            read_signal_target_with_in(&root, "session", Some(metadata), live)
+        };
 
-        let unbound = SessionMetadata {
-            daemon_pid: Some(pid),
+        // Without a sidecar, only the lock-held start token can bind the pid.
+        assert_eq!(target(&bound(None)), None, "unbound pid is never authority");
+        assert_eq!(target(&bound(Some(TOKEN))), Some(PID));
+        assert_eq!(
+            target(&bound(Some("test:previous-generation"))),
+            None,
+            "a reused pid with another start token is not the daemon"
+        );
+        let unreadable = SessionMetadata {
+            daemon_pid: Some(PID + 1),
+            daemon_start_token: Some(TOKEN.to_string()),
             ..Default::default()
         };
         assert_eq!(
-            read_signal_target_with_in(&root, "session", Some(&unbound)),
-            None
+            target(&unreadable),
+            None,
+            "unconfirmable identity fails closed"
         );
 
-        let exact = SessionMetadata {
-            daemon_pid: Some(pid),
-            daemon_start_token: read_process_start_token(pid),
-            ..Default::default()
-        };
-        assert_eq!(
-            read_signal_target_with_in(&root, "session", Some(&exact)),
-            Some(pid)
-        );
+        // An agreeing sidecar does not replace the token check.
+        std::fs::write(root.join("session.pid"), PID.to_string()).unwrap();
+        assert_eq!(target(&bound(None)), None);
+        assert_eq!(target(&bound(Some(TOKEN))), Some(PID));
 
-        std::fs::write(root.join("session.pid"), (pid.saturating_add(1)).to_string()).unwrap();
-        assert_eq!(
-            read_signal_target_with_in(&root, "session", Some(&exact)),
-            None
-        );
+        // A disagreeing sidecar vetoes even an exact token match.
+        std::fs::write(root.join("session.pid"), (PID + 1).to_string()).unwrap();
+        assert_eq!(target(&bound(Some(TOKEN))), None);
         let _ = std::fs::remove_dir_all(root);
     }
 }

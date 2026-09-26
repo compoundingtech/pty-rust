@@ -240,6 +240,33 @@ fn daemon_pid_needs_a_matching_start_token() {
     assert_eq!(registry::read_pid(&name), Some(12));
 }
 
+/// A destructive signal target binds to the real OS start token of the live
+/// daemon, never to a stale one.
+#[test]
+fn signal_target_binds_the_live_os_start_token() {
+    if registry_support::skip_without_ps("lstart=") {
+        return;
+    }
+    let _ = root();
+    let me = std::process::id() as i32;
+    let name = unique_name("signal");
+    let live = SessionMetadata {
+        daemon_pid: Some(me),
+        daemon_start_token: registry::read_process_start_token(me),
+        ..Default::default()
+    };
+    assert_eq!(
+        registry::read_signal_target_with(&name, Some(&live)),
+        Some(me)
+    );
+
+    let stale = SessionMetadata {
+        daemon_start_token: Some("linux:0".to_string()),
+        ..live
+    };
+    assert_eq!(registry::read_signal_target_with(&name, Some(&stale)), None);
+}
+
 /// Temporaries of in-flight atomic writes are never listed.
 #[test]
 fn tmp_files_are_skipped() {
