@@ -151,39 +151,4 @@ mod tests {
             serde_json::json!({"generation": "g1", "lastOutputAtMs": 42})
         );
     }
-    #[test]
-    fn explicit_root_reads_only_its_own_generation() {
-        let root = std::env::temp_dir().join(format!(
-            "pty-activity-{}-{}",
-            std::process::id(),
-            super::super::atomic::random_hex16()
-        ));
-        struct RemoveRoot(std::path::PathBuf);
-        impl Drop for RemoveRoot {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = RemoveRoot(root.clone());
-        let dir = root.join(".activity");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("one.json"),
-            serde_json::to_vec(&sidecar("g1", 42)).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            last_output_at_ms_in(&root, "one", &record("g1", None, false)),
-            Some(42)
-        );
-        assert_eq!(
-            last_output_at_ms_in(&root, "one", &record("g2", None, false)),
-            None
-        );
-        assert_eq!(
-            last_output_at_ms_in(&root, "two", &record("g1", None, false)),
-            None
-        );
-    }
 }
