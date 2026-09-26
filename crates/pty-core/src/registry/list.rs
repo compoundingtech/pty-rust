@@ -5,6 +5,8 @@
 //! node: src/sessions.ts:183-199, 801-817, 895-1013, 1345-1370, 2076-2175
 
 use std::collections::{BTreeSet, HashMap};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,7 @@ use super::atomic::is_tmp_name;
 use super::lock::parse_leading_int;
 use super::metadata::{SessionMetadata, read_metadata_at};
 use super::root::{metadata_path, pid_path, session_dir};
+use crate::unix_connect::{self, Connect};
 
 /// `running` / `exited` / `vanished`.
 ///
@@ -341,35 +344,86 @@ pub fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
 /// have not answered by the deadline are absent from the result (read as
 /// unreachable).
 ///
+/// A connect that succeeds is `true`; one that fails (ENOENT, ECONNREFUSED,
+/// anything else) is `false`. A listener whose accept queue is full answers
+/// neither: Linux reports EAGAIN, which is retried until the deadline, so a
+/// wedged daemon ends up absent, as a blocking connect left pending would.
+/// All probes run on the calling thread as non-blocking connects in one
+/// poll(2) set; a probe never outlives this call.
+///
 /// node: src/sessions.ts:2129-2175
 pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashMap<PathBuf, bool> {
+    enum Probe {
+        /// Connect due at the instant held: the first attempt, or
+        /// `RETRY_TICK` after a full accept queue.
+        Retry(Instant),
+        InProgress(UnixStream),
+        Answered,
+    }
     let mut results = HashMap::new();
     if paths.is_empty() {
         return results;
     }
-    let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, bool)>();
-    for path in paths {
-        let tx = tx.clone();
-        let path = path.clone();
-        std::thread::spawn(move || {
-            let reachable = std::os::unix::net::UnixStream::connect(&path).is_ok();
-            let _ = tx.send((path, reachable));
-        });
-    }
-    drop(tx);
-    let deadline = Instant::now() + budget;
-    let mut pending = paths.len();
-    while pending > 0 {
+    let start = Instant::now();
+    let deadline = start + budget;
+    let mut probes: Vec<Probe> = paths.iter().map(|_| Probe::Retry(start)).collect();
+    let mut polled: Vec<usize> = Vec::with_capacity(paths.len());
+    let mut fds: Vec<libc::pollfd> = Vec::with_capacity(paths.len());
+    // Every path gets its first connect even under a zero budget; a busy
+    // retry runs only while the deadline is still ahead, so a retry that falls
+    // due at or after it leaves the path absent.
+    let mut first_round = true;
+    loop {
+        polled.clear();
+        fds.clear();
         let now = Instant::now();
-        if now >= deadline {
+        let mut next_retry: Option<Instant> = None;
+        for (i, (probe, path)) in probes.iter_mut().zip(paths).enumerate() {
+            if let Probe::Retry(due) = *probe
+                && due <= now
+                && (first_round || now < deadline)
+            {
+                *probe = match unix_connect::connect(path) {
+                    Connect::Connected(_) => {
+                        results.insert(path.clone(), true);
+                        Probe::Answered
+                    }
+                    Connect::Failed(_) => {
+                        results.insert(path.clone(), false);
+                        Probe::Answered
+                    }
+                    Connect::InProgress(stream) => Probe::InProgress(stream),
+                    Connect::Busy => Probe::Retry(now + unix_connect::RETRY_TICK),
+                };
+            }
+            if let Probe::Retry(due) = *probe {
+                next_retry = Some(next_retry.map_or(due, |at| at.min(due)));
+            }
+            if let Probe::InProgress(stream) = probe {
+                polled.push(i);
+                fds.push(libc::pollfd {
+                    fd: stream.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                });
+            }
+        }
+        first_round = false;
+        if fds.is_empty() && next_retry.is_none() {
             break;
         }
-        match rx.recv_timeout(deadline - now) {
-            Ok((path, reachable)) => {
-                results.insert(path, reachable);
-                pending -= 1;
+        if !unix_connect::poll_until(&mut fds, deadline, next_retry) {
+            break;
+        }
+        for (pfd, &i) in fds.iter().zip(&polled) {
+            if pfd.revents == 0 {
+                continue;
             }
-            Err(_) => break,
+            if let Probe::InProgress(stream) = &probes[i] {
+                let connected = matches!(stream.take_error(), Ok(None));
+                results.insert(paths[i].clone(), connected);
+                probes[i] = Probe::Answered;
+            }
         }
     }
     results
