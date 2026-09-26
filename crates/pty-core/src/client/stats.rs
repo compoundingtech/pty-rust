@@ -76,6 +76,10 @@ pub fn query_stats_batch_in(
     let mut polled: Vec<usize> = Vec::with_capacity(queries.len());
     let mut fds: Vec<libc::pollfd> = Vec::with_capacity(queries.len());
     let mut buf = [0u8; 8192];
+    // Every session gets its first connect even under a zero budget; a busy
+    // retry runs only while the deadline is still ahead, so a retry that falls
+    // due at or after it stays pending and reports `StatsTimeout`.
+    let mut first_round = true;
     loop {
         polled.clear();
         fds.clear();
@@ -84,6 +88,7 @@ pub fn query_stats_batch_in(
         for (i, (query, name)) in queries.iter_mut().zip(names).enumerate() {
             if let Step::Connect(due) = query.step
                 && due <= now
+                && (first_round || now < deadline)
             {
                 query.step = begin(&query.path, name, &request, now);
             }
@@ -103,6 +108,7 @@ pub fn query_stats_batch_in(
                 revents: 0,
             });
         }
+        first_round = false;
         if fds.is_empty() && next_retry.is_none() {
             break;
         }

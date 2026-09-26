@@ -46,7 +46,7 @@ Socket setup:
 
 Each round:
 
-1. Every socket still without a connection attempt gets a `connect`, and so does every `Busy` socket whose retry is due. A `Busy` outcome records the socket's next retry as the round's start plus `RETRY_TICK` (10 ms). Outcomes that are final are recorded.
+1. Every socket still without a connection attempt gets a `connect`, and so does every `Busy` socket whose retry is due while the deadline is still ahead. The first round connects every socket whatever the deadline; later rounds retry only while `now < deadline`, so a retry that falls due at or after the deadline is never attempted and its socket stays unanswered. A `Busy` outcome records the socket's next retry as the round's start plus `RETRY_TICK` (10 ms). Outcomes that are final are recorded.
 2. Every socket that is waiting on I/O goes into one `pollfd` array: `POLLOUT` while connecting or writing, `POLLIN` while reading.
 3. If the array is empty and no socket is `Busy`, the call returns.
 4. `poll_until(fds, deadline, next_retry)` waits until the earlier of the deadline and the earliest pending retry (`PTY.REG-C02`, `PTY.REG-T01`). The timeout is rounded up to whole milliseconds, so a sub-millisecond remainder never becomes a busy spin. The retry time is per socket, not a cap on the wait: when another socket stays ready (a peer that floods data), `poll(2)` returns at once every round, and a `Busy` socket is still reconnected at most once per `RETRY_TICK`.
@@ -108,9 +108,9 @@ Every row equals what the single read returns for the same event (`PTY.REG-R08`)
 | Peer closes before STATUS | `StatsTimeout(name)` |
 | Malformed frame | `pty client: dropping connection — <err>` on stderr, then `StatsTimeout(name)` |
 | Read fails | `map_io_error(…, "read", None, …)` |
-| Deadline passes first | `StatsTimeout(name)` |
+| Deadline passes first, including a `Busy` connect whose retry falls due at or after the deadline | `StatsTimeout(name)` |
 
-The one intended difference (`PTY.REG-T02`): the single read issues a blocking connect before its timeout starts, so on Linux it waits on a full accept queue. The batch retries that connect until its deadline and reports `StatsTimeout`.
+The one intended difference (`PTY.REG-T02`): the single read issues a blocking connect before its timeout starts, so on Linux it waits on a full accept queue. The batch retries that connect until its deadline and reports `StatsTimeout`. No retry runs at or after the deadline, so a listener that closes around the deadline still reports `StatsTimeout`, never a post-deadline `NotReachable`.
 
 ## Platform behaviour
 
@@ -126,6 +126,7 @@ The one intended difference (`PTY.REG-T02`): the single read issues a blocking c
 
 - **Empty input.** The probe returns an empty map, and the batch returns an empty list, without opening a socket.
 - **Zero budget or deadline.** The first round of connects runs before the deadline is checked. Sockets whose first connect is final therefore appear in the probe map (`true` or `false`), and a batch reports their connect failures as mapped above. Everything else is absent from the probe, or a `StatsTimeout` in the batch. On Linux, where AF_UNIX connects complete synchronously, a zero-budget probe answers every socket except one with a full accept queue.
+- **Busy retry due at the deadline.** Only the first attempt ignores the deadline. A `Busy` socket whose retry falls due at or after the deadline is not reconnected: the probe leaves it absent, and the batch reports `StatsTimeout`, even if its listener has since closed or gone. No socket or connect work runs outside the budget.
 - **Duplicate paths or names.** The probe map holds one entry per path. The batch returns one entry per requested name, duplicates included, each from its own connection.
 - **poll(2) failure other than `EINTR`.** The call stops early, and every socket without an outcome is treated as at the deadline.
 
@@ -147,4 +148,4 @@ The one intended difference (`PTY.REG-T02`): the single read issues a blocking c
 | `PTY.REG-R03` | Measured, not tested: [decision 0014](../../decisions/0014-registry-reads-run-on-the-callers-thread.md). |
 | `PTY.REG-R04`, `PTY.REG-R05`, `PTY.REG-R07` | `crates/pty-core/tests/observation_roots.rs::socket_probe_matches_a_blocking_connect` |
 | `PTY.REG-R06`, `PTY.REG-R08` | `crates/pty-core/tests/observation_roots.rs::batch_stats_bound_every_session_by_one_deadline`, `batch_stats_bound_a_peer_that_floods_data` |
-| `PTY.REG-T01` | `crates/pty-core/tests/observation_roots.rs::batch_stats_throttle_busy_retries_beside_a_flooding_peer` |
+| `PTY.REG-T01` | `crates/pty-core/tests/observation_roots.rs::batch_stats_throttle_busy_retries_beside_a_flooding_peer`, `batch_stats_never_retry_a_busy_connect_at_the_deadline`, `socket_probe_never_retries_a_busy_connect_at_the_deadline` |

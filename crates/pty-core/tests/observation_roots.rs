@@ -609,6 +609,48 @@ fn batch_stats_throttle_busy_retries_beside_a_flooding_peer() {
     flooder.join().unwrap();
 }
 
+/// A deadline of exactly one retry tick (10 ms) makes the busy retry fall due
+/// at or just after the deadline: the round that wakes there must not
+/// connect again, so the full queue is tried once and reports
+/// `StatsTimeout`, never a post-deadline connect outcome such as
+/// `NotReachable`. Repeated so a lucky scheduling cannot hide a late retry.
+#[test]
+fn batch_stats_never_retry_a_busy_connect_at_the_deadline() {
+    if !cfg!(target_os = "linux") {
+        return; // macOS refuses a full queue outright; nothing is retried.
+    }
+    let root = TestRoot::new();
+    let (_backlog, _queued) = full_backlog(&root, "backlog");
+    let names = vec!["backlog".to_string()];
+    for _ in 0..5 {
+        let before = busy_connects_on_this_thread();
+        let results = query_stats_batch_in(root.path(), &names, Duration::from_millis(10));
+        assert_eq!(busy_connects_on_this_thread() - before, 1);
+        assert_eq!(
+            results[0].1.as_ref().err(),
+            Some(&ClientError::StatsTimeout("backlog".into()))
+        );
+    }
+}
+
+/// The probe loop has the same bound: a busy retry due at the deadline is not
+/// attempted, and the wedged socket stays absent.
+#[test]
+fn socket_probe_never_retries_a_busy_connect_at_the_deadline() {
+    if !cfg!(target_os = "linux") {
+        return; // macOS refuses a full queue outright; nothing is retried.
+    }
+    let root = TestRoot::new();
+    let (_backlog, _queued) = full_backlog(&root, "backlog");
+    let paths = vec![root.session_file("backlog", "sock")];
+    for _ in 0..5 {
+        let before = busy_connects_on_this_thread();
+        let results = probe_sockets_within_budget(&paths, Duration::from_millis(10));
+        assert_eq!(busy_connects_on_this_thread() - before, 1);
+        assert_eq!(results.get(&paths[0]), None);
+    }
+}
+
 /// The multiplexed probe answers what a blocking connect answers, and leaves a
 /// listener that cannot accept unanswered (Linux) instead of waiting on it;
 /// the listing classifies each accordingly.

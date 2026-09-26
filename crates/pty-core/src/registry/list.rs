@@ -369,6 +369,10 @@ pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashM
     let mut probes: Vec<Probe> = paths.iter().map(|_| Probe::Retry(start)).collect();
     let mut polled: Vec<usize> = Vec::with_capacity(paths.len());
     let mut fds: Vec<libc::pollfd> = Vec::with_capacity(paths.len());
+    // Every path gets its first connect even under a zero budget; a busy
+    // retry runs only while the deadline is still ahead, so a retry that falls
+    // due at or after it leaves the path absent.
+    let mut first_round = true;
     loop {
         polled.clear();
         fds.clear();
@@ -377,6 +381,7 @@ pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashM
         for (i, (probe, path)) in probes.iter_mut().zip(paths).enumerate() {
             if let Probe::Retry(due) = *probe
                 && due <= now
+                && (first_round || now < deadline)
             {
                 *probe = match unix_connect::connect(path) {
                     Connect::Connected(_) => {
@@ -403,6 +408,7 @@ pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashM
                 });
             }
         }
+        first_round = false;
         if fds.is_empty() && next_retry.is_none() {
             break;
         }
