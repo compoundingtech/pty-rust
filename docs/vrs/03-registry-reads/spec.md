@@ -50,7 +50,7 @@ Each round:
 2. Every socket that is waiting on I/O goes into one `pollfd` array: `POLLOUT` while connecting or writing, `POLLIN` while reading.
 3. If the array is empty and no socket is `Busy`, the call returns.
 4. `poll_until(fds, deadline, retrying)` waits for the remaining time to the deadline, capped at `RETRY_TICK` (10 ms) when any socket is `Busy` (`PTY.REG-C02`, `PTY.REG-T01`). The timeout is rounded up to whole milliseconds, so a sub-millisecond remainder never becomes a busy spin.
-5. Each socket with non-zero `revents` advances one step. Sockets with zero `revents` wait for the next round.
+5. Each socket with non-zero `revents` advances one step, doing at most one read or one write pass, then yields to the next socket. Sockets with zero `revents` wait for the next round. A round therefore does bounded work per socket, and every round starts with the deadline check in `poll_until`: a peer that stays ready forever cannot hold the loop or starve the other sockets (`PTY.REG-R06`).
 
 `poll_until` returns false, and the call stops, when the deadline has passed or `poll(2)` fails with anything but `EINTR`. On `EINTR` it clears every `revents`, because they are unspecified after a failed poll, and the loop runs another round. Sockets without an outcome when the loop stops count as unanswered.
 
@@ -84,7 +84,7 @@ stateDiagram-v2
     Writing --> Writing: WouldBlock
     Writing --> Reading: request fully written
     Writing --> Done: write error
-    Reading --> Reading: WouldBlock, or packets without STATUS
+    Reading --> Reading: WouldBlock, EINTR, or packets without STATUS
     Reading --> Done: STATUS, close, bad frame, read error
     Connect --> Timeout: deadline
     Connecting --> Timeout: deadline
@@ -92,7 +92,7 @@ stateDiagram-v2
     Reading --> Timeout: deadline
 ```
 
-A write that the socket accepts in full moves on to reading in the same step. A readable socket is drained until `WouldBlock` or an outcome. Packets that are not STATUS are consumed and ignored, as in the single read. `EINTR` from a write or read is retried in place.
+A write that the socket accepts in full moves on to reading in the same step. A write pass writes until the request is sent or `WouldBlock`; the request is a few bytes, so the pass is bounded. A readable socket gets one `read` per round, not a drain: a daemon that streams DATA to its clients (it broadcasts DATA to command-role clients) would otherwise never return `WouldBlock`. Every complete packet in that read is decoded at once (`PacketReader::feed` returns all of them), so a STATUS in the read completes the step, and no complete STATUS stays buffered for a later round. Packets that are not STATUS are consumed and ignored, as in the single read. `EINTR` from a write is retried in place; `EINTR` from a read leaves the socket reading for the next round.
 
 ### Error mapping
 
@@ -146,4 +146,4 @@ The one intended difference (`PTY.REG-T02`): the single read issues a blocking c
 | `PTY.REG-R01`, `PTY.REG-R02` | By construction: the module map above contains no thread spawn, and every socket is a local of the call. |
 | `PTY.REG-R03` | Measured, not tested: [decision 0014](../../decisions/0014-registry-reads-run-on-the-callers-thread.md). |
 | `PTY.REG-R04`, `PTY.REG-R05`, `PTY.REG-R07` | `crates/pty-core/tests/observation_roots.rs::socket_probe_matches_a_blocking_connect` |
-| `PTY.REG-R06`, `PTY.REG-R08` | `crates/pty-core/tests/observation_roots.rs::batch_stats_bound_every_session_by_one_deadline` |
+| `PTY.REG-R06`, `PTY.REG-R08` | `crates/pty-core/tests/observation_roots.rs::batch_stats_bound_every_session_by_one_deadline`, `batch_stats_bound_a_peer_that_floods_data` |

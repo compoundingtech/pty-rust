@@ -16,7 +16,8 @@ use pty_core::client::{
 };
 use pty_core::events::{read_all_events_in, read_recent_events_in};
 use pty_core::protocol::{
-    MessageType, Packet, PacketReader, decode_peek, encode_screen, encode_status_response,
+    MessageType, Packet, PacketReader, decode_peek, encode_data, encode_screen,
+    encode_status_response,
 };
 use pty_core::query_stats_batch_in;
 use pty_core::registry::{
@@ -527,6 +528,47 @@ fn batch_stats_bound_every_session_by_one_deadline() {
         })
     );
     assert_eq!(answered.join().unwrap().type_, MessageType::Status);
+}
+
+/// A peer that streams DATA without pause (the daemon broadcasts DATA to
+/// command-role clients) never makes its socket unreadable; it must neither
+/// outlive the deadline nor starve the session next to it.
+#[test]
+fn batch_stats_bound_a_peer_that_floods_data() {
+    let root = TestRoot::new();
+    let answered = serve_once(
+        root.listen("ok"),
+        encode_status_response(&stats_body("ok-body")),
+    );
+    let flood = root.listen("flood");
+    let flooder = std::thread::spawn(move || {
+        let (mut stream, _) = flood.accept().expect("accept flooded client");
+        // Tiny packets make the reader's per-packet work outweigh the writer's.
+        let chunk: Vec<u8> = std::iter::repeat_n(encode_data(b"x"), 16 * 1024)
+            .flatten()
+            .collect();
+        // Ends once the batch drops its socket (EPIPE).
+        while stream.write_all(&chunk).is_ok() {}
+    });
+    let names: Vec<String> = ["flood", "ok"].map(String::from).to_vec();
+
+    let deadline = Duration::from_millis(500);
+    let start = Instant::now();
+    let results = query_stats_batch_in(root.path(), &names, deadline);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < deadline + Duration::from_millis(500),
+        "{elapsed:?}"
+    );
+    assert_eq!(
+        results[0].1.as_ref().err(),
+        Some(&ClientError::StatsTimeout("flood".into()))
+    );
+    assert_eq!(results[1].1.as_ref().expect("ok answers").name, "ok-body");
+    assert_eq!(answered.join().unwrap().type_, MessageType::Status);
+    drop(results);
+    flooder.join().unwrap();
 }
 
 /// The multiplexed probe answers what a blocking connect answers, and leaves a

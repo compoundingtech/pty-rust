@@ -216,47 +216,49 @@ fn write_request(
     Step::Reading(socket, PacketReader::new())
 }
 
-/// Drain what is readable now. The outcomes mirror
-/// [`query_status_json_at`] read for read.
+/// One read per readiness event, then back to the poll loop: a peer that
+/// streams non-STATUS packets without pause would otherwise keep this
+/// socket readable forever and starve both the shared deadline check and
+/// every other session. `PacketReader::feed` returns every complete packet
+/// it holds, so no buffered STATUS waits on a later wake-up. The outcomes
+/// mirror [`query_status_json_at`] read for read.
 fn read_response(
     mut socket: UnixStream,
     mut reader: PacketReader,
     buf: &mut [u8],
     name: &str,
 ) -> Step {
-    loop {
-        match socket.read(buf) {
-            Ok(0) => return Step::Done(Box::new(Err(ClientError::StatsTimeout(name.to_string())))),
-            Ok(n) => match reader.feed(&buf[..n]) {
-                Ok(packets) => {
-                    if let Some(p) = packets.iter().find(|p| p.type_ == MessageType::Status) {
-                        let json = String::from_utf8_lossy(&p.payload);
-                        return Step::Done(Box::new(
-                            serde_json::from_str(&json)
-                                .map_err(|_| ClientError::InvalidStats(name.to_string())),
-                        ));
-                    }
+    match socket.read(buf) {
+        Ok(0) => Step::Done(Box::new(Err(ClientError::StatsTimeout(name.to_string())))),
+        Ok(n) => match reader.feed(&buf[..n]) {
+            Ok(packets) => match packets.iter().find(|p| p.type_ == MessageType::Status) {
+                Some(p) => {
+                    let json = String::from_utf8_lossy(&p.payload);
+                    Step::Done(Box::new(
+                        serde_json::from_str(&json)
+                            .map_err(|_| ClientError::InvalidStats(name.to_string())),
+                    ))
                 }
-                Err(e) => {
-                    let _ = std::io::stderr().write_all(dropping_connection_line(&e).as_bytes());
-                    return Step::Done(Box::new(Err(ClientError::StatsTimeout(name.to_string()))));
-                }
+                None => Step::Reading(socket, reader),
             },
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                return Step::Reading(socket, reader);
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
-                return Step::Done(Box::new(Err(map_io_error(
-                    name,
-                    false,
-                    GoneSet::Strict,
-                    "read",
-                    None,
-                    &e,
-                ))));
+                let _ = std::io::stderr().write_all(dropping_connection_line(&e).as_bytes());
+                Step::Done(Box::new(Err(ClientError::StatsTimeout(name.to_string()))))
             }
+        },
+        Err(e)
+            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::Interrupted =>
+        {
+            Step::Reading(socket, reader)
         }
+        Err(e) => Step::Done(Box::new(Err(map_io_error(
+            name,
+            false,
+            GoneSet::Strict,
+            "read",
+            None,
+            &e,
+        )))),
     }
 }
 
