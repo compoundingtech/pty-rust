@@ -32,7 +32,7 @@ Both entry points compute one absolute deadline at entry (`now + budget`) and ru
 | --- | --- | --- |
 | `Connected(stream)` | `connect` returned 0 | Probe: reachable. Batch: write the request. |
 | `InProgress(stream)` | `EINPROGRESS` | Poll `POLLOUT`; any `revents` means done. `take_error()` gives `None` (connected) or the connect error. |
-| `Busy` | `EAGAIN` (full accept queue, Linux) or `EINTR` | Drop the socket; retry with a fresh socket next round. |
+| `Busy` | `EAGAIN` (full accept queue, Linux) or `EINTR` | Drop the socket; retry with a fresh socket once `RETRY_TICK` has passed. |
 | `Failed(err)` | any other errno, or an address or socket error | Final. `err` is what a blocking `UnixStream::connect` returns. |
 
 Socket setup:
@@ -46,10 +46,10 @@ Socket setup:
 
 Each round:
 
-1. Every socket still without a connection attempt, or marked `Busy`, gets a new `connect`. Outcomes that are final are recorded.
+1. Every socket still without a connection attempt gets a `connect`, and so does every `Busy` socket whose retry is due. A `Busy` outcome records the socket's next retry as the round's start plus `RETRY_TICK` (10 ms). Outcomes that are final are recorded.
 2. Every socket that is waiting on I/O goes into one `pollfd` array: `POLLOUT` while connecting or writing, `POLLIN` while reading.
 3. If the array is empty and no socket is `Busy`, the call returns.
-4. `poll_until(fds, deadline, retrying)` waits for the remaining time to the deadline, capped at `RETRY_TICK` (10 ms) when any socket is `Busy` (`PTY.REG-C02`, `PTY.REG-T01`). The timeout is rounded up to whole milliseconds, so a sub-millisecond remainder never becomes a busy spin.
+4. `poll_until(fds, deadline, next_retry)` waits until the earlier of the deadline and the earliest pending retry (`PTY.REG-C02`, `PTY.REG-T01`). The timeout is rounded up to whole milliseconds, so a sub-millisecond remainder never becomes a busy spin. The retry time is per socket, not a cap on the wait: when another socket stays ready (a peer that floods data), `poll(2)` returns at once every round, and a `Busy` socket is still reconnected at most once per `RETRY_TICK`.
 5. Each socket with non-zero `revents` advances one step, doing at most one read or one write pass, then yields to the next socket. Sockets with zero `revents` wait for the next round. A round therefore does bounded work per socket, and every round starts with the deadline check in `poll_until`: a peer that stays ready forever cannot hold the loop or starve the other sockets (`PTY.REG-R06`).
 
 `poll_until` returns false, and the call stops, when the deadline has passed or `poll(2)` fails with anything but `EINTR`. On `EINTR` it clears every `revents`, because they are unspecified after a failed poll, and the loop runs another round. Sockets without an outcome when the loop stops count as unanswered.
@@ -133,7 +133,7 @@ The one intended difference (`PTY.REG-T02`): the single read issues a blocking c
 
 | Concern | Source |
 | --- | --- |
-| Non-blocking connect, poll step, retry tick | `crates/pty-core/src/unix_connect.rs` (crate-private) — `Connect`, `connect`, `poll_until`, `RETRY_TICK` |
+| Non-blocking connect, poll step, retry tick | `crates/pty-core/src/unix_connect.rs` (crate-private) — `Connect`, `connect`, `poll_until`, `RETRY_TICK`; `busy_connects_on_this_thread` (hidden, test-only count of `Busy` outcomes) |
 | Probe | `crates/pty-core/src/registry/list.rs` — `probe_sockets_within_budget`, `socket_reachable`, `DEFAULT_SOCKET_PROBE_BUDGET`, `SOCKET_PROBE_TIMEOUT` |
 | Batch STATUS | `crates/pty-core/src/client/stats.rs` — `query_stats_batch_in`, `Step`, `begin`, `write_request`, `read_response` |
 | Single STATUS read | `crates/pty-core/src/client/stats.rs` — `query_stats_in_with_timeout`, `query_status_json_at` |
@@ -147,3 +147,4 @@ The one intended difference (`PTY.REG-T02`): the single read issues a blocking c
 | `PTY.REG-R03` | Measured, not tested: [decision 0014](../../decisions/0014-registry-reads-run-on-the-callers-thread.md). |
 | `PTY.REG-R04`, `PTY.REG-R05`, `PTY.REG-R07` | `crates/pty-core/tests/observation_roots.rs::socket_probe_matches_a_blocking_connect` |
 | `PTY.REG-R06`, `PTY.REG-R08` | `crates/pty-core/tests/observation_roots.rs::batch_stats_bound_every_session_by_one_deadline`, `batch_stats_bound_a_peer_that_floods_data` |
+| `PTY.REG-T01` | `crates/pty-core/tests/observation_roots.rs::batch_stats_throttle_busy_retries_beside_a_flooding_peer` |

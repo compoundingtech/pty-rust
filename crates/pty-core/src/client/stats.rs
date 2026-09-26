@@ -63,13 +63,14 @@ pub fn query_stats_batch_in(
     names: &[String],
     deadline: Duration,
 ) -> Vec<(String, Result<StatsResult, ClientError>)> {
-    let deadline = Instant::now() + deadline;
+    let start = Instant::now();
+    let deadline = start + deadline;
     let request = encode_status();
     let mut queries: Vec<BatchQuery> = names
         .iter()
         .map(|name| BatchQuery {
             path: root.join(format!("{name}.sock")),
-            step: Step::Connect,
+            step: Step::Connect(start),
         })
         .collect();
     let mut polled: Vec<usize> = Vec::with_capacity(queries.len());
@@ -78,14 +79,17 @@ pub fn query_stats_batch_in(
     loop {
         polled.clear();
         fds.clear();
-        let mut retrying = false;
+        let now = Instant::now();
+        let mut next_retry: Option<Instant> = None;
         for (i, (query, name)) in queries.iter_mut().zip(names).enumerate() {
-            if matches!(query.step, Step::Connect) {
-                query.step = begin(&query.path, name, &request);
+            if let Step::Connect(due) = query.step
+                && due <= now
+            {
+                query.step = begin(&query.path, name, &request, now);
             }
             let (fd, events) = match &query.step {
-                Step::Connect => {
-                    retrying = true;
+                Step::Connect(due) => {
+                    next_retry = Some(next_retry.map_or(*due, |at| at.min(*due)));
                     continue;
                 }
                 Step::Connecting(s) | Step::Writing(s, _) => (s.as_raw_fd(), libc::POLLOUT),
@@ -99,10 +103,10 @@ pub fn query_stats_batch_in(
                 revents: 0,
             });
         }
-        if fds.is_empty() && !retrying {
+        if fds.is_empty() && next_retry.is_none() {
             break;
         }
-        if !unix_connect::poll_until(&mut fds, deadline, retrying) {
+        if !unix_connect::poll_until(&mut fds, deadline, next_retry) {
             break;
         }
         for (pfd, &i) in fds.iter().zip(&polled) {
@@ -111,7 +115,7 @@ pub fn query_stats_batch_in(
             }
             let name = &names[i];
             let query = &mut queries[i];
-            query.step = match std::mem::replace(&mut query.step, Step::Connect) {
+            query.step = match std::mem::replace(&mut query.step, Step::Connect(deadline)) {
                 Step::Connecting(s) => match s.take_error() {
                     Ok(None) => write_request(s, 0, &request, name, &query.path),
                     Ok(Some(e)) | Err(e) => Step::Done(Box::new(Err(map_io_error(
@@ -149,8 +153,9 @@ struct BatchQuery {
 
 /// Where one batched STATUS query stands. Every stream is non-blocking.
 enum Step {
-    /// Not connected yet: the first attempt, or a retry after EAGAIN.
-    Connect,
+    /// Not connected yet: the first attempt, or a retry after EAGAIN, due at
+    /// the instant held (`RETRY_TICK` after the busy attempt).
+    Connect(Instant),
     /// EINPROGRESS; POLLOUT reports the outcome.
     Connecting(UnixStream),
     /// Connected, `usize` request bytes written.
@@ -160,11 +165,11 @@ enum Step {
     Done(Box<Result<StatsResult, ClientError>>),
 }
 
-fn begin(path: &Path, name: &str, request: &[u8]) -> Step {
+fn begin(path: &Path, name: &str, request: &[u8], now: Instant) -> Step {
     match unix_connect::connect(path) {
         Connect::Connected(s) => write_request(s, 0, request, name, path),
         Connect::InProgress(s) => Step::Connecting(s),
-        Connect::Busy => Step::Connect,
+        Connect::Busy => Step::Connect(now + unix_connect::RETRY_TICK),
         Connect::Failed(e) => Step::Done(Box::new(Err(map_io_error(
             name,
             false,

@@ -19,10 +19,10 @@ use pty_core::protocol::{
     MessageType, Packet, PacketReader, decode_peek, encode_data, encode_screen,
     encode_status_response,
 };
-use pty_core::query_stats_batch_in;
 use pty_core::registry::{
     ListOptions, SessionStatus, list_sessions_in, probe_sockets_within_budget,
 };
+use pty_core::{busy_connects_on_this_thread, query_stats_batch_in};
 use serde_json::json;
 
 const T: Duration = Duration::from_secs(5);
@@ -567,6 +567,44 @@ fn batch_stats_bound_a_peer_that_floods_data() {
     );
     assert_eq!(results[1].1.as_ref().expect("ok answers").name, "ok-body");
     assert_eq!(answered.join().unwrap().type_, MessageType::Status);
+    drop(results);
+    flooder.join().unwrap();
+}
+
+/// A flooding peer returns every poll at once; a session with a full accept
+/// queue beside it is still retried at most once per 10 ms retry tick, not on
+/// every round the flood drives.
+#[test]
+fn batch_stats_throttle_busy_retries_beside_a_flooding_peer() {
+    let root = TestRoot::new();
+    let flood = root.listen("flood");
+    let flooder = std::thread::spawn(move || {
+        let (mut stream, _) = flood.accept().expect("accept flooded client");
+        let chunk: Vec<u8> = std::iter::repeat_n(encode_data(b"x"), 16 * 1024)
+            .flatten()
+            .collect();
+        // Ends once the batch drops its socket (EPIPE).
+        while stream.write_all(&chunk).is_ok() {}
+    });
+    let (_backlog, _queued) = full_backlog(&root, "backlog");
+    let names: Vec<String> = ["flood", "backlog"].map(String::from).to_vec();
+
+    let deadline = Duration::from_millis(500);
+    let before = busy_connects_on_this_thread();
+    let results = query_stats_batch_in(root.path(), &names, deadline);
+    let busy = busy_connects_on_this_thread() - before;
+
+    // Attempts are at least one 10 ms tick apart and stop at the deadline:
+    // one at entry, one per tick, and slack for the round that crosses it.
+    let bound = (deadline.as_millis() / 10) as u64 + 2;
+    assert!(busy <= bound, "{busy} busy connects, bound {bound}");
+    if cfg!(target_os = "linux") {
+        assert!(busy >= 1, "the full queue was never tried");
+    }
+    assert_eq!(
+        results[0].1.as_ref().err(),
+        Some(&ClientError::StatsTimeout("flood".into()))
+    );
     drop(results);
     flooder.join().unwrap();
 }

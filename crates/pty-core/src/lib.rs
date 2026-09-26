@@ -35,3 +35,5 @@ mod unix_connect;
 pub mod unix_peer;
 
 pub use client::query_stats_batch_in;
+#[doc(hidden)]
+pub use unix_connect::busy_connects_on_this_thread;

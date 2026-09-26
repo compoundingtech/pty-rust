@@ -354,7 +354,9 @@ pub fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
 /// node: src/sessions.ts:2129-2175
 pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashMap<PathBuf, bool> {
     enum Probe {
-        Retry,
+        /// Connect due at the instant held: the first attempt, or
+        /// `RETRY_TICK` after a full accept queue.
+        Retry(Instant),
         InProgress(UnixStream),
         Answered,
     }
@@ -362,16 +364,20 @@ pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashM
     if paths.is_empty() {
         return results;
     }
-    let deadline = Instant::now() + budget;
-    let mut probes: Vec<Probe> = paths.iter().map(|_| Probe::Retry).collect();
+    let start = Instant::now();
+    let deadline = start + budget;
+    let mut probes: Vec<Probe> = paths.iter().map(|_| Probe::Retry(start)).collect();
     let mut polled: Vec<usize> = Vec::with_capacity(paths.len());
     let mut fds: Vec<libc::pollfd> = Vec::with_capacity(paths.len());
     loop {
         polled.clear();
         fds.clear();
-        let mut retrying = false;
+        let now = Instant::now();
+        let mut next_retry: Option<Instant> = None;
         for (i, (probe, path)) in probes.iter_mut().zip(paths).enumerate() {
-            if matches!(probe, Probe::Retry) {
+            if let Probe::Retry(due) = *probe
+                && due <= now
+            {
                 *probe = match unix_connect::connect(path) {
                     Connect::Connected(_) => {
                         results.insert(path.clone(), true);
@@ -382,11 +388,11 @@ pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashM
                         Probe::Answered
                     }
                     Connect::InProgress(stream) => Probe::InProgress(stream),
-                    Connect::Busy => {
-                        retrying = true;
-                        Probe::Retry
-                    }
+                    Connect::Busy => Probe::Retry(now + unix_connect::RETRY_TICK),
                 };
+            }
+            if let Probe::Retry(due) = *probe {
+                next_retry = Some(next_retry.map_or(due, |at| at.min(due)));
             }
             if let Probe::InProgress(stream) = probe {
                 polled.push(i);
@@ -397,10 +403,10 @@ pub fn probe_sockets_within_budget(paths: &[PathBuf], budget: Duration) -> HashM
                 });
             }
         }
-        if fds.is_empty() && !retrying {
+        if fds.is_empty() && next_retry.is_none() {
             break;
         }
-        if !unix_connect::poll_until(&mut fds, deadline, retrying) {
+        if !unix_connect::poll_until(&mut fds, deadline, next_retry) {
             break;
         }
         for (pfd, &i) in fds.iter().zip(&polled) {

@@ -16,8 +16,22 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// How often a connect that found the accept queue full is retried. Linux
-/// offers no readiness event for "the queue has room again".
-const RETRY_TICK: Duration = Duration::from_millis(10);
+/// offers no readiness event for "the queue has room again". Callers record
+/// `now + RETRY_TICK` per busy socket and reconnect only once it has passed,
+/// so another socket that stays ready cannot turn the retry into a spin.
+pub(crate) const RETRY_TICK: Duration = Duration::from_millis(10);
+
+std::thread_local! {
+    static BUSY_CONNECTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many connects on the calling thread have found an accept queue full
+/// ([`Connect::Busy`]). Test-only observability for the retry throttle; not a
+/// stable API.
+#[doc(hidden)]
+pub fn busy_connects_on_this_thread() -> u64 {
+    BUSY_CONNECTS.with(|n| n.get())
+}
 
 /// One non-blocking connect attempt.
 pub(crate) enum Connect {
@@ -63,24 +77,29 @@ pub(crate) fn connect(path: &Path) -> Connect {
         Some(libc::EINPROGRESS) => Connect::InProgress(UnixStream::from(fd)),
         // EINTR leaves the attempt in an unspecified state; a fresh socket on
         // the next round is simpler than resuming this one.
-        Some(libc::EAGAIN) | Some(libc::EINTR) => Connect::Busy,
+        Some(libc::EAGAIN) | Some(libc::EINTR) => {
+            BUSY_CONNECTS.with(|n| n.set(n.get() + 1));
+            Connect::Busy
+        }
         _ => Connect::Failed(err),
     }
 }
 
-/// Wait on `fds` until one is ready, `deadline` passes, or (when `retrying`
-/// busy connects) one retry tick elapses. Returns false when the deadline has
-/// passed or poll(2) failed with anything but EINTR: the caller stops and
-/// reports whatever is still pending as unanswered.
-pub(crate) fn poll_until(fds: &mut [libc::pollfd], deadline: Instant, retrying: bool) -> bool {
+/// Wait on `fds` until one is ready, `deadline` passes, or `next_retry` (the
+/// earliest instant a busy connect is due again) arrives. Returns false when
+/// the deadline has passed or poll(2) failed with anything but EINTR: the
+/// caller stops and reports whatever is still pending as unanswered.
+pub(crate) fn poll_until(
+    fds: &mut [libc::pollfd],
+    deadline: Instant,
+    next_retry: Option<Instant>,
+) -> bool {
     let now = Instant::now();
     if now >= deadline {
         return false;
     }
-    let mut wait = deadline - now;
-    if retrying {
-        wait = wait.min(RETRY_TICK);
-    }
+    let wake = next_retry.map_or(deadline, |at| at.min(deadline));
+    let wait = wake.saturating_duration_since(now);
     // Round up so a sub-millisecond remainder does not become a busy spin.
     let timeout_ms = wait
         .as_micros()
